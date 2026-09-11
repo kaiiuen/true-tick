@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/tick-core",
+    "crates/tick-policy",
 ]
 
 [workspace.package]
