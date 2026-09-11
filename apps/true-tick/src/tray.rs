@@ -37,8 +37,12 @@ const WM_SIZE: u32 = 0x0005;
 const WM_CLOSE: u32 = 0x0010;
 const WM_NCDESTROY: u32 = 0x0082;
 const WM_SETFOCUS: u32 = 0x0007;
+const WM_GETMINMAXINFO: u32 = 0x0024;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf0000;
 const WS_VISIBLE: u32 = 0x10000000;
+const WS_CLIPCHILDREN: u32 = 0x02000000;
+const WS_CLIPSIBLINGS: u32 = 0x04000000;
+const WS_EX_APPWINDOW: u32 = 0x00040000;
 const WS_CHILD: u32 = 0x40000000;
 const WS_VSCROLL: u32 = 0x00200000;
 const ES_MULTILINE: u32 = 0x0004;
@@ -587,7 +591,7 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
         ID_STOP => manual_stop(app),
         STATUS_COMMAND_ID => {
             app.record("tray.command", "command=status");
-            open_diagnostic_window(hwnd, app);
+            open_diagnostic_window(app);
         }
         ID_STARTUP_ON => set_startup(app, true),
         ID_STARTUP_OFF => set_startup(app, false),
@@ -615,7 +619,7 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
     }
 }
 
-unsafe fn open_diagnostic_window(parent: *mut c_void, app: &mut App) {
+unsafe fn open_diagnostic_window(app: &mut App) {
     if let Some(window) = app.diagnostic_window {
         ShowWindow(window, 1);
         SetForegroundWindow(window);
@@ -624,15 +628,15 @@ unsafe fn open_diagnostic_window(parent: *mut c_void, app: &mut App) {
     }
     let class_name = wide("TrueTickDiagnosticClass");
     let window = CreateWindowExW(
-        0,
+        WS_EX_APPWINDOW,
         class_name.as_ptr(),
-        wide("True Tick diagnostics").as_ptr(),
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        wide("True Tick Status and Diagnostics").as_ptr(),
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
         120,
         120,
         820,
         560,
-        parent,
+        std::ptr::null_mut(),
         std::ptr::null_mut(),
         GetModuleHandleW(std::ptr::null()),
         app as *mut App as *mut c_void,
@@ -652,8 +656,10 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &App) {
         return;
     }
     let mut text = format!(
-        "Current status: {}\r\nLog is local to this process session. Maximum events: {}\r\n\r\n",
+        "Current status: {}\r\nPower observation: {:?}\r\nStartup: {}\r\nSession log is local to this process. Maximum events: {}\r\n\r\n",
         app.tray_status.label(),
+        app.observation.power().state,
+        app.startup_status,
         app.diagnostics.maximum_events()
     );
     for event in app.diagnostics.snapshot() {
@@ -683,6 +689,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             WS_CHILD
                 | WS_VISIBLE
                 | WS_VSCROLL
+                | WS_CLIPCHILDREN
                 | ES_MULTILINE
                 | ES_READONLY
                 | ES_AUTOVSCROLL
@@ -707,6 +714,13 @@ unsafe extern "system" fn diagnostic_window_proc(
             let height = ((l_param as u32 >> 16) & 0xffff) as i32;
             let edit = GetWindow(hwnd, GW_CHILD);
             MoveWindow(edit, 0, 0, width, height, 1);
+        } else if message == WM_GETMINMAXINFO {
+            let limits = l_param as *mut MinMaxInfo;
+            if !limits.is_null() {
+                (*limits).minimum_track_size.x = 420;
+                (*limits).minimum_track_size.y = 260;
+            }
+            return 0;
         } else if message == WM_CLOSE {
             DestroyWindow(hwnd);
         } else if message == WM_SETFOCUS {
@@ -837,6 +851,15 @@ struct Message {
 struct Point {
     x: i32,
     y: i32,
+}
+
+#[repr(C)]
+struct MinMaxInfo {
+    reserved: Point,
+    maximum_size: Point,
+    maximum_position: Point,
+    minimum_track_size: Point,
+    maximum_track_size: Point,
 }
 
 #[link(name = "user32")]

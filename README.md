@@ -9,8 +9,11 @@ surface, atomically replaced local configuration, per-user boot startup
 registration, and a bounded portable A/B launcher scaffold. The compact tray
 menu exposes `Start`, `Stop`, current Auto-start and automatic timing activation
 toggles, a clickable short status item, and `Quit`. Status opens a normal taskbar
-diagnostic window without changing timer state. The native menu keeps the two
-setting toggles open after each toggle and closes for other commands. Start and Stop remain
+diagnostic window titled `True Tick Status and Diagnostics` without changing timer
+state. It is a normal taskbar window with standard title-bar controls, a resizable
+read-only status and session log view, and snapshot refresh on reopen. The native
+menu keeps the two setting toggles open after each toggle and closes for other
+commands. Start and Stop remain
 manual controls and use the same guarded policy and ownership lifecycle as automatic
 activation. The diagnostic window shows a bounded, local in-memory session log.
 It excludes raw pointers, private tokens, credentials, arbitrary secrets, and

@@ -20,9 +20,12 @@ and Quit. Start and Stop remain the core manual controls and use the same guarde
 policy and ownership lifecycle as automatic activation. The clickable status row
 opens a normal overlapped taskbar diagnostic window and never changes timer state.
 The two setting toggles use a non recursive return-command loop so the menu stays
-open after a toggle. Full
-system reports, config paths, raw HNS values, power explanations, and full errors
-remain excluded from the compact menu and tooltip.
+open after a toggle. The diagnostic window is a normal taskbar window titled
+`True Tick Status and Diagnostics`. It shows current status, power observation,
+startup result, and the bounded read-only session snapshot. Closing it destroys
+only the window and does not affect timer ownership. Full system reports, config
+paths, raw HNS values, power explanations, and full errors remain excluded from
+the compact menu and tooltip.
 
 Detailed evidence is recorded in a local bounded in-memory session log. Events have
 monotonic sequence numbers and elapsed process time. The default limit is 512
