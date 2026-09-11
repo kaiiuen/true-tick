@@ -55,7 +55,11 @@ installation and it is not the same as `automatic`, which controls timer
 activation after launch. Both settings are persisted through a flushed temporary
 file replacement. Parse and write failures are surfaced in the tray status.
 Missing or invalid A/B metadata requires repair and never defaults to slot A.
-True™ Time is not a dependency. Platform behavior that cannot be verified remains
+Startup registration validates launcher existence and executable identity before
+writing. If config persistence fails after a registry change, the inverse
+operation is attempted and failure is marked repair required. Initial power query
+errors are recorded with their native status and remain conservative unknown
+observation. True™ Time is not a dependency. Platform behavior that cannot be verified remains
 yellow or red rather than being reported as green. The tray maps running and
 verified ownership to green, starting, stopping, pending, degraded, or unverified
 behavior to yellow, and stopped, blocked, unsupported, or error behavior to red.

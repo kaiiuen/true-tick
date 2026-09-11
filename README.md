@@ -49,6 +49,13 @@ one power broadcast path. Battery Saver, session, lock, suspend, and resume
 notification coverage remains incomplete and is shown as unknown or degraded
 rather than claimed as fully observed.
 
+Startup registration validates that the target exists and is exactly
+`Launcher.exe` before writing the current-user value. Config persistence and the
+registry operation are kept transactionally consistent with a rollback attempt or
+an explicit repair-needed status. Initial power observation records success or the
+failure reason in the diagnostic log. A failed observation remains unknown and
+blocks acquisition.
+
 Active documentation is checked with `scripts/check_doc_punctuation.py`. The
 checker rejects em dash and semicolon characters and skips historical archive
 material.

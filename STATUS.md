@@ -28,7 +28,10 @@ a truncation marker, and defers disk persistence. Fields are sanitized and bound
 so raw pointers, credentials, private tokens, arbitrary secrets, and unbounded
 sensitive paths are not recorded.
 Configuration writes use a flushed temporary file replacement. Parse and write
-errors remain visible. Manual and automatic activation share the same policy.
+errors remain visible. Startup registration validates the existing `Launcher.exe`
+file before registry writes and attempts rollback if config persistence fails.
+Initial power observation records success or the native failure reason, and failed
+observation remains unknown and blocks acquisition. Manual and automatic activation share the same policy.
 Battery, Battery Saver, and unknown power states remain non-acquiring. A
 restrictive power transition or normal Quit attempts to release owned state and
 reports release failure as warning or stopped according to the truthful state map.
