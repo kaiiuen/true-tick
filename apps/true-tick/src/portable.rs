@@ -2,6 +2,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LauncherPathError {
+    NotAnAbSlotExecutable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Slot {
     A,
     B,
@@ -20,6 +25,22 @@ impl Slot {
 pub enum Selection {
     Selected { slot: Slot, path: PathBuf },
     RepairRequired(String),
+}
+
+pub fn launcher_path_from_slot_executable(executable: &Path) -> Result<PathBuf, LauncherPathError> {
+    let slot = executable
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str());
+    if !matches!(slot, Some("A" | "B")) {
+        return Err(LauncherPathError::NotAnAbSlotExecutable);
+    }
+    let root = executable
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or(LauncherPathError::NotAnAbSlotExecutable)?;
+    Ok(root.join("Launcher.exe"))
 }
 
 pub fn select(root: &Path) -> Selection {
@@ -51,6 +72,28 @@ pub fn select(root: &Path) -> Selection {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn launcher_path_uses_portable_root_not_slot_payload() {
+        let executable = PathBuf::from("portable-root")
+            .join("Slots")
+            .join("B")
+            .join("true-tick.exe");
+        assert_eq!(
+            launcher_path_from_slot_executable(&executable).unwrap(),
+            PathBuf::from("portable-root").join("Launcher.exe")
+        );
+    }
+
+    #[test]
+    fn launcher_path_rejects_unbounded_executable_shape() {
+        assert_eq!(
+            launcher_path_from_slot_executable(
+                &PathBuf::from("portable-root").join("true-tick.exe"),
+            ),
+            Err(LauncherPathError::NotAnAbSlotExecutable)
+        );
+    }
 
     #[test]
     fn invalid_active_slot_requires_repair() {

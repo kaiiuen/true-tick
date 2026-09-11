@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use tick_observation_windows::{ObservationSource, WindowsObservation};
 use tick_ownership::{TimerController, Verification};
 use tick_platform_windows::WindowsTimerPlatform;
-use tick_startup_windows::{StartupRegistration, WindowsUserStartup};
+use tick_startup_windows::{
+    startup_operation, StartupOperation, StartupRegistration, WindowsUserStartup,
+};
 
 const WM_APP: u32 = 0x8000;
 const WM_TRAY: u32 = WM_APP + 1;
@@ -78,16 +80,23 @@ pub fn run() {
         let executable = get_module_file_name_w_path();
         let config_path = config::path_from_executable(&executable);
         let loaded = config::load(&config_path).unwrap_or_default();
-        let startup_status = if loaded.startup_enabled {
-            match WindowsUserStartup::default().register(&executable) {
-                Ok(()) => "boot startup registered for the current user".to_owned(),
-                Err(error) => format!("Red: boot startup registration error {error:?}"),
+        let startup_status = match startup_operation(loaded.startup_enabled) {
+            StartupOperation::Register => {
+                match crate::portable::launcher_path_from_slot_executable(&executable) {
+                    Ok(launcher) => match WindowsUserStartup::default().register(&launcher) {
+                        Ok(()) => {
+                            "boot startup registered for the current-user Launcher.exe entry point"
+                                .to_owned()
+                        }
+                        Err(error) => format!("Red: boot startup registration error {error:?}"),
+                    },
+                    Err(error) => format!("Red: portable launcher path unavailable {error:?}"),
+                }
             }
-        } else {
-            match WindowsUserStartup::default().remove() {
+            StartupOperation::Remove => match WindowsUserStartup::default().remove() {
                 Ok(()) => "boot startup registration disabled by config".to_owned(),
                 Err(error) => format!("Red: boot startup removal error {error:?}"),
-            }
+            },
         };
         let portable_status = match crate::portable::select(
             executable

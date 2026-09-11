@@ -15,6 +15,14 @@ pub enum StartupOperation {
     Remove,
 }
 
+pub fn startup_operation(enabled: bool) -> StartupOperation {
+    if enabled {
+        StartupOperation::Register
+    } else {
+        StartupOperation::Remove
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StartupError {
     Unsupported,
@@ -168,11 +176,17 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn startup_command_is_quoted() {
+    fn startup_command_targets_quoted_portable_launcher() {
         assert_eq!(
-            startup_command(&PathBuf::from(r"C:\Tick\true-tick.exe")).unwrap(),
-            r#""C:\Tick\true-tick.exe""#
+            startup_command(&PathBuf::from(r"C:\Tick\Launcher.exe")).unwrap(),
+            r#""C:\Tick\Launcher.exe""#
         );
+    }
+
+    #[test]
+    fn startup_state_maps_to_registration_or_removal() {
+        assert_eq!(startup_operation(true), StartupOperation::Register);
+        assert_eq!(startup_operation(false), StartupOperation::Remove);
     }
 
     #[test]
