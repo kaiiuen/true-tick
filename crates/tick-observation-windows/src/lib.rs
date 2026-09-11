@@ -47,8 +47,8 @@ impl ObservationSource for WindowsObservation {
     fn refresh_power(&mut self) -> Result<PowerSnapshot, CoreError> {
         #[cfg(windows)]
         {
-            self.power = query_power();
-            return Ok(self.power);
+            self.power = query_power()?;
+            Ok(self.power)
         }
         #[cfg(not(windows))]
         {
@@ -58,7 +58,7 @@ impl ObservationSource for WindowsObservation {
 }
 
 #[cfg(windows)]
-fn query_power() -> PowerSnapshot {
+fn query_power() -> Result<PowerSnapshot, CoreError> {
     let mut status = SystemPowerStatus {
         ac_line_status: 255,
         battery_flag: 255,
@@ -69,10 +69,9 @@ fn query_power() -> PowerSnapshot {
     };
     let ok = unsafe { GetSystemPowerStatus(&mut status) } != 0;
     if !ok {
-        return PowerSnapshot {
-            state: PowerState::Unknown,
-            battery_saver: None,
-        };
+        return Err(CoreError::ObservationFailed {
+            raw_status: unsafe { GetLastError() },
+        });
     }
     let battery_saver = Some(status.system_status_flag & 1 != 0);
     let base_state = match status.ac_line_status {
@@ -85,10 +84,10 @@ fn query_power() -> PowerSnapshot {
     } else {
         base_state
     };
-    PowerSnapshot {
+    Ok(PowerSnapshot {
         state,
         battery_saver,
-    }
+    })
 }
 
 #[cfg(windows)]
@@ -105,6 +104,7 @@ struct SystemPowerStatus {
 #[cfg(windows)]
 extern "system" {
     fn GetSystemPowerStatus(status: *mut SystemPowerStatus) -> i32;
+    fn GetLastError() -> u32;
 }
 
 #[cfg(test)]

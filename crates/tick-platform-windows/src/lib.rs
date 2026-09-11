@@ -107,7 +107,7 @@ impl TimerPlatform for WindowsTimerPlatform {
                 return Err(error);
             }
             self.log("timer.preflight.accepted", "interval within native bounds");
-            return Ok(bounds);
+            Ok(bounds)
         }
         #[cfg(not(windows))]
         {
@@ -155,7 +155,7 @@ impl TimerPlatform for WindowsTimerPlatform {
                 "timer.postcondition.verified",
                 format!("reported_hns={}", observation.reported_current.value()),
             );
-            return Ok(observation);
+            Ok(observation)
         }
         #[cfg(not(windows))]
         {
@@ -187,11 +187,11 @@ impl TimerPlatform for WindowsTimerPlatform {
                 return Err(TimerError::ReleaseFailed { raw_status: status });
             }
             self.requested = None;
-            return Ok(TimerObservation {
+            Ok(TimerObservation {
                 requested: interval,
                 reported_current: Hns::new(current as u64),
                 raw_status: status,
-            });
+            })
         }
         #[cfg(not(windows))]
         {

@@ -74,6 +74,7 @@ pub enum Event {
 pub enum CoreError {
     InvalidLifecycleTransition,
     Unsupported,
+    ObservationFailed { raw_status: u32 },
 }
 
 impl fmt::Display for CoreError {
@@ -81,6 +82,12 @@ impl fmt::Display for CoreError {
         match self {
             Self::InvalidLifecycleTransition => write!(formatter, "invalid lifecycle transition"),
             Self::Unsupported => write!(formatter, "operation unsupported by this skeleton"),
+            Self::ObservationFailed { raw_status } => {
+                write!(
+                    formatter,
+                    "power observation failed with status {raw_status}"
+                )
+            }
         }
     }
 }

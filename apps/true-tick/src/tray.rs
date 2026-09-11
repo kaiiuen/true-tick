@@ -224,7 +224,22 @@ pub fn run() {
         };
 
         let mut observation = WindowsObservation::default();
-        let _ = observation.refresh_power();
+        let power_observation_error = match observation.refresh_power() {
+            Ok(snapshot) => {
+                diagnostics.record(
+                    "power.initial_observation",
+                    format!("result=success state={:?}", snapshot.state),
+                );
+                None
+            }
+            Err(error) => {
+                diagnostics.record(
+                    "power.initial_observation",
+                    format!("result=error reason={error}"),
+                );
+                Some(error)
+            }
+        };
         let app = Box::new(App {
             controller: TimerController::new(
                 WindowsTimerPlatform::with_diagnostics(diagnostics.clone()),
@@ -234,6 +249,8 @@ pub fn run() {
             config: loaded,
             tray_status: if startup_status.starts_with("Red") {
                 TrayStatus::Error
+            } else if power_observation_error.is_some() {
+                TrayStatus::Degraded
             } else {
                 TrayStatus::Pending
             },
@@ -822,8 +839,28 @@ fn set_startup(app: &mut App, enabled: bool) {
     next.startup_enabled = enabled;
     if let Err(error) = config::save_atomic(&app.config_path, &next) {
         app.record("config.save.result", format!("result=error error={error}"));
-        app.startup_status = "startup config error".into();
-        app.tray_status = TrayStatus::Stopped;
+        let rollback = if enabled {
+            WindowsUserStartup::default().remove()
+        } else {
+            match crate::portable::launcher_path_from_slot_executable(&app.executable) {
+                Ok(launcher) => WindowsUserStartup::default().register(&launcher),
+                Err(_) => Err(tick_startup_windows::StartupError::InvalidExecutablePath),
+            }
+        };
+        app.record(
+            "startup.registration.rollback",
+            format!("result={rollback:?}"),
+        );
+        app.startup_status = if rollback.is_ok() {
+            "startup config persistence failed, registry change rolled back".into()
+        } else {
+            "startup config persistence failed, repair required".into()
+        };
+        app.tray_status = if rollback.is_ok() {
+            TrayStatus::Error
+        } else {
+            TrayStatus::Unverified
+        };
         app.publish();
         return;
     }

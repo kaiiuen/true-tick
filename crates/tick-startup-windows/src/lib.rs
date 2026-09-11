@@ -27,6 +27,8 @@ pub fn startup_operation(enabled: bool) -> StartupOperation {
 pub enum StartupError {
     Unsupported,
     InvalidExecutablePath,
+    LauncherMissing,
+    NotLauncher,
     OpenKey { raw_status: u32 },
     SetValue { raw_status: u32 },
     RemoveValue { raw_status: u32 },
@@ -44,6 +46,7 @@ impl StartupRegistration for WindowsUserStartup {
     fn register(&mut self, executable: &Path) -> Result<(), StartupError> {
         #[cfg(windows)]
         {
+            validate_launcher_path(executable)?;
             let command = startup_command(executable)?;
             let key = open_run_key()?;
             let name = wide(VALUE_NAME);
@@ -64,7 +67,7 @@ impl StartupRegistration for WindowsUserStartup {
             if status != ERROR_SUCCESS {
                 return Err(StartupError::SetValue { raw_status: status });
             }
-            return Ok(());
+            Ok(())
         }
         #[cfg(not(windows))]
         {
@@ -83,15 +86,33 @@ impl StartupRegistration for WindowsUserStartup {
                 RegCloseKey(key);
             }
             if status == ERROR_FILE_NOT_FOUND || status == ERROR_SUCCESS {
-                return Ok(());
+                Ok(())
+            } else {
+                Err(StartupError::RemoveValue { raw_status: status })
             }
-            return Err(StartupError::RemoveValue { raw_status: status });
         }
         #[cfg(not(windows))]
         {
             Err(StartupError::Unsupported)
         }
     }
+}
+
+fn validate_launcher_path(executable: &Path) -> Result<(), StartupError> {
+    let name = executable
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or(StartupError::InvalidExecutablePath)?;
+    if !name.eq_ignore_ascii_case("Launcher.exe") {
+        return Err(StartupError::NotLauncher);
+    }
+    if !executable.exists() {
+        return Err(StartupError::LauncherMissing);
+    }
+    if !executable.is_file() {
+        return Err(StartupError::InvalidExecutablePath);
+    }
+    Ok(())
 }
 
 fn startup_command(executable: &Path) -> Result<String, StartupError> {
@@ -195,6 +216,26 @@ mod tests {
             startup_command(&PathBuf::from(r#"C:\bad"name\true-tick.exe"#)),
             Err(StartupError::InvalidExecutablePath)
         );
+    }
+
+    #[test]
+    fn launcher_validation_checks_identity_and_presence() {
+        let root = std::env::temp_dir().join(format!("true-tick-startup-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let wrong = root.join("true-tick.exe");
+        std::fs::write(&wrong, b"fixture").unwrap();
+        assert_eq!(
+            validate_launcher_path(&wrong),
+            Err(StartupError::NotLauncher)
+        );
+        let launcher = root.join("Launcher.exe");
+        assert_eq!(
+            validate_launcher_path(&launcher),
+            Err(StartupError::LauncherMissing)
+        );
+        std::fs::write(&launcher, b"fixture").unwrap();
+        assert_eq!(validate_launcher_path(&launcher), Ok(()));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
