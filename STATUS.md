@@ -29,7 +29,11 @@ activation. The tray tooltip and status menu use actual concise timing values su
 as `Running (0.500 ms)`, `Running (0.497 ms, finer)`,
 `Stopped (current: 0.497 ms)`, `Starting (0.500 ms)`,
 `Stopping (current: 0.497 ms)`, and `Error (invalid interval)`. They use
-`unknown` when no observation exists. Query, request, release, and power
+`unknown` when no observation exists. After a successful request, the returned
+verified effective observation replaces the preflight current value in the
+controller and app snapshot. Release observations update that same snapshot. A
+remaining finer or different value is displayed as external effective state and
+does not claim Tick ownership. Query, request, release, and power
 reconciliation observations are carried through controller and app state. Full
 system reports, raw HNS values, power explanations, and full errors remain in the
 diagnostic window. Its local session log records automatic selection, raw native
@@ -37,9 +41,11 @@ boundaries, selected HNS, requested HNS, effective HNS, and an `equal`, `finer`,
 or `unverified` effective relation. The window shows a local in-memory session log
 from process start through the current moment. It uses monotonic sequence numbers
 and elapsed process time, has a default 512 event bound, retains newest events with
-a truncation marker, and defers disk persistence. Fields are sanitized and bounded
-so raw pointers, credentials, private tokens, arbitrary secrets, and unbounded
-sensitive paths are not recorded.
+a truncation marker, and defers disk persistence. The diagnostic header uses the
+latest verified effective observation and keeps requested HNS, selected HNS,
+effective HNS, raw boundaries, raw status, and relation distinct. Fields are
+sanitized and bounded so raw pointers, credentials, private tokens, arbitrary
+secrets, and unbounded sensitive paths are not recorded.
 Configuration writes use a flushed temporary file replacement. Parse and write
 errors remain visible. Portable startup registration validates the existing
 `Launcher.exe` file before registry writes. The debug fallback validates the

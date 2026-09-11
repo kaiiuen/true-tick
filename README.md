@@ -65,14 +65,21 @@ It excludes raw pointers, private tokens, credentials, arbitrary secrets, and
 unbounded sensitive paths. The tooltip and status menu use short runtime timing values such as `Running
 (0.500 ms)`, `Running (0.497 ms, finer)`, `Stopped (current: 0.497 ms)`,
 `Starting (0.500 ms)`, `Stopping (current: 0.497 ms)`, or `Error (invalid
-interval)`. Values reflect the selected and effective observations, and another
-platform boundary is allowed. The captured `current_hns=9966` value was about
-`0.997 ms` because the old config requested `10000 HNS`. That config is migrated
-to automatic selection. They use `unknown` when no observation is available and never show
+interval)`. Values use the selected request and the latest verified effective
+observation as distinct fields, and another platform boundary is allowed. After a
+successful request, the returned effective observation replaces the preflight
+current value in controller and app state. After release, the returned current
+observation is retained as effective external state when another client remains
+finer or otherwise active, without implying Tick ownership. The captured
+`current_hns=9966` value was about `0.997 ms` because the old config requested
+`10000 HNS`. That config is migrated to automatic selection. They use `unknown` when no observation is available and never show
 raw HNS or full logs. The local diagnostic session records automatic selection,
-raw native boundaries, selected HNS, requested HNS, effective HNS, and an
-`equal`, `finer`, or `unverified` effective relation. Query, request, release,
-and power reconciliation observations are carried through controller and app state. A reported current
+raw native boundaries, selected HNS, requested HNS, effective HNS, raw status,
+and an `equal`, `finer`, or `unverified` effective relation. The tooltip, status
+summary, and diagnostic header use the latest verified effective observation from
+request, release, query, or power reconciliation. Query, request, release, and
+power reconciliation observations are carried through controller and app state.
+A reported current
 value at or below the requested value is satisfied, with a lower value labeled
 finer. A higher value remains unverified. Unsupported native timer capability
 is surfaced as `Unsupported`, while error, blocked, degraded, unverified,

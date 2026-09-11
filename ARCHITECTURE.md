@@ -49,13 +49,16 @@ same window, and refreshes its snapshot. The style contract is source-tested, bu
 actual taskbar appearance and runtime control behavior remain unverified because
 validation does not launch the app. Closing it destroys only the window and
 does not affect timer ownership. Full system reports, config paths, raw HNS values,
-power explanations, and full errors remain excluded from the compact menu and tooltip. The local diagnostic session records automatic selection, raw native boundaries, selected HNS, requested HNS, effective HNS, and an `equal`, `finer`, or `unverified` effective relation.
+power explanations, and full errors remain excluded from the compact menu and tooltip. The local diagnostic session records automatic selection, raw native boundaries, selected HNS, requested HNS, effective HNS, raw status, and an `equal`, `finer`, or `unverified` effective relation. After a successful request, the controller replaces the preflight current observation with the returned verified effective observation. Release also retains its returned current observation so the UI can show a remaining external effective state without claiming Tick ownership.
 
 Detailed evidence is recorded in a local bounded in-memory session log. Events have
 monotonic sequence numbers and elapsed process time. The default limit is 512
 events, with newest-event retention and one truncation marker. The store sanitizes
 control layout and bounds each field. Disk persistence for a full session log is
-deferred. The UI refreshes from a current snapshot and shows the current tray state.
+deferred. The UI refreshes from a current snapshot and shows the current tray state. The
+status tooltip and diagnostic header use the latest verified effective observation
+in that shared snapshot, not a stale preflight query. Requested, selected,
+effective, raw boundaries, raw status, and relation remain distinct.
 Status icon canvases use the current display DPI where available. The policy maps
 100, 125, 150, 200, and 400 percent to 16, 20, 24, 32, and 64 pixel canvases,
 then clamps intermediate values to the nearest supported size. Status colors remain
