@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tick_diagnostics::{format_event, DiagnosticStore, DEFAULT_MAX_EVENTS};
 use tick_observation_windows::{ObservationSource, WindowsObservation};
-use tick_ownership::{TimerController, Verification};
+use tick_ownership::{OwnershipState, TimerController, Verification};
 use tick_platform_windows::WindowsTimerPlatform;
 use tick_policy::{decide, PolicyInput, PowerState};
 use tick_startup_windows::{
@@ -66,6 +66,8 @@ const GWLP_USERDATA: i32 = -21;
 const GW_CHILD: u32 = 5;
 const IDI_APPLICATION: usize = 32512;
 const MB_ICONWARNING: u32 = 0x0000_0030;
+const TASKDIALOG_BUTTON_CANCEL: i32 = 1;
+const TASKDIALOG_BUTTON_STOP_AND_QUIT: i32 = 2;
 
 #[repr(C)]
 struct NotifyIconData {
@@ -84,6 +86,40 @@ struct NotifyIconData {
     dw_info_flags: u32,
     guid: [u8; 16],
     h_balloon_icon: *mut c_void,
+}
+
+#[repr(C)]
+#[repr(C)]
+struct TaskDialogButton {
+    button_id: i32,
+    button_text: *const u16,
+}
+
+#[repr(C)]
+struct TaskDialogConfig {
+    size: u32,
+    parent: *mut c_void,
+    instance: *mut c_void,
+    flags: u32,
+    common_buttons: u32,
+    window_title: *const u16,
+    main_icon: *const u16,
+    main_instruction: *const u16,
+    content: *const u16,
+    button_count: u32,
+    buttons: *const TaskDialogButton,
+    default_button: i32,
+    radio_button_count: u32,
+    radio_buttons: *const c_void,
+    default_radio_button: i32,
+    verification_text: *const u16,
+    expanded_information: *const u16,
+    expanded_control_text: *const u16,
+    collapsed_control_text: *const u16,
+    footer: *const u16,
+    callback: *const c_void,
+    callback_data: isize,
+    width: u32,
 }
 
 #[repr(C)]
@@ -460,10 +496,10 @@ impl App {
         if self.shutdown_cleanup_done {
             return Ok(());
         }
-        self.shutdown_cleanup_done = true;
-        self.record("shutdown.cleanup", "attempt=one_time");
+        self.record("shutdown.cleanup", "attempt=guarded");
         match self.controller.stop() {
             Ok(released) => {
+                self.shutdown_cleanup_done = true;
                 self.record(
                     "shutdown.cleanup.result",
                     format!("result=verified released={released}"),
@@ -667,18 +703,40 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
         ID_QUIT => {
             app.record("tray.command", "command=quit");
             app.record("lifecycle.shutdown_request", "source=tray");
-            if let Err(error) = app.cleanup_normal_shutdown() {
-                let message = format!(
-                    "Normal shutdown release failed. Tick ownership is unverified.\n\n{error}"
-                );
-                MessageBoxW(
-                    hwnd,
-                    wide(&message).as_ptr(),
-                    wide("True Tick shutdown warning").as_ptr(),
-                    MB_ICONWARNING,
-                );
+            app.record("quit.requested", "source=tray");
+            if quit_requires_confirmation(app) {
+                app.record("quit.warning.shown", "reason=active_or_uncertain");
+                match show_quit_warning(hwnd) {
+                    TASKDIALOG_BUTTON_STOP_AND_QUIT => {
+                        app.record("quit.stop_and_quit.selected", "result=selected");
+                        match app.cleanup_normal_shutdown() {
+                            Ok(()) => {
+                                app.record("quit.release.result", "result=verified");
+                                PostQuitMessage(0);
+                            }
+                            Err(error) => {
+                                app.record(
+                                    "quit.blocked.uncertain_cleanup",
+                                    format!("error={error}"),
+                                );
+                                let message = format!(
+                                    "Tick could not verify a safe stop. The app remains open.\n\n{error}"
+                                );
+                                MessageBoxW(
+                                    hwnd,
+                                    wide(&message).as_ptr(),
+                                    wide("True Tick quit warning").as_ptr(),
+                                    MB_ICONWARNING,
+                                );
+                            }
+                        }
+                    }
+                    _ => app.record("quit.cancel.selected", "result=cancelled"),
+                }
+            } else {
+                app.record("quit.release.result", "result=not_needed");
+                PostQuitMessage(0);
             }
-            PostQuitMessage(0);
         }
         _ => {}
     }
@@ -891,6 +949,71 @@ fn set_startup(app: &mut App, enabled: bool) {
     app.publish();
 }
 
+fn quit_requires_confirmation(app: &App) -> bool {
+    app.controller.ownership() != OwnershipState::Released
+        || matches!(
+            app.tray_status,
+            TrayStatus::Running
+                | TrayStatus::Starting
+                | TrayStatus::Stopping
+                | TrayStatus::Unverified
+                | TrayStatus::Degraded
+        )
+}
+
+unsafe fn show_quit_warning(hwnd: *mut c_void) -> i32 {
+    let cancel = wide("Cancel");
+    let stop_and_quit = wide("Stop and Quit");
+    let buttons = [
+        TaskDialogButton {
+            button_id: TASKDIALOG_BUTTON_CANCEL,
+            button_text: cancel.as_ptr(),
+        },
+        TaskDialogButton {
+            button_id: TASKDIALOG_BUTTON_STOP_AND_QUIT,
+            button_text: stop_and_quit.as_ptr(),
+        },
+    ];
+    let title = wide("True Tick quit warning");
+    let instruction = wide("Stop timing before quitting?");
+    let content = wide(
+        "Timing is active or ownership is uncertain. Quit only after a safe stop is verified.",
+    );
+    let config = TaskDialogConfig {
+        size: size_of::<TaskDialogConfig>() as u32,
+        parent: hwnd,
+        instance: std::ptr::null_mut(),
+        flags: 0,
+        common_buttons: 0,
+        window_title: title.as_ptr(),
+        main_icon: std::ptr::null(),
+        main_instruction: instruction.as_ptr(),
+        content: content.as_ptr(),
+        button_count: buttons.len() as u32,
+        buttons: buttons.as_ptr(),
+        default_button: TASKDIALOG_BUTTON_CANCEL,
+        radio_button_count: 0,
+        radio_buttons: std::ptr::null(),
+        default_radio_button: 0,
+        verification_text: std::ptr::null(),
+        expanded_information: std::ptr::null(),
+        expanded_control_text: std::ptr::null(),
+        collapsed_control_text: std::ptr::null(),
+        footer: std::ptr::null(),
+        callback: std::ptr::null(),
+        callback_data: 0,
+        width: 0,
+    };
+    let mut selected = TASKDIALOG_BUTTON_CANCEL;
+    let _ = TaskDialogIndirect(
+        &config,
+        &mut selected,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+    );
+    selected
+}
+
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -1002,6 +1125,16 @@ extern "system" {
     fn GetModuleHandleW(name: *const u16) -> *mut c_void;
     fn CreateIconIndirect(info: *const IconInfo) -> *mut c_void;
     fn DestroyIcon(icon: *mut c_void) -> i32;
+}
+
+#[link(name = "comctl32")]
+extern "system" {
+    fn TaskDialogIndirect(
+        config: *const TaskDialogConfig,
+        button: *mut i32,
+        radio_button: *mut i32,
+        verification_flag: *mut i32,
+    ) -> i32;
 }
 
 #[link(name = "shell32")]
