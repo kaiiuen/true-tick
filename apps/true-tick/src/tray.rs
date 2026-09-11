@@ -662,6 +662,8 @@ unsafe extern "system" fn window_proc(
 }
 
 unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
+    let mut anchor = Point { x: 0, y: 0 };
+    GetCursorPos(&mut anchor);
     loop {
         let menu = CreatePopupMenu();
         let items = menu_items(
@@ -703,22 +705,20 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
         );
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(menu, MF_STRING, ID_QUIT, wide(items[5].label).as_ptr());
-        let mut point = Point { x: 0, y: 0 };
-        GetCursorPos(&mut point);
         SetForegroundWindow(hwnd);
         let command = TrackPopupMenu(
             menu,
             TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_RETURNCMD,
-            point.x,
-            point.y,
+            anchor.x,
+            anchor.y,
             0,
             hwnd,
             std::ptr::null(),
-        ) as usize;
+        );
         DestroyMenu(menu);
-        if command == 0 {
+        let Some(command) = returned_menu_command(command) else {
             break;
-        }
+        };
         handle_menu_command(hwnd, app, command);
         if !menu_action_keeps_open(command) {
             break;
@@ -727,6 +727,7 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
 }
 
 unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) {
+    app.record("tray.command.id", format!("id={command}"));
     match command {
         ID_START => manual_start(app),
         ID_STOP => manual_stop(app),
@@ -922,19 +923,43 @@ fn set_automatic(app: &mut App, enabled: bool) {
         format!("command=automatic enabled={enabled}"),
     );
     app.record(
+        "toggle.requested",
+        format!("setting=automatic requested={enabled}"),
+    );
+    app.record(
         "policy.automatic_setting_changed",
         format!("enabled={enabled}"),
     );
     let mut next = app.config.clone();
     next.automatic = enabled;
     if let Err(error) = config::save_atomic(&app.config_path, &next) {
-        app.record("config.save.result", format!("result=error error={error}"));
+        app.record(
+            "config.save.result",
+            format!("result=error setting=automatic error={error}"),
+        );
+        app.record(
+            "toggle.result",
+            format!(
+                "setting=automatic value={} result=unchanged",
+                app.config.automatic
+            ),
+        );
         app.tray_status = TrayStatus::Error;
         app.publish();
         return;
     }
-    app.record("config.save.result", "result=success setting=automatic");
+    app.record(
+        "config.save.result",
+        format!("result=success setting=automatic value={enabled}"),
+    );
     app.config = next;
+    app.record(
+        "toggle.result",
+        format!(
+            "setting=automatic value={} result=applied",
+            app.config.automatic
+        ),
+    );
     if enabled {
         reconcile(app);
     } else {
@@ -1075,6 +1100,10 @@ unsafe fn show_quit_warning(hwnd: *mut c_void) -> i32 {
         std::ptr::null_mut(),
     );
     selected
+}
+
+fn returned_menu_command(result: i32) -> Option<usize> {
+    (result > 0).then_some(result as usize)
 }
 
 fn wide(value: &str) -> Vec<u16> {
@@ -1254,6 +1283,17 @@ extern "system" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn returned_popup_command_is_dispatched_once_as_an_optional_id() {
+        assert_eq!(returned_menu_command(0), None);
+        assert_eq!(returned_menu_command(-1), None);
+        assert_eq!(returned_menu_command(ID_START as i32), Some(ID_START));
+        assert_eq!(
+            returned_menu_command(ID_AUTOMATIC_OFF as i32),
+            Some(ID_AUTOMATIC_OFF)
+        );
+    }
 
     #[test]
     fn diagnostic_window_contract_is_normal_and_taskbar_visible() {
