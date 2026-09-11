@@ -12,6 +12,7 @@ use tick_startup_windows::{
 
 const WM_APP: u32 = 0x8000;
 const WM_TRAY: u32 = WM_APP + 1;
+const WM_CREATE: u32 = 0x0001;
 const WM_COMMAND: u32 = 0x0111;
 const WM_DESTROY: u32 = 0x0002;
 const WM_RBUTTONUP: usize = 0x0205;
@@ -53,6 +54,30 @@ struct NotifyIconData {
 }
 
 #[repr(C)]
+struct CreateStruct {
+    create_params: *mut c_void,
+    instance: *mut c_void,
+    menu: *mut c_void,
+    parent: *mut c_void,
+    height: i32,
+    width: i32,
+    y: i32,
+    x: i32,
+    style: u32,
+    name: *const u16,
+    class_name: *const u16,
+    extended_style: u32,
+}
+
+fn app_create_params(create: *const CreateStruct) -> *mut c_void {
+    if create.is_null() {
+        std::ptr::null_mut()
+    } else {
+        unsafe { (*create).create_params }
+    }
+}
+
+#[repr(C)]
 struct WndClass {
     style: u32,
     wnd_proc: Option<unsafe extern "system" fn(*mut c_void, u32, usize, isize) -> isize>,
@@ -73,6 +98,7 @@ struct App {
     status_text: String,
     config_path: PathBuf,
     startup_status: String,
+    tray_icon: Option<NotifyIconData>,
 }
 
 pub fn run() {
@@ -122,6 +148,7 @@ pub fn run() {
             status_text: format!("Yellow: waiting for a verified request, {portable_status}"),
             config_path,
             startup_status,
+            tray_icon: None,
         });
         let app_ptr = Box::into_raw(app);
         let app = &mut *app_ptr;
@@ -153,18 +180,21 @@ pub fn run() {
             wnd_class.instance,
             app_ptr as *mut c_void,
         );
-        let mut icon = NotifyIconData::new(hwnd, status(&app));
+        let mut icon = NotifyIconData::new(hwnd, status(app));
         Shell_NotifyIconW(NIM_ADD, &mut icon);
+        app.tray_icon = Some(icon);
         if app.automatic {
             reconcile(app);
-            update_icon(&mut icon, status(&app));
         }
+        app.publish();
         let mut message = Message::default();
         while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
-        Shell_NotifyIconW(NIM_DELETE, &mut icon);
+        if let Some(mut icon) = app.tray_icon.take() {
+            Shell_NotifyIconW(NIM_DELETE, &mut icon);
+        }
         drop(Box::from_raw(app_ptr));
     }
 }
@@ -200,6 +230,15 @@ fn status(app: &App) -> String {
         app.startup_status,
         app.config_path.display()
     )
+}
+
+impl App {
+    fn publish(&mut self) {
+        let text = status(self);
+        if let Some(icon) = self.tray_icon.as_mut() {
+            update_icon(icon, text);
+        }
+    }
 }
 
 fn update_icon(icon: &mut NotifyIconData, text: String) {
@@ -247,8 +286,10 @@ unsafe extern "system" fn window_proc(
     l_param: isize,
 ) -> isize {
     let app = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;
-    if message == 1 {
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, l_param);
+    if message == WM_CREATE {
+        let create = l_param as *const CreateStruct;
+        let app_ptr = app_create_params(create);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, app_ptr as isize);
         return 0;
     }
     if !app.is_null() {
@@ -263,6 +304,7 @@ unsafe extern "system" fn window_proc(
                         Ok(_) => "Yellow: request accepted but unverified".into(),
                         Err(error) => format!("Red: request error {error:?}"),
                     };
+                    app.publish();
                 }
                 ID_STOP => {
                     app.automatic = false;
@@ -270,10 +312,12 @@ unsafe extern "system" fn window_proc(
                         Ok(_) => app.status_text = "Yellow: stopped and released".into(),
                         Err(error) => app.status_text = format!("Red: release error {error:?}"),
                     }
+                    app.publish();
                 }
                 ID_AUTOMATIC => {
                     app.automatic = true;
                     reconcile(app);
+                    app.publish();
                 }
                 ID_QUIT => PostQuitMessage(0),
                 _ => {}
@@ -283,6 +327,7 @@ unsafe extern "system" fn window_proc(
                 if app.automatic {
                     reconcile(app);
                 }
+                app.publish();
             }
             WM_DESTROY => PostQuitMessage(0),
             _ => {}
@@ -436,6 +481,32 @@ struct IconInfo {
     y_hotspot: u32,
     h_bm_mask: *mut c_void,
     h_bm_color: *mut c_void,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_params_are_taken_from_create_struct() {
+        let marker = 7u8;
+        let create = CreateStruct {
+            create_params: (&marker as *const u8).cast_mut().cast(),
+            instance: std::ptr::null_mut(),
+            menu: std::ptr::null_mut(),
+            parent: std::ptr::null_mut(),
+            height: 0,
+            width: 0,
+            y: 0,
+            x: 0,
+            style: 0,
+            name: std::ptr::null(),
+            class_name: std::ptr::null(),
+            extended_style: 0,
+        };
+        assert_eq!(app_create_params(&create), create.create_params);
+        assert!(app_create_params(std::ptr::null()).is_null());
+    }
 }
 
 unsafe fn get_module_file_name_w_path() -> PathBuf {
