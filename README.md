@@ -46,7 +46,7 @@ and `maximum_hns=5000` select `5000 HNS`, or `0.500 ms`, when that boundary is
 reported by the current system. The adapter retains raw boundary values and
 selected HNS in diagnostics, then validates the selected value before requesting
 it. The compact tray
-menu exposes `Start`, `Stop`, `Auto-start: On/Off`, `Auto-time: On/Off`, a clickable short status item, and `Quit`. Auto-start controls launch at Windows login. Auto-time controls automatic timer acquisition after launch. The new defaults are `startup_enabled = true` and `automatic = false`, so login launch does not acquire timing until the user manually starts it. Status opens a normal taskbar
+menu exposes `Start`, `Stop`, `Auto-start: On/Off`, `Auto-time: On/Off`, a clickable short status item, and `Quit`. Auto-start controls launch at Windows login. Auto-time controls automatic timer acquisition after launch. The current defaults are `startup_enabled = true` and `automatic = false`, so login launch does not acquire timing until the user manually starts it. Status opens a normal taskbar
 diagnostic window titled `True Tick Status and Diagnostics` without changing timer
 state. It is a normal taskbar window with standard title-bar controls, a resizable
 read-only status and session log view, and snapshot refresh on reopen. The native
@@ -55,12 +55,13 @@ window uses a normal overlapped style with `WS_EX_APPWINDOW`, no
 the taskbar with minimize, maximize, restore, close, and resize behavior. Closing it only destroys the diagnostic
 window and does not change timer state. The native menu keeps Start, Stop, and both setting toggles open after successful
 or failed handling. Each reopen uses the original popup anchor POINT, so the menu
-does not jump when the cursor moves. Status may close the menu when it opens the
-diagnostic window, and Quit closes normally. Tray left-button-up and right-button-up
+does not jump when the cursor moves. Status closes the menu when it opens the
+diagnostic window. Quit is dispatched from the returned `TPM_RETURNCMD` command. Tray
+left-button-up and right-button-up
 notifications open this same menu. Button-down and double-click notifications are
 ignored, so one Windows notification does not create duplicate menus. Start and Stop
 remain manual controls and use the same guarded policy and ownership lifecycle as
-automatic activation. Quit requires a safe stop when timing is active or ownership is uncertain. The warning offers `Cancel` and `Stop and Quit`. The app exits only after owned-request release is verified. A failed or uncertain release keeps the app alive and records the retryable warning. The diagnostic window shows a bounded, local in-memory session log.
+automatic activation. Quit logs its request, active-state decision, dialog result, cleanup result, and exit permission. If timing is running, starting, stopping, pending, degraded, unverified, or ownership is uncertain, the warning offers exactly `Cancel` and `Stop and Quit`. Cancel leaves timing, the application, and the popup command loop unchanged. Stop and Quit uses the same guarded release path as Stop and exits only after release verification. A failed or uncertain release keeps the app open, updates status and diagnostics, and allows retry. If the state is definitely stopped with no pending ownership, Quit exits without a warning. The diagnostic window shows a bounded, local in-memory session log.
 It excludes raw pointers, private tokens, credentials, arbitrary secrets, and
 unbounded sensitive paths. The tooltip and status menu use short runtime timing values such as `Running
 (0.500 ms)`, `Running (0.497 ms, finer)`, `Stopped (current: 0.497 ms)`,
@@ -72,8 +73,7 @@ current value in controller and app state. After release, the returned current
 observation is retained as effective external state when another client remains
 finer or otherwise active, without implying Tick ownership. The captured
 `current_hns=9966` value was about `0.997 ms` because the old config requested
-`10000 HNS`. That config is migrated to automatic selection. They use `unknown` when no observation is available and never show
-raw HNS or full logs. The local diagnostic session records automatic selection,
+`10000 HNS`. That config is migrated to automatic selection. The display uses `unknown` when no observation is available. Raw HNS and full event details remain in the diagnostic window. The local diagnostic session records automatic selection,
 raw native boundaries, selected HNS, requested HNS, effective HNS, raw status,
 and an `equal`, `finer`, or `unverified` effective relation. The tooltip, status
 summary, and diagnostic header use the latest verified effective observation from
@@ -88,7 +88,7 @@ meanings. Status icon canvases use the current
 window DPI where available: 16, 20, 24, 32, or 64 pixels for 100, 125, 150, 200,
 or 400 percent. Unsupported intermediate DPI values use the nearest supported canvas.
 The tray shell may apply its own additional rendering scale. Calibration remains an
-explicit future-only boundary and no profiles are added. All activation paths use
+explicit future-only boundary. The internal v1 has no profile configuration, application detection, foreground hooks, or profile hysteresis. All activation paths use
 the same conservative power policy, so battery, Battery Saver, and unknown power
 states do not acquire. If a native request may have succeeded but its postcondition
 is inconclusive, the runtime records uncertain ownership, blocks duplicate acquire,

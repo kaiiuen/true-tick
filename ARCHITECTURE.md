@@ -28,7 +28,7 @@ CRT, with `VCRUNTIME140.dll` and `api-ms-win-crt-*` observed in a static binary 
 The eventual distribution choice is a documented VC++ Redistributable prerequisite
 or a validated static CRT build. No installer or copied DLLs are part of this v1.
 
-The v1 tray menu is intentionally compact. It contains `Start`, `Stop`, current
+The internal v1 has no profile configuration, application detection, foreground hooks, or profile hysteresis. The v1 tray menu is intentionally compact. It contains `Start`, `Stop`, current
 `Auto-start: On/Off` and `Auto-time: On/Off` toggles, a clickable short status item,
 and Quit. Auto-start controls Windows login launch. Auto-time controls automatic timer acquisition after launch. Defaults are `startup_enabled = true` and `automatic = false`. Left-button-up and right-button-up tray notifications both open this same menu. Button-down and double-click notifications are ignored, so Windows notification delivery cannot open duplicate menus. Start and Stop remain the core manual controls and use the same guarded
 policy and ownership lifecycle as automatic activation. Start, Stop, and both
@@ -68,7 +68,7 @@ stopped or failed states. The tray shell may apply its own rendering scale.
 An inconclusive adapter postcondition enters an explicit uncertain ownership state
 and suppresses repeat acquisition. The adapter retains enough request identity for
 a controlled matching release or recovery attempt. Normal message-loop shutdown
-uses one centralized cleanup guard. Tray Quit first shows a native warning when timing is active, transitional, degraded, unverified, or ownership is uncertain. `Cancel` leaves the app running. `Stop and Quit` attempts the guarded owned-request release and exits only after verification. A failed release leaves the app alive, updates the icon and diagnostic log, and allows retry. Normal cleanup preserves an unverified warning when cleanup cannot be confirmed. The runtime does not use a busy loop,
+uses one centralized cleanup guard. The `TPM_RETURNCMD` return ID is dispatched once by the tray command handler and Quit is not swallowed by the persistent-menu loop. Tray Quit records the active-state decision and shows a native warning when timing is running, starting, stopping, pending, degraded, unverified, or ownership is uncertain. The warning has exactly `Cancel` and `Stop and Quit`. `Cancel` leaves timing and the menu command loop unchanged. `Stop and Quit` uses the same guarded release path as Stop and exits only after verification. A failed release leaves the app alive, updates the icon and diagnostic log, and allows retry. Normal cleanup preserves an unverified warning when cleanup cannot be confirmed. The runtime does not use a busy loop,
 high priority, affinity, QoS, execution-state requests, power-plan changes,
 registry tuning beyond the explicit current-user startup boundary, driver,
 hardware clock control, process detection, network services, installer, secure
@@ -103,7 +103,7 @@ an explicit runtime path or is covered by a deterministic boundary test.
 The tooltip and status menu use concise observed or requested values such as
 `Running (0.500 ms)`, `Running (0.497 ms, finer)`, `Stopped (current: 0.497 ms)`,
 `Starting (0.500 ms)`, `Stopping (current: 0.497 ms)`, and
-`Error (invalid interval)`. They use `unknown` when no timing observation is
+`Error (invalid interval)`. They use `unknown` when no observation is
 available. Raw HNS and full event details remain in the diagnostic window.
 Controller and app state carry observations through query, request, release,
 and power reconciliation. A current value at or below the requested interval

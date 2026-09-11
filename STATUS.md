@@ -9,7 +9,7 @@ Timer ownership is isolated behind a Windows adapter and remains explicit about
 API acceptance versus effective system behavior. A postcondition mismatch preserves
 uncertain ownership and suppresses duplicate acquisition until controlled cleanup
 recovers or reports the state. Normal message-loop shutdown attempts centralized
-cleanup once and keeps an unverified warning if release is not confirmed. Tray Quit now requires a native confirmation when timing is active or ownership is uncertain. `Stop and Quit` exits only after a guarded release is verified. Failed cleanup keeps the app alive, updates the icon and diagnostic log, and allows retry. Opt-in current-user boot startup registration is isolated behind its own Windows
+cleanup once and keeps an unverified warning if release is not confirmed. Tray Quit now logs the request, active-state decision, dialog result, cleanup result, and exit permission. Running, starting, stopping, pending, degraded, unverified, or uncertain ownership opens a native warning with exactly `Cancel` and `Stop and Quit`. `Cancel` leaves timing and the popup command loop unchanged. `Stop and Quit` uses the same guarded release path as Stop and exits only after a verified release. Failed cleanup keeps the app alive, updates the icon and diagnostic log, and allows retry. A definitely stopped state with no pending ownership exits without a warning. Opt-in current-user boot startup registration is isolated behind its own Windows
 adapter. Portable A/B mode targets the buildable `Launcher.exe` entry point. The
 launcher requires valid active-slot metadata, validates the named A or B
 executable, and launches that slot before activation. A normal debug run uses a
@@ -23,7 +23,7 @@ The tray has compact `Start` and `Stop` manual controls, `Auto-start: On/Off` an
 launches the app at Windows login. Auto-time controls automatic timing acquisition
 and defaults to off. Both tray left-button-up and right-button-up notifications open
 the same compact menu. Button-down and double-click notifications are ignored to
-avoid duplicate menus. The status row opens a normal taskbar diagnostic window titled `True Tick Status and Diagnostics` without changing timer state. It uses a normal overlapped style, `WS_EX_APPWINDOW`, no `WS_EX_TOOLWINDOW`, no child style, no owner, standard title-bar controls, a resizable read-only status and session log view, and a fresh snapshot each time it is reopened. Reopening restores and activates the existing window. The native menu keeps Start, Stop, and both setting toggles open after successful or failed handling. Reopening after any persistent command reuses the original popup anchor POINT, and returned command IDs are dispatched once. Status may close the menu when it opens diagnostics, and Quit closes normally.
+avoid duplicate menus. The status row opens a normal taskbar diagnostic window titled `True Tick Status and Diagnostics` without changing timer state. It uses a normal overlapped style, `WS_EX_APPWINDOW`, no `WS_EX_TOOLWINDOW`, no child style, no owner, standard title-bar controls, a resizable read-only status and session log view, and a fresh snapshot each time it is reopened. Reopening restores and activates the existing window. The native menu keeps Start, Stop, and both setting toggles open after successful or failed handling. Reopening after any persistent command reuses the original popup anchor POINT, and the returned `TPM_RETURNCMD` ID is dispatched once. Status closes the menu when it opens diagnostics. Cancel keeps the Quit command loop available, while successful Quit closes it.
 Start and Stop use the same guarded policy and ownership lifecycle as automatic
 activation. The tray tooltip and status menu use actual concise timing values such
 as `Running (0.500 ms)`, `Running (0.497 ms, finer)`,
@@ -65,7 +65,7 @@ is reserved for failed operations. Status icon canvases use current DPI where
 available. The policy maps 100, 125, 150, 200, and 400 percent to 16, 20, 24, 32,
 and 64 pixels, using the nearest supported canvas for intermediate values. The
 tray shell may apply its own rendering scale. The calibration crate remains
-future-only and is not a disconnected production path.
+future-only and is not a disconnected production path. Profiles, application detection, foreground hooks, and profile hysteresis are intentionally absent from internal v1.
 
 Intentionally absent:
 
