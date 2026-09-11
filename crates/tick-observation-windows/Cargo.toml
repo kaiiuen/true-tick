@@ -1,0 +1,9 @@
+[package]
+name = "tick-observation-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tick-core = { path = "../tick-core" }

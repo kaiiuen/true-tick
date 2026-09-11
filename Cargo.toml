@@ -4,6 +4,8 @@ members = [
     "crates/tick-core",
     "crates/tick-policy",
     "crates/tick-ownership",
+    "crates/tick-platform-windows",
+    "crates/tick-observation-windows",
 ]
 
 [workspace.package]
