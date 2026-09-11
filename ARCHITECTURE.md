@@ -14,10 +14,12 @@ This repository contains an internal v1 runtime, not a production release.
 - `apps/true-tick` owns the tray composition, startup configuration, and portable launcher framing.
 - `apps/true-tick/src/tray_surface.rs` owns pure compact labels, tooltip text, and status-to-color mapping.
 
-The v1 tray menu is intentionally compact. It contains current Auto-start and
-automatic timing activation toggles, a disabled `Status: Active`, `Status: Warning`,
-or `Status: Stopped` item, and Quit. Full system reports, config paths, raw HNS
-values, power explanations, and full errors are excluded from the menu and tooltip.
+The v1 tray menu is intentionally compact. It contains `Start`, `Stop`, current
+Auto-start and automatic timing activation toggles, a disabled short status item,
+and Quit. Start and Stop remain the core manual controls and use the same guarded
+policy and ownership lifecycle as automatic activation. Full system reports, config
+paths, raw HNS values, power explanations, and full errors are excluded from the
+menu and tooltip.
 Detailed evidence remains an internal diagnostics or logging concern.
 
 An inconclusive adapter postcondition enters an unverified state and suppresses
@@ -38,8 +40,11 @@ activation after launch. Both settings are persisted through a flushed temporary
 file replacement. Parse and write failures are surfaced in the tray status.
 Missing or invalid A/B metadata requires repair and never defaults to slot A.
 True™ Time is not a dependency. Platform behavior that cannot be verified remains
-yellow or red rather than being reported as green. The tray maps verified ownership
-to green Active, pending or unverified behavior to yellow Warning, and stopped,
-blocked, unsupported, or error behavior to red Stopped. Current observation verifies
+yellow or red rather than being reported as green. The tray maps running and
+verified ownership to green, starting, stopping, pending, degraded, or unverified
+behavior to yellow, and stopped, blocked, unsupported, or error behavior to red.
+The tooltip uses `Running (current timing)` and `Stopped (current timing)` for
+steady states, with concise transition labels such as `Starting...` and
+`Stopping...`. Current observation verifies
 only the available system power query and one power broadcast path. Full Battery
 Saver, session, lock, suspend, and resume notification support is not claimed.

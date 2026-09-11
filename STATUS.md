@@ -10,18 +10,21 @@ registration is isolated behind its own Windows adapter and targets the portable
 validates A/B before activation. Registration is distinct from automatic timer
 activation after the application has launched.
 
-The tray has compact current-state Auto-start and automatic timing activation
-items, one disabled short status item, and Quit. The tray tooltip contains only
-`True Tick: Active`, `True Tick: Warning`, or `True Tick: Stopped`. Full system
-reports, config paths, raw HNS values, power explanations, and full errors are
-intentionally excluded from the tray surface and reserved for logs or future
-diagnostics. Configuration writes use a flushed temporary file replacement. Parse and write
+The tray has compact `Start` and `Stop` manual controls, current-state Auto-start
+and automatic timing activation items, one disabled short status item, and Quit.
+Start and Stop use the same guarded policy and ownership lifecycle as automatic
+activation. The tray tooltip uses `Running (current timing)`, `Stopped (current
+timing)`, and concise transition or warning labels. Full system reports, config
+paths, raw HNS values, power explanations, and full errors are intentionally
+excluded from the tray surface and reserved for logs or future diagnostics.
+Configuration writes use a flushed temporary file replacement. Parse and write
 errors remain visible. Manual and automatic activation share the same policy.
 Battery, Battery Saver, and unknown power states remain non-acquiring. A
 restrictive power transition or normal Quit attempts to release owned state and
 reports release failure as warning or stopped according to the truthful state map.
-Verified ownership is green Active. Pending or unverified behavior is yellow
-Warning. Stopped, blocked, unsupported, or error behavior is red Stopped.
+Running and verified ownership is green. Starting, stopping, pending, degraded,
+or unverified behavior is yellow. Stopped, blocked, unsupported, or error behavior
+is red.
 
 Intentionally absent:
 

@@ -11,7 +11,7 @@ use tick_startup_windows::{
     startup_operation, StartupOperation, StartupRegistration, WindowsUserStartup,
 };
 
-use crate::tray_surface::{auto_start_label, automatic_label, tooltip, IconColor, TrayStatus};
+use crate::tray_surface::{menu_items, tooltip, IconColor, TrayStatus};
 
 const WM_APP: u32 = 0x8000;
 const WM_TRAY: u32 = WM_APP + 1;
@@ -21,6 +21,8 @@ const WM_DESTROY: u32 = 0x0002;
 const WM_RBUTTONUP: usize = 0x0205;
 const WM_POWERBROADCAST: u32 = 0x0218;
 const PBT_APMPOWERSTATUSCHANGE: usize = 0x000A;
+const ID_START: usize = 1001;
+const ID_STOP: usize = 1002;
 const ID_QUIT: usize = 1004;
 const ID_STARTUP_ON: usize = 1005;
 const ID_STARTUP_OFF: usize = 1006;
@@ -147,9 +149,9 @@ pub fn run() {
             observation,
             config: loaded,
             tray_status: if startup_status.starts_with("Red") {
-                TrayStatus::Stopped
+                TrayStatus::Error
             } else {
-                TrayStatus::Warning
+                TrayStatus::Pending
             },
             config_path,
             executable,
@@ -216,26 +218,49 @@ fn apply_policy(app: &mut App) {
         power: app.observation.power().state,
     });
     if decision.status == tick_core::Status::Requested {
-        match app.controller.start() {
-            Ok(Verification::Verified) => app.tray_status = TrayStatus::Active,
-            Ok(Verification::Unverified | Verification::NotCollected) => {
-                app.tray_status = TrayStatus::Warning
-            }
-            Err(_error) => app.tray_status = TrayStatus::Stopped,
-        }
+        app.tray_status = TrayStatus::Starting;
+        app.publish();
+        app.tray_status = match app.controller.start() {
+            Ok(Verification::Verified) => TrayStatus::Running,
+            Ok(Verification::Unverified | Verification::NotCollected) => TrayStatus::Unverified,
+            Err(_error) => TrayStatus::Error,
+        };
+        app.publish();
         return;
     }
 
     release_for_policy(app, decision.reason);
 }
 
-fn release_for_policy(app: &mut App, _reason: tick_policy::PolicyReason) {
-    match app.controller.stop() {
-        Ok(_) => {
-            app.tray_status = TrayStatus::Warning;
-        }
-        Err(_error) => app.tray_status = TrayStatus::Stopped,
-    }
+fn release_for_policy(app: &mut App, reason: tick_policy::PolicyReason) {
+    app.tray_status = TrayStatus::Stopping;
+    app.publish();
+    app.tray_status = match app.controller.stop() {
+        Ok(_) => match reason {
+            tick_policy::PolicyReason::BatteryRestricted
+            | tick_policy::PolicyReason::BatterySaverRestricted
+            | tick_policy::PolicyReason::PowerUnknown
+            | tick_policy::PolicyReason::GloballyDisabled => TrayStatus::Blocked,
+            tick_policy::PolicyReason::NoEligibleProfile
+            | tick_policy::PolicyReason::EligibleProfile => TrayStatus::Stopped,
+        },
+        Err(_error) => TrayStatus::Unverified,
+    };
+    app.publish();
+}
+
+fn manual_start(app: &mut App) {
+    apply_policy(app);
+}
+
+fn manual_stop(app: &mut App) {
+    app.tray_status = TrayStatus::Stopping;
+    app.publish();
+    app.tray_status = match app.controller.stop() {
+        Ok(_) => TrayStatus::Stopped,
+        Err(_error) => TrayStatus::Unverified,
+    };
+    app.publish();
 }
 
 fn release_for_power_change(app: &mut App) {
@@ -315,6 +340,8 @@ unsafe extern "system" fn window_proc(
         match message {
             WM_TRAY if l_param as usize == WM_RBUTTONUP => show_menu(hwnd, app),
             WM_COMMAND => match w_param & 0xffff {
+                ID_START => manual_start(app),
+                ID_STOP => manual_stop(app),
                 ID_STARTUP_ON => set_startup(app, true),
                 ID_STARTUP_OFF => set_startup(app, false),
                 ID_AUTOMATIC_ON => set_automatic(app, true),
@@ -324,7 +351,7 @@ unsafe extern "system" fn window_proc(
                         let message = format!(
                             "Normal shutdown release failed. Tick ownership is unverified.\n\n{error:?}"
                         );
-                        app.tray_status = TrayStatus::Warning;
+                        app.tray_status = TrayStatus::Unverified;
                         app.publish();
                         MessageBoxW(
                             hwnd,
@@ -355,6 +382,21 @@ unsafe extern "system" fn window_proc(
 
 unsafe fn show_menu(hwnd: *mut c_void, app: &App) {
     let menu = CreatePopupMenu();
+    let items = menu_items(
+        app.tray_status,
+        app.config.startup_enabled,
+        app.config.automatic,
+    );
+    let start_flags = if items[0].enabled {
+        MF_STRING
+    } else {
+        MF_STRING | MF_GRAYED
+    };
+    let stop_flags = if items[1].enabled {
+        MF_STRING
+    } else {
+        MF_STRING | MF_GRAYED
+    };
     let startup_id = if app.config.startup_enabled {
         ID_STARTUP_OFF
     } else {
@@ -365,19 +407,11 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &App) {
     } else {
         ID_AUTOMATIC_ON
     };
-    AppendMenuW(
-        menu,
-        MF_STRING,
-        startup_id,
-        wide(auto_start_label(app.config.startup_enabled)).as_ptr(),
-    );
-    AppendMenuW(
-        menu,
-        MF_STRING,
-        automatic_id,
-        wide(automatic_label(app.config.automatic)).as_ptr(),
-    );
-
+    AppendMenuW(menu, start_flags, ID_START, wide(items[0].label).as_ptr());
+    AppendMenuW(menu, stop_flags, ID_STOP, wide(items[1].label).as_ptr());
+    AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+    AppendMenuW(menu, MF_STRING, startup_id, wide(items[2].label).as_ptr());
+    AppendMenuW(menu, MF_STRING, automatic_id, wide(items[3].label).as_ptr());
     AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
     AppendMenuW(
         menu,
@@ -386,7 +420,7 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &App) {
         wide(&format!("Status: {}", app.tray_status.label())).as_ptr(),
     );
     AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-    AppendMenuW(menu, MF_STRING, ID_QUIT, wide("Quit").as_ptr());
+    AppendMenuW(menu, MF_STRING, ID_QUIT, wide(items[5].label).as_ptr());
     let mut point = Point { x: 0, y: 0 };
     GetCursorPos(&mut point);
     SetForegroundWindow(hwnd);
@@ -406,7 +440,7 @@ fn set_automatic(app: &mut App, enabled: bool) {
     let mut next = app.config.clone();
     next.automatic = enabled;
     if config::save_atomic(&app.config_path, &next).is_err() {
-        app.tray_status = TrayStatus::Stopped;
+        app.tray_status = TrayStatus::Error;
         app.publish();
         return;
     }
@@ -414,12 +448,8 @@ fn set_automatic(app: &mut App, enabled: bool) {
     if enabled {
         reconcile(app);
     } else {
-        match app.controller.stop() {
-            Ok(_) => app.tray_status = TrayStatus::Stopped,
-            Err(_error) => app.tray_status = TrayStatus::Warning,
-        }
+        manual_stop(app);
     }
-    app.publish();
 }
 
 fn set_startup(app: &mut App, enabled: bool) {
@@ -433,7 +463,7 @@ fn set_startup(app: &mut App, enabled: bool) {
     };
     if registration.is_err() {
         app.startup_status = "startup registration error".into();
-        app.tray_status = TrayStatus::Stopped;
+        app.tray_status = TrayStatus::Error;
         app.publish();
         return;
     }
