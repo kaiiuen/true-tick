@@ -105,6 +105,27 @@ mod tests {
     }
 
     #[test]
+    fn ac_allows_an_eligible_request() {
+        let input = PolicyInput {
+            enabled: true,
+            eligible_profile: true,
+            power: PowerState::Ac,
+        };
+        assert_eq!(decide(input).status, Status::Requested);
+    }
+
+    #[test]
+    fn battery_is_released_by_default() {
+        let input = PolicyInput {
+            enabled: true,
+            eligible_profile: true,
+            power: PowerState::Battery,
+        };
+        assert_eq!(decide(input).status, Status::Blocked);
+        assert_eq!(decide(input).reason, PolicyReason::BatteryRestricted);
+    }
+
+    #[test]
     fn unknown_power_is_conservatively_blocked() {
         let input = PolicyInput {
             enabled: true,
