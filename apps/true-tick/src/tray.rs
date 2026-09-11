@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tick_diagnostics::{format_event, DiagnosticStore, DEFAULT_MAX_EVENTS};
 use tick_observation_windows::{ObservationSource, WindowsObservation};
 use tick_ownership::{OwnershipState, TimerController, Verification};
-use tick_platform_windows::WindowsTimerPlatform;
+use tick_platform_windows::{TimerObservation, WindowsTimerPlatform};
 use tick_policy::{decide, PolicyInput, PowerState};
 use tick_startup_windows::{
     startup_operation, StartupOperation, StartupRegistration, WindowsUserStartup,
@@ -15,7 +15,7 @@ use tick_startup_windows::{
 
 use crate::tray_surface::{
     dpi_to_icon_canvas, icon_pixel_color, menu_action_keeps_open, menu_items, tooltip,
-    tray_click_action, TrayClickAction, TrayStatus, STATUS_COMMAND_ID,
+    tray_click_action, TimingValues, TrayClickAction, TrayStatus, STATUS_COMMAND_ID,
 };
 
 const WM_APP: u32 = 0x8000;
@@ -225,6 +225,8 @@ struct App {
     executable: PathBuf,
     startup_status: String,
     tray_icon: Option<NotifyIconData>,
+    timing_observation: Option<TimerObservation>,
+    invalid_interval: bool,
     diagnostics: Arc<DiagnosticStore>,
     diagnostic_window: Option<*mut c_void>,
     shutdown_cleanup_done: bool,
@@ -354,6 +356,8 @@ pub fn run() {
             executable,
             startup_status,
             tray_icon: None,
+            timing_observation: None,
+            invalid_interval: false,
             diagnostics,
             diagnostic_window: None,
             shutdown_cleanup_done: false,
@@ -402,7 +406,7 @@ pub fn run() {
             wnd_class.instance,
             app_ptr as *mut c_void,
         );
-        let mut icon = NotifyIconData::new(hwnd, app.tray_status);
+        let mut icon = NotifyIconData::new(hwnd, app.tray_status, app.timing_values());
         Shell_NotifyIconW(NIM_ADD, &mut icon);
         app.tray_icon = Some(icon);
         if app.config.automatic {
@@ -426,6 +430,7 @@ pub fn run() {
 
 fn reconcile(app: &mut App) {
     app.record("policy.recalculate", "trigger=reconcile");
+    refresh_timing_observation(app);
     apply_policy(app);
 }
 
@@ -447,9 +452,15 @@ fn apply_policy(app: &mut App) {
         app.tray_status = TrayStatus::Starting;
         app.publish();
         app.record("ownership.acquire.request", "source=policy");
-        app.tray_status = match app.controller.start() {
-            Ok(Verification::Verified) => {
-                app.record("verification.result", "result=verified");
+        let start_result = app.controller.start();
+        app.sync_timing_observation();
+        app.invalid_interval = matches!(
+            start_result,
+            Err(tick_platform_windows::TimerError::InvalidInterval)
+        );
+        app.tray_status = match start_result {
+            Ok(Verification::Verified | Verification::FinerThanRequested) => {
+                app.record("verification.result", format!("result={start_result:?}"));
                 app.record("ownership.changed", "state=owned");
                 TrayStatus::Running
             }
@@ -476,7 +487,9 @@ fn release_for_policy(app: &mut App, reason: tick_policy::PolicyReason) {
     app.record("ownership.release.request", format!("reason={reason:?}"));
     app.tray_status = TrayStatus::Stopping;
     app.publish();
-    app.tray_status = match app.controller.stop() {
+    let stop_result = app.controller.stop();
+    app.sync_timing_observation();
+    app.tray_status = match stop_result {
         Ok(released) => {
             app.record(
                 "ownership.changed",
@@ -505,7 +518,7 @@ fn release_for_policy(app: &mut App, reason: tick_policy::PolicyReason) {
 fn manual_start(app: &mut App) {
     app.record("tray.command", "command=start");
     app.record("lifecycle.start_request", "source=manual");
-    apply_policy(app);
+    reconcile(app);
 }
 
 fn manual_stop(app: &mut App) {
@@ -513,7 +526,9 @@ fn manual_stop(app: &mut App) {
     app.record("lifecycle.stop_request", "source=manual");
     app.tray_status = TrayStatus::Stopping;
     app.publish();
-    app.tray_status = match app.controller.stop() {
+    let stop_result = app.controller.stop();
+    app.sync_timing_observation();
+    app.tray_status = match stop_result {
         Ok(released) => {
             app.record(
                 "ownership.changed",
@@ -537,6 +552,7 @@ fn release_for_power_change(app: &mut App) {
         "power.transition",
         format!("state={:?}", app.observation.power().state),
     );
+    refresh_timing_observation(app);
     if app.observation.power().state != PowerState::Ac {
         release_for_policy(
             app,
@@ -551,12 +567,31 @@ fn release_for_power_change(app: &mut App) {
 }
 
 impl App {
+    fn sync_timing_observation(&mut self) {
+        self.timing_observation = self.controller.observation();
+    }
+
+    fn timing_values(&self) -> TimingValues {
+        TimingValues {
+            requested: self
+                .timing_observation
+                .map(|observation| observation.requested)
+                .or(Some(self.config.request_interval)),
+            effective: self
+                .timing_observation
+                .map(|observation| observation.reported_current),
+            invalid_interval: self.invalid_interval,
+        }
+    }
+
     fn cleanup_normal_shutdown(&mut self) -> Result<(), String> {
         if self.shutdown_cleanup_done {
             return Ok(());
         }
         self.record("shutdown.cleanup", "attempt=guarded");
-        match self.controller.stop() {
+        let stop_result = self.controller.stop();
+        self.sync_timing_observation();
+        match stop_result {
             Ok(released) => {
                 self.shutdown_cleanup_done = true;
                 self.record(
@@ -585,21 +620,37 @@ impl App {
     }
 
     fn publish(&mut self) {
+        let timing = self.timing_values();
+        let status_text = tooltip(self.tray_status, timing);
         self.record(
             "tray.status.changed",
-            format!(
-                "status={:?} tooltip={}",
-                self.tray_status,
-                tooltip(self.tray_status)
-            ),
+            format!("status={:?} tooltip={status_text}", self.tray_status),
         );
         if let Some(icon) = self.tray_icon.as_mut() {
-            update_icon(icon, self.tray_status);
+            update_icon(icon, self.tray_status, timing);
         }
     }
 }
 
-fn update_icon(icon: &mut NotifyIconData, status: TrayStatus) {
+fn refresh_timing_observation(app: &mut App) {
+    match app.controller.query() {
+        Ok(observation) => {
+            app.timing_observation = Some(observation);
+            app.record(
+                "timer.query.observation",
+                format!(
+                    "requested_hns={} current_hns={} raw_status={}",
+                    observation.requested.value(),
+                    observation.reported_current.value(),
+                    observation.raw_status
+                ),
+            );
+        }
+        Err(error) => app.record("timer.query.error", format!("error={error:?}")),
+    }
+}
+
+fn update_icon(icon: &mut NotifyIconData, status: TrayStatus, timing: TimingValues) {
     let replacement = unsafe { status_icon(status, dpi_for_window(icon.h_wnd)) };
     if replacement.is_null() {
         return;
@@ -607,7 +658,11 @@ fn update_icon(icon: &mut NotifyIconData, status: TrayStatus) {
     let old_icon = icon.h_icon;
     icon.h_icon = replacement;
     icon.sz_tip = [0; 128];
-    for (target, source) in icon.sz_tip.iter_mut().zip(tooltip(status).encode_utf16()) {
+    for (target, source) in icon
+        .sz_tip
+        .iter_mut()
+        .zip(tooltip(status, timing).encode_utf16())
+    {
         *target = source;
     }
     unsafe {
@@ -745,7 +800,11 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
             menu,
             MF_STRING,
             STATUS_COMMAND_ID,
-            wide(&format!("Status: {}", app.tray_status.label())).as_ptr(),
+            wide(&format!(
+                "Status: {}",
+                tooltip(app.tray_status, app.timing_values())
+            ))
+            .as_ptr(),
         );
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(menu, MF_STRING, ID_QUIT, wide(items[5].label).as_ptr());
@@ -886,9 +945,20 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &App) {
     if edit.is_null() {
         return;
     }
+    let timing_details = match app.timing_observation {
+        Some(observation) => format!(
+            "Timing observation: {} requested_hns={} effective_hns={} raw_status={}\r\n",
+            tooltip(app.tray_status, app.timing_values()),
+            observation.requested.value(),
+            observation.reported_current.value(),
+            observation.raw_status
+        ),
+        None => "Timing observation: unknown\r\n".to_owned(),
+    };
     let mut text = format!(
-        "Current status: {}\r\nPower observation: {:?}\r\nStartup: {}\r\nSession log is local to this process. Maximum events: {}\r\n\r\n",
-        app.tray_status.label(),
+        "Current status: {}\r\n{}Power observation: {:?}\r\nStartup: {}\r\nSession log is local to this process. Maximum events: {}\r\n\r\n",
+        tooltip(app.tray_status, app.timing_values()),
+        timing_details,
         app.observation.power().state,
         app.startup_status,
         app.diagnostics.maximum_events()
@@ -1249,7 +1319,7 @@ impl Drop for NotifyIconData {
 }
 
 impl NotifyIconData {
-    fn new(hwnd: *mut c_void, status: TrayStatus) -> Self {
+    fn new(hwnd: *mut c_void, status: TrayStatus, timing: TimingValues) -> Self {
         let mut value = Self {
             cb_size: size_of::<Self>() as u32,
             h_wnd: hwnd,
@@ -1267,7 +1337,11 @@ impl NotifyIconData {
             guid: [0; 16],
             h_balloon_icon: std::ptr::null_mut(),
         };
-        for (target, source) in value.sz_tip.iter_mut().zip(tooltip(status).encode_utf16()) {
+        for (target, source) in value
+            .sz_tip
+            .iter_mut()
+            .zip(tooltip(status, timing).encode_utf16())
+        {
             *target = source;
         }
         value
