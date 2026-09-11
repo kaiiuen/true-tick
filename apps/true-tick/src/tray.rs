@@ -38,11 +38,19 @@ const WM_CLOSE: u32 = 0x0010;
 const WM_NCDESTROY: u32 = 0x0082;
 const WM_SETFOCUS: u32 = 0x0007;
 const WM_GETMINMAXINFO: u32 = 0x0024;
+const GWL_STYLE: i32 = -16;
+const GWL_EXSTYLE: i32 = -20;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf0000;
 const WS_VISIBLE: u32 = 0x10000000;
 const WS_CLIPCHILDREN: u32 = 0x02000000;
 const WS_CLIPSIBLINGS: u32 = 0x04000000;
+const WS_EX_TOOLWINDOW: u32 = 0x00000080;
 const WS_EX_APPWINDOW: u32 = 0x00040000;
+const SW_SHOWNORMAL: i32 = 1;
+const SW_RESTORE: i32 = 9;
+const DIAGNOSTIC_MIN_WIDTH: i32 = 420;
+const DIAGNOSTIC_MIN_HEIGHT: i32 = 260;
+const DIAGNOSTIC_WINDOW_TITLE: &str = "True Tick Status and Diagnostics";
 const WS_CHILD: u32 = 0x40000000;
 const WS_VSCROLL: u32 = 0x00200000;
 const ES_MULTILINE: u32 = 0x0004;
@@ -143,6 +151,14 @@ fn app_create_params(create: *const CreateStruct) -> *mut c_void {
     } else {
         unsafe { (*create).create_params }
     }
+}
+
+const fn diagnostic_window_style() -> u32 {
+    WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS
+}
+
+const fn diagnostic_window_extended_style() -> u32 {
+    WS_EX_APPWINDOW
 }
 
 #[repr(C)]
@@ -750,17 +766,26 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
 
 unsafe fn open_diagnostic_window(app: &mut App) {
     if let Some(window) = app.diagnostic_window {
-        ShowWindow(window, 1);
-        SetForegroundWindow(window);
-        refresh_diagnostic_window(window, app);
-        return;
+        if IsWindow(window) == 0 {
+            app.diagnostic_window = None;
+        } else {
+            if IsIconic(window) != 0 {
+                ShowWindow(window, SW_RESTORE);
+            } else {
+                ShowWindow(window, SW_SHOWNORMAL);
+            }
+            SetForegroundWindow(window);
+            refresh_diagnostic_window(window, app);
+            return;
+        }
     }
     let class_name = wide("TrueTickDiagnosticClass");
+    let title = wide(DIAGNOSTIC_WINDOW_TITLE);
     let window = CreateWindowExW(
-        WS_EX_APPWINDOW,
+        diagnostic_window_extended_style(),
         class_name.as_ptr(),
-        wide("True Tick Status and Diagnostics").as_ptr(),
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+        title.as_ptr(),
+        diagnostic_window_style(),
         120,
         120,
         820,
@@ -774,6 +799,17 @@ unsafe fn open_diagnostic_window(app: &mut App) {
         app.record("diagnostic.window.result", "result=create_failed");
     } else {
         app.diagnostic_window = Some(window);
+        let style = GetWindowLongPtrW(window, GWL_STYLE) as u32;
+        let extended_style = GetWindowLongPtrW(window, GWL_EXSTYLE) as u32;
+        app.record(
+            "diagnostic.window.styles",
+            format!(
+                "overlapped={} appwindow={} toolwindow={} title={DIAGNOSTIC_WINDOW_TITLE}",
+                style & WS_OVERLAPPEDWINDOW == WS_OVERLAPPEDWINDOW,
+                extended_style & WS_EX_APPWINDOW != 0,
+                extended_style & WS_EX_TOOLWINDOW != 0,
+            ),
+        );
         app.record("diagnostic.window.result", "result=opened");
         refresh_diagnostic_window(window, app);
     }
@@ -846,12 +882,13 @@ unsafe extern "system" fn diagnostic_window_proc(
         } else if message == WM_GETMINMAXINFO {
             let limits = l_param as *mut MinMaxInfo;
             if !limits.is_null() {
-                (*limits).minimum_track_size.x = 420;
-                (*limits).minimum_track_size.y = 260;
+                (*limits).minimum_track_size.x = DIAGNOSTIC_MIN_WIDTH;
+                (*limits).minimum_track_size.y = DIAGNOSTIC_MIN_HEIGHT;
             }
             return 0;
         } else if message == WM_CLOSE {
             DestroyWindow(hwnd);
+            return 0;
         } else if message == WM_SETFOCUS {
             if !app.is_null() {
                 refresh_diagnostic_window(hwnd, &*app);
@@ -1103,6 +1140,8 @@ extern "system" {
     fn DefWindowProcW(hwnd: *mut c_void, message: u32, w: usize, l: isize) -> isize;
     fn GetWindowLongPtrW(hwnd: *mut c_void, index: i32) -> isize;
     fn SetWindowLongPtrW(hwnd: *mut c_void, index: i32, value: isize) -> isize;
+    fn IsWindow(window: *mut c_void) -> i32;
+    fn IsIconic(window: *mut c_void) -> i32;
     fn PostQuitMessage(code: i32);
     fn MessageBoxW(hwnd: *mut c_void, text: *const u16, title: *const u16, flags: u32) -> i32;
     fn CreatePopupMenu() -> *mut c_void;
@@ -1191,6 +1230,20 @@ extern "system" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_window_contract_is_normal_and_taskbar_visible() {
+        assert_eq!(DIAGNOSTIC_WINDOW_TITLE, "True Tick Status and Diagnostics");
+        assert_eq!(
+            diagnostic_window_style() & WS_OVERLAPPEDWINDOW,
+            WS_OVERLAPPEDWINDOW
+        );
+        assert_ne!(diagnostic_window_style() & WS_VISIBLE, 0);
+        assert_ne!(diagnostic_window_extended_style() & WS_EX_APPWINDOW, 0);
+        assert_eq!(diagnostic_window_extended_style() & WS_EX_TOOLWINDOW, 0);
+        assert_eq!(DIAGNOSTIC_MIN_WIDTH, 420);
+        assert_eq!(DIAGNOSTIC_MIN_HEIGHT, 260);
+    }
 
     #[test]
     fn quit_guard_covers_active_and_uncertain_states() {
