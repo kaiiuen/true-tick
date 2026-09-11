@@ -8,15 +8,14 @@ explicit released, owned, or uncertain ownership lifecycle, controlled recovery,
 conservative power policy, a native tray
 surface, atomically replaced local configuration, per-user boot startup
 registration, and a bounded portable A/B launcher scaffold. The compact tray
-menu exposes `Start`, `Stop`, current Auto-start and automatic timing activation
-toggles, a clickable short status item, and `Quit`. Status opens a normal taskbar
+menu exposes `Start`, `Stop`, `Auto-start: On/Off`, `Auto-time: On/Off`, a clickable short status item, and `Quit`. Auto-start controls launch at Windows login. Auto-time controls automatic timer acquisition after launch. The new defaults are `startup_enabled = true` and `automatic = false`, so login launch does not acquire timing until the user manually starts it. Status opens a normal taskbar
 diagnostic window titled `True Tick Status and Diagnostics` without changing timer
 state. It is a normal taskbar window with standard title-bar controls, a resizable
 read-only status and session log view, and snapshot refresh on reopen. The native
 menu keeps the two setting toggles open after each toggle and closes for other
 commands. Start and Stop remain
 manual controls and use the same guarded policy and ownership lifecycle as automatic
-activation. The diagnostic window shows a bounded, local in-memory session log.
+activation. Quit requires a safe stop when timing is active or ownership is uncertain. The warning offers `Cancel` and `Stop and Quit`. The app exits only after owned-request release is verified. A failed or uncertain release keeps the app alive and records the retryable warning. The diagnostic window shows a bounded, local in-memory session log.
 It excludes raw pointers, private tokens, credentials, arbitrary secrets, and
 unbounded sensitive paths. The tooltip uses short runtime wording: `Running
 (current timing)`, `Stopped (current timing)`, or a concise transition or warning

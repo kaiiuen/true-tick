@@ -89,7 +89,6 @@ struct NotifyIconData {
 }
 
 #[repr(C)]
-#[repr(C)]
 struct TaskDialogButton {
     button_id: i32,
     button_text: *const u16,
@@ -950,9 +949,13 @@ fn set_startup(app: &mut App, enabled: bool) {
 }
 
 fn quit_requires_confirmation(app: &App) -> bool {
-    app.controller.ownership() != OwnershipState::Released
+    quit_requires_confirmation_for(app.tray_status, app.controller.ownership())
+}
+
+fn quit_requires_confirmation_for(status: TrayStatus, ownership: OwnershipState) -> bool {
+    ownership != OwnershipState::Released
         || matches!(
-            app.tray_status,
+            status,
             TrayStatus::Running
                 | TrayStatus::Starting
                 | TrayStatus::Stopping
@@ -1180,6 +1183,30 @@ extern "system" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quit_guard_covers_active_and_uncertain_states() {
+        for status in [
+            TrayStatus::Running,
+            TrayStatus::Starting,
+            TrayStatus::Stopping,
+            TrayStatus::Unverified,
+            TrayStatus::Degraded,
+        ] {
+            assert!(quit_requires_confirmation_for(
+                status,
+                OwnershipState::Released
+            ));
+        }
+        assert!(quit_requires_confirmation_for(
+            TrayStatus::Stopped,
+            OwnershipState::Uncertain
+        ));
+        assert!(!quit_requires_confirmation_for(
+            TrayStatus::Stopped,
+            OwnershipState::Released
+        ));
+    }
 
     #[test]
     fn create_params_are_taken_from_create_struct() {

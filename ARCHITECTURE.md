@@ -16,8 +16,8 @@ This repository contains an internal v1 runtime, not a production release.
 - `apps/true-tick/src/tray_surface.rs` owns pure compact labels, tooltip text, status-to-color mapping, and status command mapping.
 
 The v1 tray menu is intentionally compact. It contains `Start`, `Stop`, current
-Auto-start and automatic timing activation toggles, a disabled short status item,
-and Quit. Start and Stop remain the core manual controls and use the same guarded
+`Auto-start: On/Off` and `Auto-time: On/Off` toggles, a disabled short status item,
+and Quit. Auto-start controls Windows login launch. Auto-time controls automatic timer acquisition after launch. Defaults are `startup_enabled = true` and `automatic = false`. Start and Stop remain the core manual controls and use the same guarded
 policy and ownership lifecycle as automatic activation. The clickable status row
 opens a normal overlapped taskbar diagnostic window and never changes timer state.
 The two setting toggles use a non recursive return-command loop so the menu stays
@@ -37,8 +37,7 @@ deferred. The UI refreshes from a current snapshot and shows the current tray st
 An inconclusive adapter postcondition enters an explicit uncertain ownership state
 and suppresses repeat acquisition. The adapter retains enough request identity for
 a controlled matching release or recovery attempt. Normal message-loop shutdown
-uses one centralized cleanup guard, attempts release exactly once, and preserves an
-unverified warning when cleanup cannot be confirmed. The runtime does not use a busy loop,
+uses one centralized cleanup guard. Tray Quit first shows a native warning when timing is active, transitional, degraded, unverified, or ownership is uncertain. `Cancel` leaves the app running. `Stop and Quit` attempts the guarded owned-request release and exits only after verification. A failed release leaves the app alive, updates the icon and diagnostic log, and allows retry. Normal cleanup preserves an unverified warning when cleanup cannot be confirmed. The runtime does not use a busy loop,
 high priority, affinity, QoS, execution-state requests, power-plan changes,
 registry tuning beyond the explicit current-user startup boundary, driver,
 hardware clock control, process detection, network services, installer, secure

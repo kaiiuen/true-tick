@@ -7,16 +7,17 @@ Timer ownership is isolated behind a Windows adapter and remains explicit about
 API acceptance versus effective system behavior. A postcondition mismatch preserves
 uncertain ownership and suppresses duplicate acquisition until controlled cleanup
 recovers or reports the state. Normal message-loop shutdown attempts centralized
-cleanup once and keeps an unverified warning if release is not confirmed. Opt-in current-user boot startup registration is isolated behind its own Windows
+cleanup once and keeps an unverified warning if release is not confirmed. Tray Quit now requires a native confirmation when timing is active or ownership is uncertain. `Stop and Quit` exits only after a guarded release is verified. Failed cleanup keeps the app alive, updates the icon and diagnostic log, and allows retry. Opt-in current-user boot startup registration is isolated behind its own Windows
 adapter and targets the buildable portable `Launcher.exe` entry point. The launcher
 requires valid active-slot metadata, validates the named A or B executable, and
 launches that slot before activation. Registration is distinct from automatic timer
 activation after the application has launched. Secure signatures and rollback are
 not implemented.
 
-The tray has compact `Start` and `Stop` manual controls, current-state Auto-start
-and automatic timing activation items, one clickable short status item, and Quit. The
-The status row opens a normal taskbar diagnostic window titled `True Tick Status and Diagnostics` without changing timer state. It provides standard title-bar controls, a resizable read-only status and session log view, and a fresh snapshot each time it is reopened. The native menu keeps both setting toggles open after a toggle and closes for action commands.
+The tray has compact `Start` and `Stop` manual controls, `Auto-start: On/Off` and
+`Auto-time: On/Off` items, one clickable short status item, and Quit. Auto-start
+launches the app at Windows login. Auto-time controls automatic timing acquisition
+and defaults to off. The status row opens a normal taskbar diagnostic window titled `True Tick Status and Diagnostics` without changing timer state. It provides standard title-bar controls, a resizable read-only status and session log view, and a fresh snapshot each time it is reopened. The native menu keeps both setting toggles open after a toggle and closes for action commands.
 Start and Stop use the same guarded policy and ownership lifecycle as automatic
 activation. The tray tooltip uses `Running (current timing)`, `Stopped (current
 timing)`, and concise transition or warning labels. Full system reports, config
@@ -33,8 +34,9 @@ file before registry writes and attempts rollback if config persistence fails.
 Initial power observation records success or the native failure reason, and failed
 observation remains unknown and blocks acquisition. Manual and automatic activation share the same policy.
 Battery, Battery Saver, and unknown power states remain non-acquiring. A
-restrictive power transition or normal Quit attempts to release owned state and
-reports release failure as warning or stopped according to the truthful state map.
+restrictive power transition attempts to release owned state. Normal Quit requires
+a safe stop when timing is active or uncertain and reports failed cleanup as an
+unverified warning rather than exiting.
 Running and verified ownership is green. Starting, stopping, pending, degraded,
 or unverified behavior is yellow. Stopped, blocked, unsupported, or error behavior
 is red. Unsupported is produced when the native capability is unavailable. Error
