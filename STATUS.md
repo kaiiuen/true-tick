@@ -43,12 +43,12 @@ is not a disconnected production path.
 
 Intentionally absent:
 
-- profiles, application detection, foreground hooks, launcher runtime validation or child processes
+- profiles, application detection, foreground hooks, or child process management beyond launcher handoff
 - calibration loops, benchmark loops, real-time priority, affinity, QoS, execution-state requests
 - NTP, True™ Time integration, network code, installer, secure updater, signing, or release package
 - public compatibility, performance, energy, security, or release claims
 - runtime registration validation against the development machine
-- runtime validation of the resolved portable launcher path
+- interactive runtime validation of launcher handoff and slot execution
 - interactive runtime validation of the Windows diagnostic window
 
 The Windows support matrix and exact native API behavior remain bounded internal

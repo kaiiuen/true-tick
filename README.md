@@ -39,9 +39,9 @@ the named A or B slot, validates the expected `true-tick.exe` file, and launches
 that slot with forwarded arguments. Missing or invalid metadata reports repair
 required and never silently selects A. Secure signatures and rollback are not
 implemented and remain deferred. Boot registration is opt-in through local
-config and is distinct from automatic timer activation after launch. The current
-path resolver only derives `Launcher.exe` from a `Slots\A` or `Slots\B`
-executable shape. It does not claim runtime path or file validation. It does not
+config and is distinct from automatic timer activation after launch. The path resolver only derives `Launcher.exe` from a `Slots\A` or `Slots\B`
+executable shape. The launcher performs the separate runtime metadata and file
+checks before handoff. It does not
 include profiles, process detection, True™ Time, NTP, an installer, a secure
 updater, or release signing.
 
