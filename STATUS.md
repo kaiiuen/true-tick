@@ -11,12 +11,18 @@ validates A/B before activation. Registration is distinct from automatic timer
 activation after the application has launched.
 
 The tray has compact `Start` and `Stop` manual controls, current-state Auto-start
-and automatic timing activation items, one disabled short status item, and Quit.
+and automatic timing activation items, one clickable short status item, and Quit. The
+status row opens a basic native Windows diagnostic window without changing timer state.
 Start and Stop use the same guarded policy and ownership lifecycle as automatic
 activation. The tray tooltip uses `Running (current timing)`, `Stopped (current
 timing)`, and concise transition or warning labels. Full system reports, config
 paths, raw HNS values, power explanations, and full errors are intentionally
-excluded from the tray surface and reserved for logs or future diagnostics.
+excluded from the tray surface and reserved for the diagnostic window. The window shows a local in-memory session log
+from process start through the current moment. It uses monotonic sequence numbers
+and elapsed process time, has a default 512 event bound, retains newest events with
+a truncation marker, and defers disk persistence. Fields are sanitized and bounded
+so raw pointers, credentials, private tokens, arbitrary secrets, and unbounded
+sensitive paths are not recorded.
 Configuration writes use a flushed temporary file replacement. Parse and write
 errors remain visible. Manual and automatic activation share the same policy.
 Battery, Battery Saver, and unknown power states remain non-acquiring. A
@@ -34,6 +40,7 @@ Intentionally absent:
 - public compatibility, performance, energy, security, or release claims
 - runtime registration validation against the development machine
 - runtime validation of the resolved portable launcher path
+- interactive runtime validation of the Windows diagnostic window
 
 The Windows support matrix and exact native API behavior remain bounded internal
 validation work. Power observation does not yet provide full Battery Saver,

@@ -41,6 +41,7 @@ name = "tick-platform-windows"
 version = "0.1.0"
 dependencies = [
  "tick-core",
+ "tick-diagnostics",
 ]
 
 [[package]]

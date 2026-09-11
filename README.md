@@ -8,14 +8,19 @@ serialized owned-request lifecycle, conservative power policy, a native tray
 surface, atomically replaced local configuration, per-user boot startup
 registration, and a bounded portable A/B launcher scaffold. The compact tray
 menu exposes `Start`, `Stop`, current Auto-start and automatic timing activation
-toggles, a disabled short status item, and `Quit`. Start and Stop remain manual
-controls and use the same guarded policy and ownership lifecycle as automatic
-activation. It excludes system reports, config paths, raw HNS values, power
-explanations, and full errors. The tooltip uses short runtime wording: `Running
+toggles, a clickable short status item, and `Quit`. Status opens a crude native
+Windows diagnostic window without changing timer state. Start and Stop remain
+manual controls and use the same guarded policy and ownership lifecycle as automatic
+activation. The diagnostic window shows a bounded, local in-memory session log.
+It excludes raw pointers, private tokens, credentials, arbitrary secrets, and
+unbounded sensitive paths. The tooltip uses short runtime wording: `Running
 (current timing)`, `Stopped (current timing)`, or a concise transition or warning
 label. All activation paths use
 the same conservative power policy, so battery, Battery Saver, and unknown power
-states do not acquire.
+states do not acquire. Events use monotonic sequence numbers and elapsed time
+from process start. The default bound is 512 events. Newest events are retained
+with a truncation marker when the bound is reached. Disk persistence for full
+session logs is deferred.
 
 Per-user boot registration targets the portable `Launcher.exe` entry point, never
 a slot payload. The launcher remains responsible for selecting and validating

@@ -8,19 +8,25 @@ This repository contains an internal v1 runtime, not a production release.
 - `tick-platform-windows` isolates the native timer request and release calls.
 - `tick-observation-windows` is the event and power observation boundary.
 - `tick-ownership` serializes preflight, request, verification, postcondition, and release.
-- `tick-diagnostics` formats truthful status and evidence records.
+- `tick-diagnostics` owns truthful status formatting and a bounded synchronized in-memory session event store.
 - `tick-calibration` remains an explicit unsupported boundary.
 - `tick-startup-windows` isolates opt-in current-user Run-key registration and removal.
 - `apps/true-tick` owns the tray composition, startup configuration, and portable launcher framing.
-- `apps/true-tick/src/tray_surface.rs` owns pure compact labels, tooltip text, and status-to-color mapping.
+- `apps/true-tick/src/tray_surface.rs` owns pure compact labels, tooltip text, status-to-color mapping, and status command mapping.
 
 The v1 tray menu is intentionally compact. It contains `Start`, `Stop`, current
 Auto-start and automatic timing activation toggles, a disabled short status item,
 and Quit. Start and Stop remain the core manual controls and use the same guarded
-policy and ownership lifecycle as automatic activation. Full system reports, config
-paths, raw HNS values, power explanations, and full errors are excluded from the
-menu and tooltip.
-Detailed evidence remains an internal diagnostics or logging concern.
+policy and ownership lifecycle as automatic activation. The clickable status row
+opens a basic native Windows diagnostic window and never changes timer state. Full
+system reports, config paths, raw HNS values, power explanations, and full errors
+remain excluded from the compact menu and tooltip.
+
+Detailed evidence is recorded in a local bounded in-memory session log. Events have
+monotonic sequence numbers and elapsed process time. The default limit is 512
+events, with newest-event retention and one truncation marker. The store sanitizes
+control layout and bounds each field. Disk persistence for a full session log is
+deferred. The UI refreshes from a current snapshot and shows the current tray state.
 
 An inconclusive adapter postcondition enters an unverified state and suppresses
 repeat acquisition or guessed cleanup. The runtime does not use a busy loop,
