@@ -34,6 +34,7 @@ const ID_AUTOMATIC_OFF: usize = 1008;
 const WM_SIZE: u32 = 0x0005;
 const WM_CLOSE: u32 = 0x0010;
 const WM_NCDESTROY: u32 = 0x0082;
+const WM_SETFOCUS: u32 = 0x0007;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf0000;
 const WS_VISIBLE: u32 = 0x10000000;
 const WS_CHILD: u32 = 0x40000000;
@@ -157,20 +158,24 @@ pub fn run() {
             (Some(error), _) => error,
             (None, StartupOperation::Register) => {
                 match crate::portable::launcher_path_from_slot_executable(&executable) {
-                    Ok(launcher) => match WindowsUserStartup::default().register(&launcher) {
-                        Ok(()) => {
-                            diagnostics.record("startup.registration.result", "result=success");
-                            "boot startup registered for the current-user Launcher.exe entry point"
+                    Ok(launcher) => {
+                        diagnostics
+                            .record("native.RegSetValueExW.call", "value=TrueTick path=redacted");
+                        match WindowsUserStartup::default().register(&launcher) {
+                            Ok(()) => {
+                                diagnostics.record("startup.registration.result", "result=success");
+                                "boot startup registered for the current-user Launcher.exe entry point"
                                 .to_owned()
+                            }
+                            Err(error) => {
+                                diagnostics.record(
+                                    "startup.registration.result",
+                                    format!("result=error error={error:?}"),
+                                );
+                                format!("Red: boot startup registration error {error:?}")
+                            }
                         }
-                        Err(error) => {
-                            diagnostics.record(
-                                "startup.registration.result",
-                                format!("result=error error={error:?}"),
-                            );
-                            format!("Red: boot startup registration error {error:?}")
-                        }
-                    },
+                    }
                     Err(error) => {
                         diagnostics.record(
                             "startup.launcher_slot_selection",
@@ -180,19 +185,22 @@ pub fn run() {
                     }
                 }
             }
-            (None, StartupOperation::Remove) => match WindowsUserStartup::default().remove() {
-                Ok(()) => {
-                    diagnostics.record("startup.registration.result", "result=removed");
-                    "boot startup registration disabled by config".to_owned()
+            (None, StartupOperation::Remove) => {
+                diagnostics.record("native.RegDeleteValueW.call", "value=TrueTick");
+                match WindowsUserStartup::default().remove() {
+                    Ok(()) => {
+                        diagnostics.record("startup.registration.result", "result=removed");
+                        "boot startup registration disabled by config".to_owned()
+                    }
+                    Err(error) => {
+                        diagnostics.record(
+                            "startup.registration.result",
+                            format!("result=error error={error:?}"),
+                        );
+                        format!("Red: boot startup removal error {error:?}")
+                    }
                 }
-                Err(error) => {
-                    diagnostics.record(
-                        "startup.registration.result",
-                        format!("result=error error={error:?}"),
-                    );
-                    format!("Red: boot startup removal error {error:?}")
-                }
-            },
+            }
         };
 
         let mut observation = WindowsObservation::default();
@@ -509,6 +517,7 @@ unsafe extern "system" fn window_proc(
             WM_POWERBROADCAST if w_param == PBT_APMPOWERSTATUSCHANGE => {
                 app.record("power.broadcast", "event=APMPOWERSTATUSCHANGE");
                 let previous = app.observation.power().state;
+                app.record("native.GetSystemPowerStatus.call", "fields=sanitized");
                 let result = app.observation.refresh_power();
                 app.record(
                     "power.observation",
@@ -681,6 +690,10 @@ unsafe extern "system" fn diagnostic_window_proc(
             MoveWindow(edit, 0, 0, width, height, 1);
         } else if message == WM_CLOSE {
             DestroyWindow(hwnd);
+        } else if message == WM_SETFOCUS {
+            if !app.is_null() {
+                refresh_diagnostic_window(hwnd, &*app);
+            }
         } else if message == WM_NCDESTROY {
             (*app).diagnostic_window = None;
         }
