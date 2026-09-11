@@ -11,6 +11,8 @@ use tick_startup_windows::{
     startup_operation, StartupOperation, StartupRegistration, WindowsUserStartup,
 };
 
+use crate::tray_surface::{auto_start_label, automatic_label, tooltip, IconColor, TrayStatus};
+
 const WM_APP: u32 = 0x8000;
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_CREATE: u32 = 0x0001;
@@ -19,8 +21,6 @@ const WM_DESTROY: u32 = 0x0002;
 const WM_RBUTTONUP: usize = 0x0205;
 const WM_POWERBROADCAST: u32 = 0x0218;
 const PBT_APMPOWERSTATUSCHANGE: usize = 0x000A;
-const ID_START: usize = 1001;
-const ID_STOP: usize = 1002;
 const ID_QUIT: usize = 1004;
 const ID_STARTUP_ON: usize = 1005;
 const ID_STARTUP_OFF: usize = 1006;
@@ -30,8 +30,7 @@ const TPM_RIGHTBUTTON: u32 = 0x0002;
 const MF_STRING: u32 = 0x0000;
 const MF_SEPARATOR: u32 = 0x0800;
 const MF_GRAYED: u32 = 0x0001;
-const MF_CHECKED: u32 = 0x0008;
-const MF_POPUP: u32 = 0x0010;
+
 const NIF_MESSAGE: u32 = 0x0001;
 const NIF_ICON: u32 = 0x0002;
 const NIF_TIP: u32 = 0x0004;
@@ -103,7 +102,7 @@ struct App {
     controller: TimerController<WindowsTimerPlatform>,
     observation: WindowsObservation,
     config: config::Config,
-    status_text: String,
+    tray_status: TrayStatus,
     config_path: PathBuf,
     executable: PathBuf,
     startup_status: String,
@@ -137,18 +136,7 @@ pub fn run() {
                 Err(error) => format!("Red: boot startup removal error {error:?}"),
             },
         };
-        let portable_status = match crate::portable::portable_root_from_slot_executable(&executable)
-        {
-            Ok(root) => match crate::portable::select(&root) {
-                crate::portable::Selection::Selected { slot, path } => {
-                    format!("slot {:?}: {}", slot, path.display())
-                }
-                crate::portable::Selection::RepairRequired(reason) => {
-                    format!("A/B scaffold: repair required, {reason}")
-                }
-            },
-            Err(error) => format!("A/B scaffold: repair required, {error:?}"),
-        };
+
         let mut observation = WindowsObservation::default();
         let _ = observation.refresh_power();
         let app = Box::new(App {
@@ -158,7 +146,11 @@ pub fn run() {
             ),
             observation,
             config: loaded,
-            status_text: format!("Yellow: waiting for a verified request, {portable_status}"),
+            tray_status: if startup_status.starts_with("Red") {
+                TrayStatus::Stopped
+            } else {
+                TrayStatus::Warning
+            },
             config_path,
             executable,
             startup_status,
@@ -194,7 +186,7 @@ pub fn run() {
             wnd_class.instance,
             app_ptr as *mut c_void,
         );
-        let mut icon = NotifyIconData::new(hwnd, status(app));
+        let mut icon = NotifyIconData::new(hwnd, app.tray_status);
         Shell_NotifyIconW(NIM_ADD, &mut icon);
         app.tray_icon = Some(icon);
         if app.config.automatic {
@@ -225,11 +217,11 @@ fn apply_policy(app: &mut App) {
     });
     if decision.status == tick_core::Status::Requested {
         match app.controller.start() {
-            Ok(Verification::Verified) => app.status_text = "Green: active and verified".into(),
+            Ok(Verification::Verified) => app.tray_status = TrayStatus::Active,
             Ok(Verification::Unverified | Verification::NotCollected) => {
-                app.status_text = "Yellow: request accepted but unverified".into()
+                app.tray_status = TrayStatus::Warning
             }
-            Err(error) => app.status_text = format!("Red: request error {error:?}"),
+            Err(_error) => app.tray_status = TrayStatus::Stopped,
         }
         return;
     }
@@ -237,25 +229,12 @@ fn apply_policy(app: &mut App) {
     release_for_policy(app, decision.reason);
 }
 
-fn release_for_policy(app: &mut App, reason: tick_policy::PolicyReason) {
+fn release_for_policy(app: &mut App, _reason: tick_policy::PolicyReason) {
     match app.controller.stop() {
         Ok(_) => {
-            app.status_text = match reason {
-                tick_policy::PolicyReason::BatteryRestricted => {
-                    "Yellow: released by battery policy".into()
-                }
-                tick_policy::PolicyReason::BatterySaverRestricted => {
-                    "Yellow: released, Battery Saver blocks activation".into()
-                }
-                tick_policy::PolicyReason::PowerUnknown => {
-                    "Yellow: released, power state is unknown".into()
-                }
-                _ => "Yellow: released by policy".into(),
-            }
+            app.tray_status = TrayStatus::Warning;
         }
-        Err(error) => {
-            app.status_text = format!("Yellow: release failed, ownership unverified {error:?}")
-        }
+        Err(_error) => app.tray_status = TrayStatus::Stopped,
     }
 }
 
@@ -273,29 +252,19 @@ fn release_for_power_change(app: &mut App) {
     }
 }
 
-fn status(app: &App) -> String {
-    format!(
-        "{} | {} | config: {}",
-        app.status_text,
-        app.startup_status,
-        app.config_path.display()
-    )
-}
-
 impl App {
     fn publish(&mut self) {
-        let text = status(self);
         if let Some(icon) = self.tray_icon.as_mut() {
-            update_icon(icon, text);
+            update_icon(icon, self.tray_status);
         }
     }
 }
 
-fn update_icon(icon: &mut NotifyIconData, text: String) {
+fn update_icon(icon: &mut NotifyIconData, status: TrayStatus) {
     let old_icon = icon.h_icon;
-    icon.h_icon = unsafe { status_icon(&text) };
+    icon.h_icon = unsafe { status_icon(status) };
     icon.sz_tip = [0; 128];
-    for (target, source) in icon.sz_tip.iter_mut().zip(text.encode_utf16()) {
+    for (target, source) in icon.sz_tip.iter_mut().zip(tooltip(status).encode_utf16()) {
         *target = source;
     }
     unsafe {
@@ -304,13 +273,12 @@ fn update_icon(icon: &mut NotifyIconData, text: String) {
     }
 }
 
-unsafe fn status_icon(text: &str) -> *mut c_void {
-    let color = if text.starts_with("Green") {
-        0x0000b000u32
-    } else if text.starts_with("Red") {
-        0x0000d000u32
-    } else {
-        0x0000d0d0u32
+unsafe fn status_icon(status: TrayStatus) -> *mut c_void {
+    let color = match status.icon_color() {
+        // CreateBitmap receives the packed 32-bit pixel as 0x00RRGGBB.
+        IconColor::Green => 0x0000b000u32,
+        IconColor::Yellow => 0x00d0d000u32,
+        IconColor::Red => 0x00d00000u32,
     };
     let pixels = [color; 16 * 16];
     let mask = [0u8; 16 * 16 / 8];
@@ -347,17 +315,6 @@ unsafe extern "system" fn window_proc(
         match message {
             WM_TRAY if l_param as usize == WM_RBUTTONUP => show_menu(hwnd, app),
             WM_COMMAND => match w_param & 0xffff {
-                ID_START => {
-                    apply_policy(app);
-                    app.publish();
-                }
-                ID_STOP => {
-                    match app.controller.stop() {
-                        Ok(_) => app.status_text = "Yellow: stopped and released".into(),
-                        Err(error) => app.status_text = format!("Red: release error {error:?}"),
-                    }
-                    app.publish();
-                }
                 ID_STARTUP_ON => set_startup(app, true),
                 ID_STARTUP_OFF => set_startup(app, false),
                 ID_AUTOMATIC_ON => set_automatic(app, true),
@@ -367,9 +324,7 @@ unsafe extern "system" fn window_proc(
                         let message = format!(
                             "Normal shutdown release failed. Tick ownership is unverified.\n\n{error:?}"
                         );
-                        app.status_text = format!(
-                            "Yellow: normal shutdown release failed, ownership unverified {error:?}"
-                        );
+                        app.tray_status = TrayStatus::Warning;
                         app.publish();
                         MessageBoxW(
                             hwnd,
@@ -400,69 +355,35 @@ unsafe extern "system" fn window_proc(
 
 unsafe fn show_menu(hwnd: *mut c_void, app: &App) {
     let menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING, ID_START, wide("Start").as_ptr());
-    AppendMenuW(menu, MF_STRING, ID_STOP, wide("Stop").as_ptr());
-
-    let startup = CreatePopupMenu();
-    let startup_on = if app.config.startup_enabled {
-        MF_STRING | MF_CHECKED
+    let startup_id = if app.config.startup_enabled {
+        ID_STARTUP_OFF
     } else {
-        MF_STRING
+        ID_STARTUP_ON
     };
-    AppendMenuW(startup, startup_on, ID_STARTUP_ON, wide("On").as_ptr());
+    let automatic_id = if app.config.automatic {
+        ID_AUTOMATIC_OFF
+    } else {
+        ID_AUTOMATIC_ON
+    };
     AppendMenuW(
-        startup,
-        if app.config.startup_enabled {
-            MF_STRING
-        } else {
-            MF_STRING | MF_CHECKED
-        },
-        ID_STARTUP_OFF,
-        wide("Off").as_ptr(),
+        menu,
+        MF_STRING,
+        startup_id,
+        wide(auto_start_label(app.config.startup_enabled)).as_ptr(),
     );
     AppendMenuW(
         menu,
-        MF_STRING | MF_POPUP,
-        startup as usize,
-        wide("Auto-start").as_ptr(),
-    );
-
-    let automatic = CreatePopupMenu();
-    let automatic_on = if app.config.automatic {
-        MF_STRING | MF_CHECKED
-    } else {
-        MF_STRING
-    };
-    AppendMenuW(
-        automatic,
-        automatic_on,
-        ID_AUTOMATIC_ON,
-        wide("On").as_ptr(),
-    );
-    AppendMenuW(
-        automatic,
-        if app.config.automatic {
-            MF_STRING
-        } else {
-            MF_STRING | MF_CHECKED
-        },
-        ID_AUTOMATIC_OFF,
-        wide("Off").as_ptr(),
-    );
-    AppendMenuW(
-        menu,
-        MF_STRING | MF_POPUP,
-        automatic as usize,
-        wide("Automatic timing activation").as_ptr(),
+        MF_STRING,
+        automatic_id,
+        wide(automatic_label(app.config.automatic)).as_ptr(),
     );
 
     AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, wide(&status(app)).as_ptr());
     AppendMenuW(
         menu,
         MF_STRING | MF_GRAYED,
         0,
-        wide("Power and timing are event-driven").as_ptr(),
+        wide(&format!("Status: {}", app.tray_status.label())).as_ptr(),
     );
     AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
     AppendMenuW(menu, MF_STRING, ID_QUIT, wide("Quit").as_ptr());
@@ -478,16 +399,14 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &App) {
         hwnd,
         std::ptr::null(),
     );
-    DestroyMenu(automatic);
-    DestroyMenu(startup);
     DestroyMenu(menu);
 }
 
 fn set_automatic(app: &mut App, enabled: bool) {
     let mut next = app.config.clone();
     next.automatic = enabled;
-    if let Err(error) = config::save_atomic(&app.config_path, &next) {
-        app.status_text = format!("Red: automatic activation config error {error}");
+    if config::save_atomic(&app.config_path, &next).is_err() {
+        app.tray_status = TrayStatus::Stopped;
         app.publish();
         return;
     }
@@ -496,11 +415,8 @@ fn set_automatic(app: &mut App, enabled: bool) {
         reconcile(app);
     } else {
         match app.controller.stop() {
-            Ok(_) => app.status_text = "Yellow: automatic timing activation disabled".into(),
-            Err(error) => {
-                app.status_text =
-                    format!("Yellow: automatic activation disabled, release unverified {error:?}")
-            }
+            Ok(_) => app.tray_status = TrayStatus::Stopped,
+            Err(_error) => app.tray_status = TrayStatus::Warning,
         }
     }
     app.publish();
@@ -515,15 +431,17 @@ fn set_startup(app: &mut App, enabled: bool) {
     } else {
         WindowsUserStartup::default().remove()
     };
-    if let Err(error) = registration {
-        app.startup_status = format!("Red: startup registration error {error:?}");
+    if registration.is_err() {
+        app.startup_status = "startup registration error".into();
+        app.tray_status = TrayStatus::Stopped;
         app.publish();
         return;
     }
     let mut next = app.config.clone();
     next.startup_enabled = enabled;
-    if let Err(error) = config::save_atomic(&app.config_path, &next) {
-        app.startup_status = format!("Red: startup config error {error}");
+    if config::save_atomic(&app.config_path, &next).is_err() {
+        app.startup_status = "startup config error".into();
+        app.tray_status = TrayStatus::Stopped;
         app.publish();
         return;
     }
@@ -541,14 +459,14 @@ fn wide(value: &str) -> Vec<u16> {
 }
 
 impl NotifyIconData {
-    fn new(hwnd: *mut c_void, tip: String) -> Self {
+    fn new(hwnd: *mut c_void, status: TrayStatus) -> Self {
         let mut value = Self {
             cb_size: size_of::<Self>() as u32,
             h_wnd: hwnd,
             u_id: 1,
             u_flags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
             u_callback_message: WM_TRAY,
-            h_icon: unsafe { status_icon(&tip) },
+            h_icon: unsafe { status_icon(status) },
             sz_tip: [0; 128],
             dw_state: 0,
             dw_state_mask: 0,
@@ -559,7 +477,7 @@ impl NotifyIconData {
             guid: [0; 16],
             h_balloon_icon: std::ptr::null_mut(),
         };
-        for (target, source) in value.sz_tip.iter_mut().zip(tip.encode_utf16()) {
+        for (target, source) in value.sz_tip.iter_mut().zip(tooltip(status).encode_utf16()) {
             *target = source;
         }
         value

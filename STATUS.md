@@ -10,12 +10,18 @@ registration is isolated behind its own Windows adapter and targets the portable
 validates A/B before activation. Registration is distinct from automatic timer
 activation after the application has launched.
 
-The tray has persistent Auto-start and automatic timing activation submenus.
-Configuration writes use a flushed temporary file replacement. Parse and write
+The tray has compact current-state Auto-start and automatic timing activation
+items, one disabled short status item, and Quit. The tray tooltip contains only
+`True Tick: Active`, `True Tick: Warning`, or `True Tick: Stopped`. Full system
+reports, config paths, raw HNS values, power explanations, and full errors are
+intentionally excluded from the tray surface and reserved for logs or future
+diagnostics. Configuration writes use a flushed temporary file replacement. Parse and write
 errors remain visible. Manual and automatic activation share the same policy.
 Battery, Battery Saver, and unknown power states remain non-acquiring. A
 restrictive power transition or normal Quit attempts to release owned state and
-reports release failure as yellow and unverified.
+reports release failure as warning or stopped according to the truthful state map.
+Verified ownership is green Active. Pending or unverified behavior is yellow
+Warning. Stopped, blocked, unsupported, or error behavior is red Stopped.
 
 Intentionally absent:
 

@@ -12,6 +12,13 @@ This repository contains an internal v1 runtime, not a production release.
 - `tick-calibration` remains an explicit unsupported boundary.
 - `tick-startup-windows` isolates opt-in current-user Run-key registration and removal.
 - `apps/true-tick` owns the tray composition, startup configuration, and portable launcher framing.
+- `apps/true-tick/src/tray_surface.rs` owns pure compact labels, tooltip text, and status-to-color mapping.
+
+The v1 tray menu is intentionally compact. It contains current Auto-start and
+automatic timing activation toggles, a disabled `Status: Active`, `Status: Warning`,
+or `Status: Stopped` item, and Quit. Full system reports, config paths, raw HNS
+values, power explanations, and full errors are excluded from the menu and tooltip.
+Detailed evidence remains an internal diagnostics or logging concern.
 
 An inconclusive adapter postcondition enters an unverified state and suppresses
 repeat acquisition or guessed cleanup. The runtime does not use a busy loop,
@@ -31,6 +38,8 @@ activation after launch. Both settings are persisted through a flushed temporary
 file replacement. Parse and write failures are surfaced in the tray status.
 Missing or invalid A/B metadata requires repair and never defaults to slot A.
 True™ Time is not a dependency. Platform behavior that cannot be verified remains
-yellow or red rather than being reported as green. Current observation verifies
+yellow or red rather than being reported as green. The tray maps verified ownership
+to green Active, pending or unverified behavior to yellow Warning, and stopped,
+blocked, unsupported, or error behavior to red Stopped. Current observation verifies
 only the available system power query and one power broadcast path. Full Battery
 Saver, session, lock, suspend, and resume notification support is not claimed.

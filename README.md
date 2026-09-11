@@ -7,9 +7,12 @@ The v1 uses a narrow native timer adapter with raw status preservation, a
 serialized owned-request lifecycle, conservative power policy, a native tray
 surface, atomically replaced local configuration, per-user boot startup
 registration, and a bounded portable A/B launcher scaffold. The compact tray
-menu exposes manual Start and Stop plus persistent Auto-start and automatic
-timing activation toggles. All activation paths use the same conservative power
-policy, so battery, Battery Saver, and unknown power states do not acquire.
+menu exposes current Auto-start and automatic timing activation toggles, a disabled
+short status item, and Quit. It excludes system reports, config paths, raw HNS
+values, power explanations, and full errors. The tooltip is limited to `True Tick:
+Active`, `True Tick: Warning`, or `True Tick: Stopped`. All activation paths use
+the same conservative power policy, so battery, Battery Saver, and unknown power
+states do not acquire.
 
 Per-user boot registration targets the portable `Launcher.exe` entry point, never
 a slot payload. The launcher remains responsible for selecting and validating
