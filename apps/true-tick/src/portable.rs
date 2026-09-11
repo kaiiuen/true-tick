@@ -27,7 +27,7 @@ pub enum Selection {
     RepairRequired(String),
 }
 
-pub fn launcher_path_from_slot_executable(executable: &Path) -> Result<PathBuf, LauncherPathError> {
+pub fn portable_root_from_slot_executable(executable: &Path) -> Result<PathBuf, LauncherPathError> {
     let slot = executable
         .parent()
         .and_then(Path::file_name)
@@ -35,12 +35,16 @@ pub fn launcher_path_from_slot_executable(executable: &Path) -> Result<PathBuf, 
     if !matches!(slot, Some("A" | "B")) {
         return Err(LauncherPathError::NotAnAbSlotExecutable);
     }
-    let root = executable
+    executable
         .parent()
         .and_then(Path::parent)
         .and_then(Path::parent)
-        .ok_or(LauncherPathError::NotAnAbSlotExecutable)?;
-    Ok(root.join("Launcher.exe"))
+        .map(Path::to_path_buf)
+        .ok_or(LauncherPathError::NotAnAbSlotExecutable)
+}
+
+pub fn launcher_path_from_slot_executable(executable: &Path) -> Result<PathBuf, LauncherPathError> {
+    Ok(portable_root_from_slot_executable(executable)?.join("Launcher.exe"))
 }
 
 pub fn select(root: &Path) -> Selection {
@@ -53,7 +57,11 @@ pub fn select(root: &Path) -> Selection {
         Some("A") => Slot::A,
         Some("B") => Slot::B,
         Some(_) => return Selection::RepairRequired("active-slot.txt is not A or B".into()),
-        None => Slot::A,
+        None => {
+            return Selection::RepairRequired(
+                "active-slot.txt is missing, explicit initialization is required".into(),
+            )
+        }
     };
     let fallback = match preferred {
         Slot::A => Slot::B,
@@ -96,7 +104,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_active_slot_requires_repair() {
+    fn invalid_or_missing_active_slot_requires_repair() {
         let root = std::env::temp_dir().join(format!(
             "true-tick-ab-{}",
             SystemTime::now()
@@ -105,8 +113,21 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&root).unwrap();
+        assert!(matches!(select(&root), Selection::RepairRequired(_)));
         fs::write(root.join("active-slot.txt"), "C\n").unwrap();
         assert!(matches!(select(&root), Selection::RepairRequired(_)));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn portable_root_matches_launcher_root() {
+        let executable = PathBuf::from("portable-root")
+            .join("Slots")
+            .join("A")
+            .join("true-tick.exe");
+        assert_eq!(
+            portable_root_from_slot_executable(&executable).unwrap(),
+            PathBuf::from("portable-root")
+        );
     }
 }

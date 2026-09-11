@@ -136,17 +136,17 @@ pub fn run() {
                 Err(error) => format!("Red: boot startup removal error {error:?}"),
             },
         };
-        let portable_status = match crate::portable::select(
-            executable
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new(".")),
-        ) {
-            crate::portable::Selection::Selected { slot, path } => {
-                format!("slot {:?}: {}", slot, path.display())
-            }
-            crate::portable::Selection::RepairRequired(reason) => {
-                format!("A/B scaffold: repair required, {reason}")
-            }
+        let portable_status = match crate::portable::portable_root_from_slot_executable(&executable)
+        {
+            Ok(root) => match crate::portable::select(&root) {
+                crate::portable::Selection::Selected { slot, path } => {
+                    format!("slot {:?}: {}", slot, path.display())
+                }
+                crate::portable::Selection::RepairRequired(reason) => {
+                    format!("A/B scaffold: repair required, {reason}")
+                }
+            },
+            Err(error) => format!("A/B scaffold: repair required, {error:?}"),
         };
         let mut observation = WindowsObservation::default();
         let _ = observation.refresh_power();
