@@ -1,0 +1,10 @@
+[package]
+name = "true-tick"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tick-core = { path = "../../crates/tick-core" }
+tick-diagnostics = { path = "../../crates/tick-diagnostics" }
