@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tick-core",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "UNLICENSED"
+publish = false
