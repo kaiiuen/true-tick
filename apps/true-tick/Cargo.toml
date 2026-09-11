@@ -1,5 +1,6 @@
 [package]
 name = "true-tick"
+default-run = "true-tick"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

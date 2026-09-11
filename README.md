@@ -3,6 +3,36 @@
 True™ Tick is an internal v1 tray-only Windows application. It is not a
 production release and is not authorized for publication.
 
+## Development commands
+
+The workspace has two app packages, so commands from the workspace root select
+the package and target explicitly. These checks do not launch an app or change
+Windows state:
+
+```text
+cargo metadata --no-deps --format-version 1
+cargo check --workspace --all-targets
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+To launch the tray app during an explicitly authorized development run, use:
+
+```text
+cargo run -p true-tick --bin true-tick
+```
+
+The portable Launcher target is separate:
+
+```text
+cargo run -p true-tick-launcher --bin Launcher
+```
+
+Within `apps/true-tick`, `cargo run` defaults to the `true-tick` tray target.
+The workspace-root command remains explicit because both app targets are
+intended development targets. The commands above are not runtime validation of
+tray behavior, startup registration, or launcher handoff.
+
 The v1 uses a narrow native timer adapter with raw status preservation, an
 explicit released, owned, or uncertain ownership lifecycle, controlled recovery,
 conservative power policy, a native tray
