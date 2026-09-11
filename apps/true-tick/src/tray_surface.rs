@@ -137,7 +137,7 @@ pub(crate) const fn tray_click_action(notification: usize) -> Option<TrayClickAc
 }
 
 pub(crate) const fn menu_action_keeps_open(command_id: usize) -> bool {
-    matches!(command_id, 1005..=1008)
+    matches!(command_id, 1001 | 1002 | 1005..=1008)
 }
 
 pub(crate) fn menu_items(
@@ -228,11 +228,11 @@ mod tests {
     }
 
     #[test]
-    fn only_toggle_actions_keep_the_native_menu_open() {
-        for command in [1005, 1006, 1007, 1008] {
+    fn start_stop_and_toggle_actions_keep_the_native_menu_open() {
+        for command in [1001, 1002, 1005, 1006, 1007, 1008] {
             assert!(menu_action_keeps_open(command));
         }
-        for command in [1001, 1002, STATUS_COMMAND_ID, 1004] {
+        for command in [STATUS_COMMAND_ID, 1004] {
             assert!(!menu_action_keeps_open(command));
         }
     }
@@ -259,16 +259,16 @@ mod tests {
     #[test]
     fn tooltip_strings_use_verified_or_requested_timing() {
         let exact = TimingValues {
-            requested: Some(Hns::new(10_000)),
-            effective: Some(Hns::new(10_000)),
+            requested: Some(Hns::new(5_000)),
+            effective: Some(Hns::new(5_000)),
             invalid_interval: false,
         };
         let finer = TimingValues {
-            requested: Some(Hns::new(10_000)),
+            requested: Some(Hns::new(5_000)),
             effective: Some(Hns::new(4_966)),
             invalid_interval: false,
         };
-        assert_eq!(tooltip(TrayStatus::Running, exact), "Running (1.000 ms)");
+        assert_eq!(tooltip(TrayStatus::Running, exact), "Running (0.500 ms)");
         assert_eq!(
             tooltip(TrayStatus::Running, finer),
             "Running (0.497 ms, finer)"
@@ -281,11 +281,11 @@ mod tests {
             tooltip(
                 TrayStatus::Starting,
                 TimingValues {
-                    requested: Some(Hns::new(10_000)),
+                    requested: Some(Hns::new(5_000)),
                     ..TimingValues::default()
                 }
             ),
-            "Starting (1.000 ms)"
+            "Starting (0.500 ms)"
         );
         assert_eq!(
             tooltip(TrayStatus::Stopping, finer),
@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn timing_format_rounds_hns_without_exposing_raw_units() {
         assert_eq!(format_ms(Hns::new(4_966)), "0.497");
-        assert_eq!(format_ms(Hns::new(10_000)), "1.000");
+        assert_eq!(format_ms(Hns::new(5_000)), "0.500");
         assert_eq!(format_ms(Hns::new(156_250)), "15.625");
     }
 
