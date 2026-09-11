@@ -14,8 +14,8 @@ use tick_startup_windows::{
 };
 
 use crate::tray_surface::{
-    menu_action_keeps_open, menu_items, tooltip, tray_click_action, IconColor, TrayClickAction,
-    TrayStatus, STATUS_COMMAND_ID,
+    dpi_to_icon_canvas, icon_pixel_color, menu_action_keeps_open, menu_items, tooltip,
+    tray_click_action, TrayClickAction, TrayStatus, STATUS_COMMAND_ID,
 };
 
 const WM_APP: u32 = 0x8000;
@@ -556,29 +556,30 @@ impl App {
 }
 
 fn update_icon(icon: &mut NotifyIconData, status: TrayStatus) {
+    let replacement = unsafe { status_icon(status, dpi_for_window(icon.h_wnd)) };
+    if replacement.is_null() {
+        return;
+    }
     let old_icon = icon.h_icon;
-    icon.h_icon = unsafe { status_icon(status) };
+    icon.h_icon = replacement;
     icon.sz_tip = [0; 128];
     for (target, source) in icon.sz_tip.iter_mut().zip(tooltip(status).encode_utf16()) {
         *target = source;
     }
     unsafe {
         Shell_NotifyIconW(NIM_MODIFY, icon);
-        DestroyIcon(old_icon);
+        destroy_icon(old_icon);
     }
 }
 
-unsafe fn status_icon(status: TrayStatus) -> *mut c_void {
-    let color = match status.icon_color() {
-        // CreateBitmap receives the packed 32-bit pixel as 0x00RRGGBB.
-        IconColor::Green => 0x0000b000u32,
-        IconColor::Yellow => 0x00d0d000u32,
-        IconColor::Red => 0x00d00000u32,
-    };
-    let pixels = [color; 16 * 16];
-    let mask = [0u8; 16 * 16 / 8];
-    let bitmap = CreateBitmap(16, 16, 1, 32, pixels.as_ptr() as *const c_void);
-    let mask_bitmap = CreateBitmap(16, 16, 1, 1, mask.as_ptr() as *const c_void);
+unsafe fn status_icon(status: TrayStatus, dpi: u32) -> *mut c_void {
+    let color = icon_pixel_color(status);
+    let canvas = dpi_to_icon_canvas(dpi);
+    let pixel_count = (canvas * canvas) as usize;
+    let pixels = vec![color; pixel_count];
+    let mask = vec![0u8; pixel_count / 8];
+    let bitmap = CreateBitmap(canvas, canvas, 1, 32, pixels.as_ptr() as *const c_void);
+    let mask_bitmap = CreateBitmap(canvas, canvas, 1, 1, mask.as_ptr() as *const c_void);
     let info = IconInfo {
         f_icon: 1,
         x_hotspot: 0,
@@ -590,6 +591,21 @@ unsafe fn status_icon(status: TrayStatus) -> *mut c_void {
     DeleteObject(bitmap);
     DeleteObject(mask_bitmap);
     icon
+}
+
+fn dpi_for_window(window: *mut c_void) -> u32 {
+    let dpi = unsafe { GetDpiForWindow(window) };
+    if dpi == 0 {
+        96
+    } else {
+        dpi
+    }
+}
+
+unsafe fn destroy_icon(icon: *mut c_void) {
+    if !icon.is_null() {
+        DestroyIcon(icon);
+    }
 }
 
 unsafe extern "system" fn window_proc(
@@ -1065,6 +1081,13 @@ fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+impl Drop for NotifyIconData {
+    fn drop(&mut self) {
+        unsafe { destroy_icon(self.h_icon) };
+        self.h_icon = std::ptr::null_mut();
+    }
+}
+
 impl NotifyIconData {
     fn new(hwnd: *mut c_void, status: TrayStatus) -> Self {
         let mut value = Self {
@@ -1073,7 +1096,7 @@ impl NotifyIconData {
             u_id: 1,
             u_flags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
             u_callback_message: WM_TRAY,
-            h_icon: unsafe { status_icon(status) },
+            h_icon: unsafe { status_icon(status, dpi_for_window(hwnd)) },
             sz_tip: [0; 128],
             dw_state: 0,
             dw_state_mask: 0,
@@ -1172,6 +1195,7 @@ extern "system" {
     fn GetCursorPos(point: *mut Point) -> i32;
     fn LoadIconW(instance: *mut c_void, name: *const u16) -> *mut c_void;
     fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+    fn GetDpiForWindow(window: *mut c_void) -> u32;
     fn CreateIconIndirect(info: *const IconInfo) -> *mut c_void;
     fn DestroyIcon(icon: *mut c_void) -> i32;
 }

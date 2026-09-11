@@ -84,6 +84,29 @@ pub(crate) fn tooltip(status: TrayStatus) -> &'static str {
 
 pub(crate) const STATUS_COMMAND_ID: usize = 1009;
 
+pub(crate) const fn dpi_to_icon_canvas(dpi: u32) -> i32 {
+    let dpi = if dpi == 0 { 96 } else { dpi };
+    if dpi <= 107 {
+        16
+    } else if dpi <= 132 {
+        20
+    } else if dpi <= 168 {
+        24
+    } else if dpi <= 288 {
+        32
+    } else {
+        64
+    }
+}
+
+pub(crate) const fn icon_pixel_color(status: TrayStatus) -> u32 {
+    match status.icon_color() {
+        IconColor::Green => 0x0000b000,
+        IconColor::Yellow => 0x00d0d000,
+        IconColor::Red => 0x00d00000,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TrayClickAction {
     OpenMenu,
@@ -149,6 +172,41 @@ mod tests {
         assert_eq!(tray_click_action(0x0205), Some(TrayClickAction::OpenMenu));
         for notification in [0x0201, 0x0204, 0x0203, 0x0206, 0x0000_0000] {
             assert_eq!(tray_click_action(notification), None);
+        }
+    }
+
+    #[test]
+    fn dpi_maps_to_requested_canvas_sizes_and_clamps_intermediate_values() {
+        for (dpi, canvas) in [(96, 16), (120, 20), (144, 24), (192, 32), (384, 64)] {
+            assert_eq!(dpi_to_icon_canvas(dpi), canvas);
+        }
+        assert_eq!(dpi_to_icon_canvas(0), 16);
+        assert_eq!(dpi_to_icon_canvas(108), 20);
+        assert_eq!(dpi_to_icon_canvas(168), 24);
+        assert_eq!(dpi_to_icon_canvas(175), 32);
+        assert_eq!(dpi_to_icon_canvas(288), 32);
+        assert_eq!(dpi_to_icon_canvas(289), 64);
+    }
+
+    #[test]
+    fn status_colors_are_stable_for_native_icon_pixels() {
+        assert_eq!(icon_pixel_color(TrayStatus::Running), 0x0000b000);
+        for status in [
+            TrayStatus::Starting,
+            TrayStatus::Stopping,
+            TrayStatus::Pending,
+            TrayStatus::Degraded,
+            TrayStatus::Unverified,
+        ] {
+            assert_eq!(icon_pixel_color(status), 0x00d0d000);
+        }
+        for status in [
+            TrayStatus::Stopped,
+            TrayStatus::Blocked,
+            TrayStatus::Unsupported,
+            TrayStatus::Error,
+        ] {
+            assert_eq!(icon_pixel_color(status), 0x00d00000);
         }
     }
 
