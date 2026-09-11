@@ -62,9 +62,9 @@ pub(crate) const fn auto_start_label(enabled: bool) -> &'static str {
 
 pub(crate) const fn automatic_label(enabled: bool) -> &'static str {
     if enabled {
-        "Automatic timing activation: On"
+        "Auto-time: On"
     } else {
-        "Automatic timing activation: Off"
+        "Auto-time: Off"
     }
 }
 
@@ -150,7 +150,7 @@ mod tests {
                 "Start",
                 "Stop",
                 "Auto-start: On",
-                "Automatic timing activation: Off",
+                "Auto-time: Off",
                 "Status",
                 "Quit"
             ]

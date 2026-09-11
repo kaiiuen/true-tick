@@ -13,7 +13,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             automatic: false,
-            startup_enabled: false,
+            startup_enabled: true,
             request_interval: Hns::new(10_000),
         }
     }
@@ -163,6 +163,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn defaults_enable_startup_without_automatic_timing() {
+        assert_eq!(
+            Config::default(),
+            Config {
+                automatic: false,
+                startup_enabled: true,
+                request_interval: Hns::new(10_000)
+            }
+        );
+    }
+
+    #[test]
     fn parses_explicit_local_configuration() {
         let config =
             parse("automatic = true\nstartup_enabled = true\nrequest_interval_hns = 10000\n")
@@ -175,6 +187,14 @@ mod tests {
                 request_interval: Hns::new(10_000)
             }
         );
+    }
+
+    #[test]
+    fn preserves_explicit_false_values_during_migration() {
+        let config = parse("automatic = false\nstartup_enabled = false\n").unwrap();
+        assert!(!config.automatic);
+        assert!(!config.startup_enabled);
+        assert_eq!(config.request_interval, Hns::new(10_000));
     }
 
     #[test]
