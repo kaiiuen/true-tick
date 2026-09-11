@@ -84,7 +84,10 @@ pub fn run() {
                 Err(error) => format!("Red: boot startup registration error {error:?}"),
             }
         } else {
-            "boot startup registration disabled by config".to_owned()
+            match WindowsUserStartup::default().remove() {
+                Ok(()) => "boot startup registration disabled by config".to_owned(),
+                Err(error) => format!("Red: boot startup removal error {error:?}"),
+            }
         };
         let portable_status = match crate::portable::select(
             executable
