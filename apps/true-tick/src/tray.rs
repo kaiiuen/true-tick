@@ -880,6 +880,7 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
             );
             match decision {
                 QuitDecision::ExitNormally => {
+                    app.record("quit.dialog.result", "result=not_shown");
                     app.record("quit.cleanup.result", "result=not_needed");
                     app.record("quit.exit.allowed", "result=allowed reason=already_stopped");
                     PostQuitMessage(0);

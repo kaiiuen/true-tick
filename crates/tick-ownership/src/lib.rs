@@ -220,7 +220,7 @@ mod tests {
     #[derive(Debug)]
     struct FixturePlatform {
         request_observation: TimerObservation,
-        release_observation: TimerObservation,
+        release_result: Result<TimerObservation, TimerError>,
     }
 
     impl FixturePlatform {
@@ -250,7 +250,7 @@ mod tests {
         }
 
         fn release(&mut self, _interval: Hns) -> Result<TimerObservation, TimerError> {
-            Ok(self.release_observation)
+            self.release_result
         }
     }
 
@@ -262,11 +262,11 @@ mod tests {
                     reported_current: Hns::new(4_966),
                     raw_status: 0,
                 },
-                release_observation: TimerObservation {
+                release_result: Ok(TimerObservation {
                     requested: Hns::new(5_000),
                     reported_current: Hns::new(4_000),
                     raw_status: 0,
-                },
+                }),
             },
             Hns::new(5_000),
         )
@@ -332,6 +332,28 @@ mod tests {
         assert_eq!(observation.requested, Hns::new(5_000));
         assert_eq!(observation.raw_status, 0);
         assert_eq!(controller.ownership(), OwnershipState::Released);
+    }
+
+    #[test]
+    fn failed_release_keeps_ownership_and_marks_verification_unverified() {
+        let mut controller = TimerController::new(
+            FixturePlatform {
+                request_observation: TimerObservation {
+                    requested: Hns::new(5_000),
+                    reported_current: Hns::new(4_966),
+                    raw_status: 0,
+                },
+                release_result: Err(TimerError::ReleaseFailed { raw_status: -1 }),
+            },
+            Hns::new(5_000),
+        );
+        controller.start().unwrap();
+        assert_eq!(
+            controller.stop(),
+            Err(TimerError::ReleaseFailed { raw_status: -1 })
+        );
+        assert_eq!(controller.ownership(), OwnershipState::Owned);
+        assert_eq!(controller.verification(), Verification::Unverified);
     }
 
     #[test]
