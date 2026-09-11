@@ -94,7 +94,22 @@ material.
 
 ## Native loader diagnosis
 
-The Windows timer adapter now links `NtQueryTimerResolution` and
+The confirmed pre-main failure was in the tray PE. `target/debug/true-tick.exe`
+imported ordinal 345 from `COMCTL32.dll`, which is `TaskDialogIndirect`, but
+had no embedded application manifest. Windows therefore loaded legacy
+Common Controls without version 6 activation and failed with
+`STATUS_ORDINAL_NOT_FOUND` before `main`.
+
+The tray target now embeds `apps/true-tick/windows/true-tick.manifest`. The
+package-local `build.rs` passes `/MANIFEST:EMBED` and `/MANIFESTINPUT` only for
+MSVC Windows builds. The manifest requests Common Controls version 6, declares
+Windows 10 and later compatibility through the Windows 10 supported-OS
+identifier, and requests normal user execution with `asInvoker`. It makes no
+administrator, UI access, legacy Windows, performance, or runtime success
+claim. The Launcher does not import `TaskDialogIndirect` or use common
+controls version 6 APIs, so it does not need this target-specific manifest.
+
+The Windows timer adapter links `NtQueryTimerResolution` and
 `NtSetTimerResolution` explicitly from `ntdll`. Its `NtSetTimerResolution`
 BOOLEAN argument crosses the Rust boundary as an explicit `u8` value of `1` or
 `0`. Native NTSTATUS values cross the boundary as signed `i32` values and are
@@ -102,11 +117,21 @@ preserved in timer observations and errors. Manually declared kernel32 APIs
 for configuration replacement, power observation, last-error retrieval, and
 module-path lookup also have explicit `kernel32` links.
 
-Source inspection found no ordinal imports, `GetProcAddress`, raw-dylib use,
-custom linker flags, or manifest-based import mechanism in this workspace. The
-original loader error is therefore consistent with an FFI or link declaration
-problem, but source inspection alone cannot prove that it was caused by an
-ordinal import. The exact tray PE import table must be inspected after the
-build. No runtime Windows success is claimed here.
+Use this deterministic non-running PE check after building the exact tray
+binary:
+
+```text
+cargo build -p true-tick --bin true-tick
+dumpbin /DEPENDENTS target/debug/true-tick.exe
+dumpbin /IMPORTS target/debug/true-tick.exe
+dumpbin /HEADERS /SECTION:.rsrc target/debug/true-tick.exe
+dumpbin /RAWDATA /SECTION:.rsrc target/debug/true-tick.exe
+```
+
+The evidence should show `COMCTL32.dll` with ordinal 345, a non-empty resource
+directory and `.rsrc` section, and the embedded Common Controls dependency in
+resource data. These checks do not launch the executable. They establish
+embedding and static dependencies only. Runtime Windows resolution remains
+unverified until the user runs the rebuilt tray app.
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) and [`STATUS.md`](STATUS.md).

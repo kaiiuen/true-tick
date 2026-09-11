@@ -2,7 +2,9 @@
 
 **Phase:** internal v1 implementation, no release
 
-The workspace builds an internal tray-only v1 with focused deterministic tests. The native loader diagnosis has been narrowed to likely manual FFI and library-link declarations. The timer adapter explicitly links `ntdll`, passes Windows BOOLEAN as `u8` values `1` or `0`, and preserves signed `i32` NTSTATUS values. Manual kernel32 declarations for file replacement, power observation, last-error retrieval, and module-path lookup explicitly link `kernel32`. Source inspection found no ordinal import mechanism, `GetProcAddress`, raw-dylib use, custom linker flags, or manifest import mechanism. This is not proof of the original loader cause until the built PE imports are inspected.
+The workspace builds an internal tray-only v1 with focused deterministic tests. PE inspection confirmed the pre-main loader failure: `target/debug/true-tick.exe` imported ordinal 345 from `COMCTL32.dll`, which is `TaskDialogIndirect`, without an embedded application manifest. Windows therefore loaded legacy Common Controls without version 6 activation and failed with `STATUS_ORDINAL_NOT_FOUND`. The tray package now embeds a checked-in manifest through its package-local `build.rs`. The manifest requests Common Controls version 6, declares Windows 10 and later compatibility, and requests normal `asInvoker` execution without administrator or UI access claims. The Launcher does not import `TaskDialogIndirect` or common controls version 6 APIs, so it does not receive this target-specific integration.
+
+The timer adapter explicitly links `ntdll`, passes Windows BOOLEAN as `u8` values `1` or `0`, and preserves signed `i32` NTSTATUS values. Manual kernel32 declarations for file replacement, power observation, last-error retrieval, and module-path lookup explicitly link `kernel32`. Static PE inspection is deterministic and non-running. Runtime Windows resolution of the loader failure remains unverified until the user runs the rebuilt tray binary.
 Timer ownership is isolated behind a Windows adapter and remains explicit about
 API acceptance versus effective system behavior. A postcondition mismatch preserves
 uncertain ownership and suppresses duplicate acquisition until controlled cleanup
@@ -53,7 +55,7 @@ Intentionally absent:
 - interactive runtime validation of launcher handoff and slot execution
 - interactive runtime validation of the Windows diagnostic window
 
-The Windows support matrix, exact native API behavior, and runtime confirmation of the loader fix remain bounded internal validation work. The exact tray target must be built and its PE imports inspected without launching it. No runtime Windows success is claimed. Power observation does not yet provide full Battery Saver,
+The Windows support matrix, exact native API behavior, and runtime confirmation of the loader fix remain bounded internal validation work. The exact tray target is built with `cargo build -p true-tick --bin true-tick` and inspected without launching it. The deterministic PE evidence check uses Visual Studio `dumpbin` for `/DEPENDENTS`, `/IMPORTS`, the `.rsrc` section headers, and `.rsrc` raw data. It must show the ordinal 345 import, a non-empty resource directory, and the embedded Common Controls dependency. No runtime Windows success is claimed here. Power observation does not yet provide full Battery Saver,
 session, lock, suspend, or resume notification coverage. Unknown observation is
 reported as degraded and blocks acquisition. A/B selection is a safe local
 scaffold. Missing or invalid active-slot metadata requires repair. It does not

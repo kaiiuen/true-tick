@@ -15,7 +15,9 @@ This repository contains an internal v1 runtime, not a production release.
 - `apps/true-tick` owns the tray composition, startup configuration, and portable launcher framing.
 - `apps/true-tick/src/tray_surface.rs` owns pure compact labels, tooltip text, status-to-color mapping, and status command mapping.
 
-The current native loader diagnosis is bounded. Manual declarations for the timer functions link explicitly to `ntdll`. Manual kernel32 declarations for file replacement, power observation, last-error retrieval, and module-path lookup link explicitly to `kernel32`. Source inspection found no ordinal imports, `GetProcAddress`, raw-dylib use, custom linker flags, or manifest import mechanism. This corrects likely FFI and link causes without inventing an ordinal fix. PE import inspection and runtime Windows validation remain separate tasks.
+The tray's native loader failure was confirmed from PE inspection. `true-tick.exe` imported ordinal 345 from `COMCTL32.dll`, which is `TaskDialogIndirect`, without an embedded application manifest. Windows therefore selected legacy Common Controls and failed before `main` with `STATUS_ORDINAL_NOT_FOUND`. The tray package now uses `build.rs` to pass MSVC `/MANIFEST:EMBED` and `/MANIFESTINPUT` for its checked-in manifest. That manifest activates Common Controls version 6, declares Windows 10 and later compatibility, and requests `asInvoker` execution without administrator or UI access claims. The Launcher has no corresponding common controls or `TaskDialogIndirect` import and remains unchanged. Static PE checks and runtime Windows validation remain separate tasks.
+
+Manual declarations for the timer functions link explicitly to `ntdll`. Manual kernel32 declarations for file replacement, power observation, last-error retrieval, and module-path lookup link explicitly to `kernel32`. The manifest integration is limited to the tray binary and does not add a GUI framework or a runtime import workaround.
 
 The v1 tray menu is intentionally compact. It contains `Start`, `Stop`, current
 `Auto-start: On/Off` and `Auto-time: On/Off` toggles, a disabled short status item,
