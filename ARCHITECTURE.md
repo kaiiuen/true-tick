@@ -9,7 +9,8 @@ This repository contains an internal v1 runtime, not a production release.
 - `tick-observation-windows` is the event and power observation boundary.
 - `tick-ownership` serializes preflight, request, verification, postcondition, and release.
 - `tick-diagnostics` owns truthful status formatting and a bounded synchronized in-memory session event store.
-- `tick-calibration` remains an explicit unsupported boundary.
+- `tick-calibration` remains an explicit unsupported future boundary. It is not a
+  production control path.
 - `tick-startup-windows` isolates opt-in current-user Run-key registration and removal.
 - `apps/true-tick` owns the tray composition, startup configuration, and portable launcher framing.
 - `apps/true-tick/src/tray_surface.rs` owns pure compact labels, tooltip text, status-to-color mapping, and status command mapping.
@@ -60,9 +61,10 @@ writing. If config persistence fails after a registry change, the inverse
 operation is attempted and failure is marked repair required. Initial power query
 errors are recorded with their native status and remain conservative unknown
 observation. True™ Time is not a dependency. Platform behavior that cannot be verified remains
-yellow or red rather than being reported as green. The tray maps running and
-verified ownership to green, starting, stopping, pending, degraded, or unverified
-behavior to yellow, and stopped, blocked, unsupported, or error behavior to red.
+yellow or red rather than being reported as green. The tray maps running and verified ownership to green, starting, stopping,
+pending, degraded, or unverified behavior to yellow, and stopped, blocked,
+unsupported, or error behavior to red. Each public tray status is reachable from
+an explicit runtime path or is covered by a deterministic boundary test.
 The tooltip uses `Running (current timing)` and `Stopped (current timing)` for
 steady states, with concise transition labels such as `Starting...` and
 `Stopping...`. Current observation verifies

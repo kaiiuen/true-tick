@@ -145,9 +145,10 @@ pub fn run() {
         let executable = get_module_file_name_w_path();
         diagnostics.record("lifecycle.executable_observed", "path=redacted");
         if let Ok(root) = crate::portable::portable_root_from_slot_executable(&executable) {
+            let selection = crate::portable::select(&root);
             diagnostics.record(
                 "portable.active_slot.selection",
-                format!("result={:?}", crate::portable::select(&root)),
+                format!("result={}", selection.description()),
             );
         } else {
             diagnostics.record(
@@ -181,7 +182,7 @@ pub fn run() {
                     Ok(launcher) => {
                         diagnostics
                             .record("native.RegSetValueExW.call", "value=TrueTick path=redacted");
-                        match WindowsUserStartup::default().register(&launcher) {
+                        match WindowsUserStartup.register(&launcher) {
                             Ok(()) => {
                                 diagnostics.record("startup.registration.result", "result=success");
                                 "boot startup registered for the current-user Launcher.exe entry point"
@@ -207,7 +208,7 @@ pub fn run() {
             }
             (None, StartupOperation::Remove) => {
                 diagnostics.record("native.RegDeleteValueW.call", "value=TrueTick");
-                match WindowsUserStartup::default().remove() {
+                match WindowsUserStartup.remove() {
                     Ok(()) => {
                         diagnostics.record("startup.registration.result", "result=removed");
                         "boot startup registration disabled by config".to_owned()
@@ -363,7 +364,10 @@ fn apply_policy(app: &mut App) {
             }
             Err(error) => {
                 app.record("ownership.acquire.error", format!("error={error:?}"));
-                TrayStatus::Error
+                match error {
+                    tick_platform_windows::TimerError::Unsupported => TrayStatus::Unsupported,
+                    _ => TrayStatus::Error,
+                }
             }
         };
         app.publish();
@@ -394,7 +398,10 @@ fn release_for_policy(app: &mut App, reason: tick_policy::PolicyReason) {
         }
         Err(error) => {
             app.record("ownership.release.error", format!("error={error:?}"));
-            TrayStatus::Unverified
+            match error {
+                tick_platform_windows::TimerError::Unsupported => TrayStatus::Unsupported,
+                _ => TrayStatus::Unverified,
+            }
         }
     };
     app.publish();
@@ -421,7 +428,10 @@ fn manual_stop(app: &mut App) {
         }
         Err(error) => {
             app.record("ownership.release.error", format!("error={error:?}"));
-            TrayStatus::Unverified
+            match error {
+                tick_platform_windows::TimerError::Unsupported => TrayStatus::Unsupported,
+                _ => TrayStatus::Unverified,
+            }
         }
     };
     app.publish();
@@ -819,11 +829,11 @@ fn set_startup(app: &mut App, enabled: bool) {
     app.record("tray.command", format!("command=startup enabled={enabled}"));
     let registration = if enabled {
         match crate::portable::launcher_path_from_slot_executable(&app.executable) {
-            Ok(launcher) => WindowsUserStartup::default().register(&launcher),
+            Ok(launcher) => WindowsUserStartup.register(&launcher),
             Err(_error) => Err(tick_startup_windows::StartupError::InvalidExecutablePath),
         }
     } else {
-        WindowsUserStartup::default().remove()
+        WindowsUserStartup.remove()
     };
     if let Err(error) = registration {
         app.record(
@@ -840,10 +850,10 @@ fn set_startup(app: &mut App, enabled: bool) {
     if let Err(error) = config::save_atomic(&app.config_path, &next) {
         app.record("config.save.result", format!("result=error error={error}"));
         let rollback = if enabled {
-            WindowsUserStartup::default().remove()
+            WindowsUserStartup.remove()
         } else {
             match crate::portable::launcher_path_from_slot_executable(&app.executable) {
-                Ok(launcher) => WindowsUserStartup::default().register(&launcher),
+                Ok(launcher) => WindowsUserStartup.register(&launcher),
                 Err(_) => Err(tick_startup_windows::StartupError::InvalidExecutablePath),
             }
         };
@@ -1020,6 +1030,20 @@ struct IconInfo {
     h_bm_color: *mut c_void,
 }
 
+unsafe fn get_module_file_name_w_path() -> PathBuf {
+    let mut buffer = [0u16; 260];
+    let length = GetModuleFileNameW(
+        std::ptr::null_mut(),
+        buffer.as_mut_ptr(),
+        buffer.len() as u32,
+    );
+    String::from_utf16_lossy(&buffer[..length as usize]).into()
+}
+
+extern "system" {
+    fn GetModuleFileNameW(module: *mut c_void, filename: *mut u16, size: u32) -> u32;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1044,18 +1068,4 @@ mod tests {
         assert_eq!(app_create_params(&create), create.create_params);
         assert!(app_create_params(std::ptr::null()).is_null());
     }
-}
-
-unsafe fn get_module_file_name_w_path() -> PathBuf {
-    let mut buffer = [0u16; 260];
-    let length = GetModuleFileNameW(
-        std::ptr::null_mut(),
-        buffer.as_mut_ptr(),
-        buffer.len() as u32,
-    );
-    String::from_utf16_lossy(&buffer[..length as usize]).into()
-}
-
-extern "system" {
-    fn GetModuleFileNameW(module: *mut c_void, filename: *mut u16, size: u32) -> u32;
 }

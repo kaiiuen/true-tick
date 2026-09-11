@@ -27,6 +27,22 @@ pub enum Selection {
     RepairRequired(String),
 }
 
+impl Selection {
+    pub(crate) fn description(&self) -> String {
+        match self {
+            Self::Selected { slot, path } => {
+                format!(
+                    "selected_slot={slot:?} executable_name={}",
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("invalid")
+                )
+            }
+            Self::RepairRequired(reason) => format!("repair_required reason={reason}"),
+        }
+    }
+}
+
 pub fn portable_root_from_slot_executable(executable: &Path) -> Result<PathBuf, LauncherPathError> {
     let slot = executable
         .parent()

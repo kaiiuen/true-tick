@@ -37,7 +37,9 @@ restrictive power transition or normal Quit attempts to release owned state and
 reports release failure as warning or stopped according to the truthful state map.
 Running and verified ownership is green. Starting, stopping, pending, degraded,
 or unverified behavior is yellow. Stopped, blocked, unsupported, or error behavior
-is red.
+is red. Unsupported is produced when the native capability is unavailable. Error
+is reserved for failed operations. The calibration crate remains future-only and
+is not a disconnected production path.
 
 Intentionally absent:
 

@@ -20,7 +20,10 @@ activation. The diagnostic window shows a bounded, local in-memory session log.
 It excludes raw pointers, private tokens, credentials, arbitrary secrets, and
 unbounded sensitive paths. The tooltip uses short runtime wording: `Running
 (current timing)`, `Stopped (current timing)`, or a concise transition or warning
-label. All activation paths use
+label. Unsupported native timer capability is surfaced as `Unsupported`, while
+error, blocked, degraded, unverified, starting, stopping, running, and stopped
+retain consistent icon colors and menu meanings. Calibration remains an explicit
+future-only boundary and no profiles are added. All activation paths use
 the same conservative power policy, so battery, Battery Saver, and unknown power
 states do not acquire. If a native request may have succeeded but its postcondition
 is inconclusive, the runtime records uncertain ownership, blocks duplicate acquire,
