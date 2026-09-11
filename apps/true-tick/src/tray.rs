@@ -26,6 +26,7 @@ const NIF_ICON: u32 = 0x0002;
 const NIF_TIP: u32 = 0x0004;
 const NIM_ADD: u32 = 0x0000;
 const NIM_DELETE: u32 = 0x0002;
+const NIM_MODIFY: u32 = 0x0001;
 const GWLP_USERDATA: i32 = -21;
 const IDI_APPLICATION: usize = 32512;
 
@@ -185,7 +186,7 @@ fn update_icon(icon: &mut NotifyIconData, text: String) {
         *target = source;
     }
     unsafe {
-        Shell_NotifyIconW(NIM_ADD, icon);
+        Shell_NotifyIconW(NIM_MODIFY, icon);
         DestroyIcon(old_icon);
     }
 }
