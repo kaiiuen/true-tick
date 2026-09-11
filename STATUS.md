@@ -2,7 +2,7 @@
 
 **Phase:** internal v1 implementation, no release
 
-The workspace builds an internal tray-only v1 with focused deterministic tests.
+The workspace builds an internal tray-only v1 with focused deterministic tests. The native loader diagnosis has been narrowed to likely manual FFI and library-link declarations. The timer adapter explicitly links `ntdll`, passes Windows BOOLEAN as `u8` values `1` or `0`, and preserves signed `i32` NTSTATUS values. Manual kernel32 declarations for file replacement, power observation, last-error retrieval, and module-path lookup explicitly link `kernel32`. Source inspection found no ordinal import mechanism, `GetProcAddress`, raw-dylib use, custom linker flags, or manifest import mechanism. This is not proof of the original loader cause until the built PE imports are inspected.
 Timer ownership is isolated behind a Windows adapter and remains explicit about
 API acceptance versus effective system behavior. A postcondition mismatch preserves
 uncertain ownership and suppresses duplicate acquisition until controlled cleanup
@@ -53,8 +53,7 @@ Intentionally absent:
 - interactive runtime validation of launcher handoff and slot execution
 - interactive runtime validation of the Windows diagnostic window
 
-The Windows support matrix and exact native API behavior remain bounded internal
-validation work. Power observation does not yet provide full Battery Saver,
+The Windows support matrix, exact native API behavior, and runtime confirmation of the loader fix remain bounded internal validation work. The exact tray target must be built and its PE imports inspected without launching it. No runtime Windows success is claimed. Power observation does not yet provide full Battery Saver,
 session, lock, suspend, or resume notification coverage. Unknown observation is
 reported as degraded and blocks acquisition. A/B selection is a safe local
 scaffold. Missing or invalid active-slot metadata requires repair. It does not

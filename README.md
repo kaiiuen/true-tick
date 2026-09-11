@@ -92,4 +92,21 @@ Active documentation is checked with `scripts/check_doc_punctuation.py`. The
 checker rejects em dash and semicolon characters and skips historical archive
 material.
 
+## Native loader diagnosis
+
+The Windows timer adapter now links `NtQueryTimerResolution` and
+`NtSetTimerResolution` explicitly from `ntdll`. Its `NtSetTimerResolution`
+BOOLEAN argument crosses the Rust boundary as an explicit `u8` value of `1` or
+`0`. Native NTSTATUS values cross the boundary as signed `i32` values and are
+preserved in timer observations and errors. Manually declared kernel32 APIs
+for configuration replacement, power observation, last-error retrieval, and
+module-path lookup also have explicit `kernel32` links.
+
+Source inspection found no ordinal imports, `GetProcAddress`, raw-dylib use,
+custom linker flags, or manifest-based import mechanism in this workspace. The
+original loader error is therefore consistent with an FFI or link declaration
+problem, but source inspection alone cannot prove that it was caused by an
+ordinal import. The exact tray PE import table must be inspected after the
+build. No runtime Windows success is claimed here.
+
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) and [`STATUS.md`](STATUS.md).

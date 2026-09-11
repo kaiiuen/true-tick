@@ -18,7 +18,7 @@ pub struct TimerBounds {
 pub struct TimerObservation {
     pub requested: Hns,
     pub reported_current: Hns,
-    pub raw_status: u32,
+    pub raw_status: NtStatus,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,16 +26,16 @@ pub enum TimerError {
     Unsupported,
     InvalidInterval,
     QueryFailed {
-        raw_status: u32,
+        raw_status: NtStatus,
     },
     RequestFailed {
-        raw_status: u32,
+        raw_status: NtStatus,
     },
     ReleaseFailed {
-        raw_status: u32,
+        raw_status: NtStatus,
     },
     PostconditionUnverified {
-        raw_status: u32,
+        raw_status: NtStatus,
         reported_current: Hns,
     },
 }
@@ -202,8 +202,9 @@ impl TimerPlatform for WindowsTimerPlatform {
     }
 }
 
-#[cfg(windows)]
-const STATUS_SUCCESS: u32 = 0;
+pub type NtStatus = i32;
+type NtBoolean = u8;
+const STATUS_SUCCESS: NtStatus = 0;
 
 #[cfg(windows)]
 fn query_resolution() -> Result<(TimerBounds, Hns), TimerError> {
@@ -254,17 +255,18 @@ fn validate_interval(bounds: TimerBounds, interval: Hns) -> Result<(), TimerErro
 }
 
 #[cfg(windows)]
+#[link(name = "ntdll")]
 extern "system" {
     fn NtQueryTimerResolution(
         minimum_resolution: *mut u32,
         maximum_resolution: *mut u32,
         current_resolution: *mut u32,
-    ) -> u32;
+    ) -> NtStatus;
     fn NtSetTimerResolution(
         desired_resolution: u32,
-        set_resolution: bool,
+        set_resolution: NtBoolean,
         current_resolution: *mut u32,
-    ) -> u32;
+    ) -> NtStatus;
 }
 
 #[cfg(windows)]
@@ -272,13 +274,21 @@ unsafe fn nt_query_timer_resolution(
     minimum: *mut u32,
     maximum: *mut u32,
     current: *mut u32,
-) -> u32 {
+) -> NtStatus {
     NtQueryTimerResolution(minimum, maximum, current)
 }
 
+const fn nt_boolean(value: bool) -> NtBoolean {
+    if value {
+        1
+    } else {
+        0
+    }
+}
+
 #[cfg(windows)]
-unsafe fn nt_set_timer_resolution(desired: u32, set: bool, current: *mut u32) -> u32 {
-    NtSetTimerResolution(desired, set, current)
+unsafe fn nt_set_timer_resolution(desired: u32, set: bool, current: *mut u32) -> NtStatus {
+    NtSetTimerResolution(desired, nt_boolean(set), current)
 }
 
 #[cfg(test)]
@@ -339,5 +349,18 @@ mod tests {
             WindowsTimerPlatform::default().preflight(Hns::new(10_000)),
             Err(TimerError::Unsupported)
         );
+    }
+
+    #[test]
+    fn native_boolean_wrapper_uses_windows_values() {
+        assert_eq!(nt_boolean(false), 0);
+        assert_eq!(nt_boolean(true), 1);
+    }
+
+    #[test]
+    fn nt_status_values_are_signed_and_preserved() {
+        let failure: NtStatus = -1;
+        assert_ne!(failure, STATUS_SUCCESS);
+        assert_eq!(failure, -1);
     }
 }

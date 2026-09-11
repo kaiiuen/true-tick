@@ -5,7 +5,7 @@ This repository contains an internal v1 runtime, not a production release.
 - `tick-core` contains platform-neutral HNS and lifecycle/status/event/error types.
 - `tick-policy` contains pure policy decisions and deduplicated logical reasons.
 - `tick-ownership` models one serialized runtime instance's tracked contribution and idempotent transitions.
-- `tick-platform-windows` isolates the native timer request and release calls.
+- `tick-platform-windows` isolates the native timer request and release calls. Its manual `ntdll` boundary uses signed `i32` NTSTATUS values and an explicit `u8` Windows BOOLEAN representation, with raw statuses preserved.
 - `tick-observation-windows` is the event and power observation boundary.
 - `tick-ownership` serializes preflight, request, verification, postcondition, and release.
 - `tick-diagnostics` owns truthful status formatting and a bounded synchronized in-memory session event store.
@@ -14,6 +14,8 @@ This repository contains an internal v1 runtime, not a production release.
 - `tick-startup-windows` isolates opt-in current-user Run-key registration and removal.
 - `apps/true-tick` owns the tray composition, startup configuration, and portable launcher framing.
 - `apps/true-tick/src/tray_surface.rs` owns pure compact labels, tooltip text, status-to-color mapping, and status command mapping.
+
+The current native loader diagnosis is bounded. Manual declarations for the timer functions link explicitly to `ntdll`. Manual kernel32 declarations for file replacement, power observation, last-error retrieval, and module-path lookup link explicitly to `kernel32`. Source inspection found no ordinal imports, `GetProcAddress`, raw-dylib use, custom linker flags, or manifest import mechanism. This corrects likely FFI and link causes without inventing an ordinal fix. PE import inspection and runtime Windows validation remain separate tasks.
 
 The v1 tray menu is intentionally compact. It contains `Start`, `Stop`, current
 `Auto-start: On/Off` and `Auto-time: On/Off` toggles, a disabled short status item,

@@ -102,6 +102,7 @@ struct SystemPowerStatus {
 }
 
 #[cfg(windows)]
+#[link(name = "kernel32")]
 extern "system" {
     fn GetSystemPowerStatus(status: *mut SystemPowerStatus) -> i32;
     fn GetLastError() -> u32;

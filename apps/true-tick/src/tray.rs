@@ -1176,6 +1176,7 @@ unsafe fn get_module_file_name_w_path() -> PathBuf {
     String::from_utf16_lossy(&buffer[..length as usize]).into()
 }
 
+#[link(name = "kernel32")]
 extern "system" {
     fn GetModuleFileNameW(module: *mut c_void, filename: *mut u16, size: u32) -> u32;
 }
