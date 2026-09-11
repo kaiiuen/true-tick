@@ -42,6 +42,7 @@ const GWL_STYLE: i32 = -16;
 const GWL_EXSTYLE: i32 = -20;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf0000;
 const WS_VISIBLE: u32 = 0x10000000;
+const WS_BORDER: u32 = 0x00800000;
 const WS_CLIPCHILDREN: u32 = 0x02000000;
 const WS_CLIPSIBLINGS: u32 = 0x04000000;
 const WS_EX_TOOLWINDOW: u32 = 0x00000080;
@@ -51,6 +52,7 @@ const SW_RESTORE: i32 = 9;
 const DIAGNOSTIC_MIN_WIDTH: i32 = 420;
 const DIAGNOSTIC_MIN_HEIGHT: i32 = 260;
 const DIAGNOSTIC_WINDOW_TITLE: &str = "True Tick Status and Diagnostics";
+const DIAGNOSTIC_WINDOW_PARENT: *mut c_void = std::ptr::null_mut();
 const WS_CHILD: u32 = 0x40000000;
 const WS_VSCROLL: u32 = 0x00200000;
 const ES_MULTILINE: u32 = 0x0004;
@@ -154,7 +156,7 @@ fn app_create_params(create: *const CreateStruct) -> *mut c_void {
 }
 
 const fn diagnostic_window_style() -> u32 {
-    WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS
+    WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS
 }
 
 const fn diagnostic_window_extended_style() -> u32 {
@@ -833,6 +835,7 @@ unsafe fn open_diagnostic_window(app: &mut App) {
             } else {
                 ShowWindow(window, SW_SHOWNORMAL);
             }
+            UpdateWindow(window);
             SetForegroundWindow(window);
             refresh_diagnostic_window(window, app);
             return;
@@ -849,7 +852,7 @@ unsafe fn open_diagnostic_window(app: &mut App) {
         120,
         820,
         560,
-        std::ptr::null_mut(),
+        DIAGNOSTIC_WINDOW_PARENT,
         std::ptr::null_mut(),
         GetModuleHandleW(std::ptr::null()),
         app as *mut App as *mut c_void,
@@ -857,6 +860,10 @@ unsafe fn open_diagnostic_window(app: &mut App) {
     if window.is_null() {
         app.record("diagnostic.window.result", "result=create_failed");
     } else {
+        SetWindowTextW(window, title.as_ptr());
+        ShowWindow(window, SW_SHOWNORMAL);
+        UpdateWindow(window);
+        SetForegroundWindow(window);
         app.diagnostic_window = Some(window);
         let style = GetWindowLongPtrW(window, GWL_STYLE) as u32;
         let extended_style = GetWindowLongPtrW(window, GWL_EXSTYLE) as u32;
@@ -897,7 +904,7 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &App) {
 unsafe extern "system" fn diagnostic_window_proc(
     hwnd: *mut c_void,
     message: u32,
-    _w_param: usize,
+    w_param: usize,
     l_param: isize,
 ) -> isize {
     let app = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;
@@ -916,6 +923,7 @@ unsafe extern "system" fn diagnostic_window_proc(
                 | WS_CLIPCHILDREN
                 | ES_MULTILINE
                 | ES_READONLY
+                | WS_BORDER
                 | ES_AUTOVSCROLL
                 | ES_AUTOHSCROLL,
             0,
@@ -956,7 +964,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             (*app).diagnostic_window = None;
         }
     }
-    DefWindowProcW(hwnd, message, 0, l_param)
+    DefWindowProcW(hwnd, message, w_param, l_param)
 }
 
 fn set_automatic(app: &mut App, enabled: bool) {
@@ -1334,6 +1342,7 @@ extern "system" {
     fn DestroyMenu(menu: *mut c_void) -> i32;
     fn DestroyWindow(window: *mut c_void) -> i32;
     fn ShowWindow(window: *mut c_void, command: i32) -> i32;
+    fn UpdateWindow(window: *mut c_void) -> i32;
     fn GetWindow(window: *mut c_void, command: u32) -> *mut c_void;
     fn SetWindowTextW(window: *mut c_void, text: *const u16) -> i32;
     fn MoveWindow(
@@ -1425,7 +1434,9 @@ mod tests {
             diagnostic_window_style() & WS_OVERLAPPEDWINDOW,
             WS_OVERLAPPEDWINDOW
         );
-        assert_ne!(diagnostic_window_style() & WS_VISIBLE, 0);
+        assert_eq!(diagnostic_window_style() & WS_CHILD, 0);
+        assert_eq!(diagnostic_window_style() & WS_VISIBLE, 0);
+        assert!(DIAGNOSTIC_WINDOW_PARENT.is_null());
         assert_ne!(diagnostic_window_extended_style() & WS_EX_APPWINDOW, 0);
         assert_eq!(diagnostic_window_extended_style() & WS_EX_TOOLWINDOW, 0);
         assert_eq!(DIAGNOSTIC_MIN_WIDTH, 420);
