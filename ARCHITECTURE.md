@@ -17,26 +17,41 @@ This repository contains an internal v1 runtime, not a production release.
 
 The tray's native loader failure was confirmed from PE inspection. `true-tick.exe` imported ordinal 345 from `COMCTL32.dll`, which is `TaskDialogIndirect`, without an embedded application manifest. Windows therefore selected legacy Common Controls and failed before `main` with `STATUS_ORDINAL_NOT_FOUND`. The tray package now uses `build.rs` to pass MSVC `/MANIFEST:EMBED` and `/MANIFESTINPUT` for its checked-in manifest. That manifest activates Common Controls version 6, declares Windows 10 and later compatibility, and requests `asInvoker` execution without administrator or UI access claims. The Launcher has no corresponding common controls or `TaskDialogIndirect` import and remains unchanged. Static PE checks and runtime Windows validation remain separate tasks.
 
-Manual declarations for the timer functions link explicitly to `ntdll`. Manual kernel32 declarations for file replacement, power observation, last-error retrieval, and module-path lookup link explicitly to `kernel32`. The manifest integration is limited to the tray binary and does not add a GUI framework or a runtime import workaround.
+Manual declarations for the timer functions link explicitly to `ntdll`. Manual kernel32 declarations for file replacement, power observation, last-error retrieval, and module-path lookup explicitly link to `kernel32`. The manifest integration is limited to the tray binary and does not add a GUI framework or a runtime import workaround.
+Core Windows DLLs such as `kernel32.dll`, `user32.dll`, `ntdll.dll`, `shell32.dll`,
+`gdi32.dll`, and `comctl32.dll` are OS components, not bundled compatibility files.
+The embedded Common Controls v6 manifest remains the compatibility mechanism. The
+current MSVC build uses the non-system Microsoft Visual C++ runtime and Universal
+CRT, with `VCRUNTIME140.dll` and `api-ms-win-crt-*` observed in a static binary scan.
+The eventual distribution choice is a documented VC++ Redistributable prerequisite
+or a validated static CRT build. No installer or copied DLLs are part of this v1.
 
 The v1 tray menu is intentionally compact. It contains `Start`, `Stop`, current
-`Auto-start: On/Off` and `Auto-time: On/Off` toggles, a disabled short status item,
-and Quit. Auto-start controls Windows login launch. Auto-time controls automatic timer acquisition after launch. Defaults are `startup_enabled = true` and `automatic = false`. Start and Stop remain the core manual controls and use the same guarded
+`Auto-start: On/Off` and `Auto-time: On/Off` toggles, a clickable short status item,
+and Quit. Auto-start controls Windows login launch. Auto-time controls automatic timer acquisition after launch. Defaults are `startup_enabled = true` and `automatic = false`. Left-button-up and right-button-up tray notifications both open this same menu. Button-down and double-click notifications are ignored, so Windows notification delivery cannot open duplicate menus. Start and Stop remain the core manual controls and use the same guarded
 policy and ownership lifecycle as automatic activation. The clickable status row
 opens a normal overlapped taskbar diagnostic window and never changes timer state.
 The two setting toggles use a non recursive return-command loop so the menu stays
 open after a toggle. The diagnostic window is a normal taskbar window titled
-`True Tick Status and Diagnostics`. It shows current status, power observation,
-startup result, and the bounded read-only session snapshot. Closing it destroys
-only the window and does not affect timer ownership. Full system reports, config
-paths, raw HNS values, power explanations, and full errors remain excluded from
-the compact menu and tooltip.
+`True Tick Status and Diagnostics`. It uses `WS_OVERLAPPEDWINDOW` and
+`WS_EX_APPWINDOW` without `WS_EX_TOOLWINDOW`, so it has standard minimize,
+maximize, restore, close, taskbar, and resize behavior. It shows current status,
+power observation, startup result, and the bounded read-only session snapshot.
+Reopening validates the existing handle, restores minimized state, activates the
+same window, and refreshes its snapshot. Closing it destroys only the window and
+does not affect timer ownership. Full system reports, config paths, raw HNS values,
+power explanations, and full errors remain excluded from the compact menu and tooltip.
 
 Detailed evidence is recorded in a local bounded in-memory session log. Events have
 monotonic sequence numbers and elapsed process time. The default limit is 512
 events, with newest-event retention and one truncation marker. The store sanitizes
 control layout and bounds each field. Disk persistence for a full session log is
 deferred. The UI refreshes from a current snapshot and shows the current tray state.
+Status icon canvases use the current display DPI where available. The policy maps
+100, 125, 150, 200, and 400 percent to 16, 20, 24, 32, and 64 pixel canvases,
+then clamps intermediate values to the nearest supported size. Status colors remain
+green for verified running, yellow for transition or uncertainty, and red for
+stopped or failed states. The tray shell may apply its own rendering scale.
 
 An inconclusive adapter postcondition enters an explicit uncertain ownership state
 and suppresses repeat acquisition. The adapter retains enough request identity for

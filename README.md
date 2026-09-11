@@ -42,8 +42,13 @@ menu exposes `Start`, `Stop`, `Auto-start: On/Off`, `Auto-time: On/Off`, a click
 diagnostic window titled `True Tick Status and Diagnostics` without changing timer
 state. It is a normal taskbar window with standard title-bar controls, a resizable
 read-only status and session log view, and snapshot refresh on reopen. The native
-menu keeps the two setting toggles open after each toggle and closes for other
-commands. Start and Stop remain
+window uses a normal overlapped style with `WS_EX_APPWINDOW` and no
+`WS_EX_TOOLWINDOW`, so it is intended to appear in the taskbar with minimize,
+maximize, restore, close, and resize behavior. Closing it only destroys the diagnostic
+window and does not change timer state. The native menu keeps the two setting toggles
+open after each toggle and closes for other commands. Tray left-button-up and right-button-up notifications open this same menu.
+Button-down and double-click notifications are ignored, so one Windows notification does
+not create duplicate menus. Start and Stop remain
 manual controls and use the same guarded policy and ownership lifecycle as automatic
 activation. Quit requires a safe stop when timing is active or ownership is uncertain. The warning offers `Cancel` and `Stop and Quit`. The app exits only after owned-request release is verified. A failed or uncertain release keeps the app alive and records the retryable warning. The diagnostic window shows a bounded, local in-memory session log.
 It excludes raw pointers, private tokens, credentials, arbitrary secrets, and
@@ -51,8 +56,11 @@ unbounded sensitive paths. The tooltip uses short runtime wording: `Running
 (current timing)`, `Stopped (current timing)`, or a concise transition or warning
 label. Unsupported native timer capability is surfaced as `Unsupported`, while
 error, blocked, degraded, unverified, starting, stopping, running, and stopped
-retain consistent icon colors and menu meanings. Calibration remains an explicit
-future-only boundary and no profiles are added. All activation paths use
+retain consistent icon colors and menu meanings. Status icon canvases use the current
+window DPI where available: 16, 20, 24, 32, or 64 pixels for 100, 125, 150, 200,
+or 400 percent. Unsupported intermediate DPI values use the nearest supported canvas.
+The tray shell may apply its own additional rendering scale. Calibration remains an
+explicit future-only boundary and no profiles are added. All activation paths use
 the same conservative power policy, so battery, Battery Saver, and unknown power
 states do not acquire. If a native request may have succeeded but its postcondition
 is inconclusive, the runtime records uncertain ownership, blocks duplicate acquire,
@@ -91,6 +99,22 @@ blocks acquisition.
 Active documentation is checked with `scripts/check_doc_punctuation.py`. The
 checker rejects em dash and semicolon characters and skips historical archive
 material.
+
+## Windows DLL boundary
+
+Core Windows DLLs such as `kernel32.dll`, `user32.dll`, `ntdll.dll`, `shell32.dll`,
+`gdi32.dll`, and `comctl32.dll` are operating system components. They are linked as
+system dependencies and must not be copied into this repository or bundled as a
+compatibility workaround. The embedded Common Controls v6 manifest is the correct
+compatibility mechanism for the Common Controls API used by the tray.
+
+The current MSVC build has a non-system runtime dependency on the Microsoft Visual C++
+runtime and Universal CRT. A static scan of the rebuilt PE found `VCRUNTIME140.dll`
+and `api-ms-win-crt-*` imports. Exact release imports still require a PE import tool in
+a Visual Studio developer environment. The eventual distribution decision is deferred
+to a documented Microsoft VC++ Redistributable prerequisite or a validated static CRT
+build. No installer is added here, and no arbitrary runtime DLLs are copied into the
+project.
 
 ## Native loader diagnosis
 
