@@ -4,7 +4,7 @@
 
 The workspace builds an internal tray-only v1 with focused deterministic tests. PE inspection confirmed the pre-main loader failure: `target/debug/true-tick.exe` imported ordinal 345 from `COMCTL32.dll`, which is `TaskDialogIndirect`, without an embedded application manifest. Windows therefore loaded legacy Common Controls without version 6 activation and failed with `STATUS_ORDINAL_NOT_FOUND`. The tray package now embeds a checked-in manifest through its package-local `build.rs`. The manifest requests Common Controls version 6, declares Windows 10 and later compatibility, and requests normal `asInvoker` execution without administrator or UI access claims. The Launcher does not import `TaskDialogIndirect` or common controls version 6 APIs, so it does not receive this target-specific integration.
 
-The timer adapter explicitly links `ntdll`, passes Windows BOOLEAN as `u8` values `1` or `0`, and preserves signed `i32` NTSTATUS values. It retains the raw `minimum` and `maximum` output labels and values from `NtQueryTimerResolution` for diagnostics, then normalizes their numeric order before inclusive interval validation. The labels are API field names, not an ordering guarantee. The captured values `minimum_hns=156250`, `maximum_hns=5000`, `current_hns=4966`, and `requested_hns=10000` are accepted and classify the effective value as finer than requested. Manual kernel32 declarations for file replacement, power observation, last-error retrieval, and module-path lookup explicitly link `kernel32`. Static PE inspection is deterministic and non-running. Runtime Windows resolution of the loader failure remains unverified until the user runs the rebuilt tray binary.
+The timer adapter explicitly links `ntdll`, passes Windows BOOLEAN as `u8` values `1` or `0`, and preserves signed `i32` NTSTATUS values. It retains the raw `minimum` and `maximum` output labels and values from `NtQueryTimerResolution` for diagnostics, then selects the numerically smallest supported current boundary in automatic mode before inclusive validation. The labels are API field names, not an ordering guarantee. The captured values `minimum_hns=156250`, `maximum_hns=5000`, `current_hns=9966`, and old `requested_hns=10000` explain the observed effective value of about `0.997 ms`. Legacy `request_interval_hns=10000` is migrated to automatic selection. In that captured case, automatic selection would record `selected_hns=5000`, or `0.500 ms`, if the current system reports that boundary. This is not a universal fixed value. Manual kernel32 declarations for file replacement, power observation, last-error retrieval, and module-path lookup explicitly link `kernel32`. Static PE inspection is deterministic and non-running. Runtime Windows resolution of the loader failure remains unverified until the user runs the rebuilt tray binary.
 Timer ownership is isolated behind a Windows adapter and remains explicit about
 API acceptance versus effective system behavior. A postcondition mismatch preserves
 uncertain ownership and suppresses duplicate acquisition until controlled cleanup
@@ -23,16 +23,18 @@ The tray has compact `Start` and `Stop` manual controls, `Auto-start: On/Off` an
 launches the app at Windows login. Auto-time controls automatic timing acquisition
 and defaults to off. Both tray left-button-up and right-button-up notifications open
 the same compact menu. Button-down and double-click notifications are ignored to
-avoid duplicate menus. The status row opens a normal taskbar diagnostic window titled `True Tick Status and Diagnostics` without changing timer state. It uses a normal overlapped style, `WS_EX_APPWINDOW`, no `WS_EX_TOOLWINDOW`, no child style, no owner, standard title-bar controls, a resizable read-only status and session log view, and a fresh snapshot each time it is reopened. Reopening restores and activates the existing window. The native menu keeps both setting toggles open after a toggle and closes for action commands. Reopening after a toggle reuses the original popup anchor POINT, and returned command IDs are dispatched once.
+avoid duplicate menus. The status row opens a normal taskbar diagnostic window titled `True Tick Status and Diagnostics` without changing timer state. It uses a normal overlapped style, `WS_EX_APPWINDOW`, no `WS_EX_TOOLWINDOW`, no child style, no owner, standard title-bar controls, a resizable read-only status and session log view, and a fresh snapshot each time it is reopened. Reopening restores and activates the existing window. The native menu keeps Start, Stop, and both setting toggles open after successful or failed handling. Reopening after any persistent command reuses the original popup anchor POINT, and returned command IDs are dispatched once. Status may close the menu when it opens diagnostics, and Quit closes normally.
 Start and Stop use the same guarded policy and ownership lifecycle as automatic
 activation. The tray tooltip and status menu use actual concise timing values such
-as `Running (1.000 ms)`, `Running (0.497 ms, finer)`,
-`Stopped (current: 0.497 ms)`, `Starting (1.000 ms)`,
+as `Running (0.500 ms)`, `Running (0.497 ms, finer)`,
+`Stopped (current: 0.497 ms)`, `Starting (0.500 ms)`,
 `Stopping (current: 0.497 ms)`, and `Error (invalid interval)`. They use
 `unknown` when no observation exists. Query, request, release, and power
 reconciliation observations are carried through controller and app state. Full
 system reports, raw HNS values, power explanations, and full errors remain in the
-diagnostic window. The window shows a local in-memory session log
+diagnostic window. Its local session log records automatic selection, raw native
+boundaries, selected HNS, requested HNS, effective HNS, and an `equal`, `finer`,
+or `unverified` effective relation. The window shows a local in-memory session log
 from process start through the current moment. It uses monotonic sequence numbers
 and elapsed process time, has a default 512 event bound, retains newest events with
 a truncation marker, and defers disk persistence. Fields are sanitized and bounded

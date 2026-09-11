@@ -19,7 +19,7 @@ The tray's native loader failure was confirmed from PE inspection. `true-tick.ex
 
 Manual declarations for the timer functions link explicitly to `ntdll`. Manual kernel32 declarations for file replacement, power observation, last-error retrieval, and module-path lookup explicitly link to `kernel32`. The manifest integration is limited to the tray binary and does not add a GUI framework or a runtime import workaround.
 
-The timer adapter retains the raw `minimum` and `maximum` output labels and values from `NtQueryTimerResolution` for diagnostics. It normalizes the two numeric values into a lower and upper bound before inclusive validation. The output labels describe API parameters and do not guarantee ascending order. The captured raw values `minimum_hns=156250` and `maximum_hns=5000` therefore accept `requested_hns=10000`.
+The timer adapter retains the raw `minimum` and `maximum` output labels and values from `NtQueryTimerResolution` for diagnostics. It normalizes the two numeric values into a lower and upper bound, then automatic mode selects the numerically smallest supported boundary from the current query before inclusive validation. The output labels describe API parameters and do not guarantee ascending order. In the captured case, raw `minimum_hns=156250` and `maximum_hns=5000` select `selected_hns=5000`, or `0.500 ms`. This is a current-system result, not a universal 0.5 ms promise. Legacy `request_interval_hns=10000` is migrated to the zero-valued automatic sentinel. The earlier `effective_hns=9966`, or about `0.997 ms`, occurred because the old config requested `10000 HNS`.
 Core Windows DLLs such as `kernel32.dll`, `user32.dll`, `ntdll.dll`, `shell32.dll`,
 `gdi32.dll`, and `comctl32.dll` are OS components, not bundled compatibility files.
 The embedded Common Controls v6 manifest remains the compatibility mechanism. The
@@ -31,7 +31,9 @@ or a validated static CRT build. No installer or copied DLLs are part of this v1
 The v1 tray menu is intentionally compact. It contains `Start`, `Stop`, current
 `Auto-start: On/Off` and `Auto-time: On/Off` toggles, a clickable short status item,
 and Quit. Auto-start controls Windows login launch. Auto-time controls automatic timer acquisition after launch. Defaults are `startup_enabled = true` and `automatic = false`. Left-button-up and right-button-up tray notifications both open this same menu. Button-down and double-click notifications are ignored, so Windows notification delivery cannot open duplicate menus. Start and Stop remain the core manual controls and use the same guarded
-policy and ownership lifecycle as automatic activation. The clickable status row
+policy and ownership lifecycle as automatic activation. Start, Stop, and both
+setting toggles keep the native context menu open after success or failure. Each
+reopen reuses the original popup anchor POINT. The clickable status row
 opens a normal overlapped taskbar diagnostic window and never changes timer state.
 The two setting toggles use a non recursive return-command loop so the menu stays
 open after a toggle. The original popup anchor POINT is captured once and reused
@@ -47,7 +49,7 @@ same window, and refreshes its snapshot. The style contract is source-tested, bu
 actual taskbar appearance and runtime control behavior remain unverified because
 validation does not launch the app. Closing it destroys only the window and
 does not affect timer ownership. Full system reports, config paths, raw HNS values,
-power explanations, and full errors remain excluded from the compact menu and tooltip.
+power explanations, and full errors remain excluded from the compact menu and tooltip. The local diagnostic session records automatic selection, raw native boundaries, selected HNS, requested HNS, effective HNS, and an `equal`, `finer`, or `unverified` effective relation.
 
 Detailed evidence is recorded in a local bounded in-memory session log. Events have
 monotonic sequence numbers and elapsed process time. The default limit is 512
@@ -96,8 +98,8 @@ pending, degraded, or unverified behavior to yellow, and stopped, blocked,
 unsupported, or error behavior to red. Each public tray status is reachable from
 an explicit runtime path or is covered by a deterministic boundary test.
 The tooltip and status menu use concise observed or requested values such as
-`Running (1.000 ms)`, `Running (0.497 ms, finer)`, `Stopped (current: 0.497 ms)`,
-`Starting (1.000 ms)`, `Stopping (current: 0.497 ms)`, and
+`Running (0.500 ms)`, `Running (0.497 ms, finer)`, `Stopped (current: 0.497 ms)`,
+`Starting (0.500 ms)`, `Stopping (current: 0.497 ms)`, and
 `Error (invalid interval)`. They use `unknown` when no timing observation is
 available. Raw HNS and full event details remain in the diagnostic window.
 Controller and app state carry observations through query, request, release,

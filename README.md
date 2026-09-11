@@ -37,12 +37,15 @@ The v1 uses a narrow native timer adapter with raw status preservation, an
 explicit released, owned, or uncertain ownership lifecycle, controlled recovery,
 conservative power policy, and a native tray
 surface, atomically replaced local configuration, per-user boot startup
-registration, and a bounded portable A/B launcher scaffold. The adapter retains
-the raw `minimum` and `maximum` output labels and values from
-`NtQueryTimerResolution` for diagnostics, then normalizes their numeric order
-before inclusive interval validation. The labels are API field names, not an
-ordering guarantee. For example, raw values `156250` and `5000` accept a
-requested `10000` interval. The compact tray
+registration, and a bounded portable A/B launcher scaffold. The persisted
+`request_interval_hns = 0` value is an automatic-selection sentinel. Before each
+acquisition, the adapter queries the current native boundaries and selects the
+numerically smallest supported boundary. It does not use a universal fixed
+`1 ms` or `0.5 ms` value. In the captured case, raw values `minimum_hns=156250`
+and `maximum_hns=5000` select `5000 HNS`, or `0.500 ms`, when that boundary is
+reported by the current system. The adapter retains raw boundary values and
+selected HNS in diagnostics, then validates the selected value before requesting
+it. The compact tray
 menu exposes `Start`, `Stop`, `Auto-start: On/Off`, `Auto-time: On/Off`, a clickable short status item, and `Quit`. Auto-start controls launch at Windows login. Auto-time controls automatic timer acquisition after launch. The new defaults are `startup_enabled = true` and `automatic = false`, so login launch does not acquire timing until the user manually starts it. Status opens a normal taskbar
 diagnostic window titled `True Tick Status and Diagnostics` without changing timer
 state. It is a normal taskbar window with standard title-bar controls, a resizable
@@ -50,20 +53,26 @@ read-only status and session log view, and snapshot refresh on reopen. The nativ
 window uses a normal overlapped style with `WS_EX_APPWINDOW`, no
 `WS_EX_TOOLWINDOW`, no child style, and no owner, so it is intended to appear in
 the taskbar with minimize, maximize, restore, close, and resize behavior. Closing it only destroys the diagnostic
-window and does not change timer state. The native menu keeps the two setting toggles
-open after each toggle and closes for other commands. Each toggle reopen uses the
-original popup anchor POINT, so the menu does not jump when the cursor moves. Tray left-button-up and right-button-up notifications open this same menu.
-Button-down and double-click notifications are ignored, so one Windows notification does
-not create duplicate menus. Start and Stop remain
-manual controls and use the same guarded policy and ownership lifecycle as automatic
-activation. Quit requires a safe stop when timing is active or ownership is uncertain. The warning offers `Cancel` and `Stop and Quit`. The app exits only after owned-request release is verified. A failed or uncertain release keeps the app alive and records the retryable warning. The diagnostic window shows a bounded, local in-memory session log.
+window and does not change timer state. The native menu keeps Start, Stop, and both setting toggles open after successful
+or failed handling. Each reopen uses the original popup anchor POINT, so the menu
+does not jump when the cursor moves. Status may close the menu when it opens the
+diagnostic window, and Quit closes normally. Tray left-button-up and right-button-up
+notifications open this same menu. Button-down and double-click notifications are
+ignored, so one Windows notification does not create duplicate menus. Start and Stop
+remain manual controls and use the same guarded policy and ownership lifecycle as
+automatic activation. Quit requires a safe stop when timing is active or ownership is uncertain. The warning offers `Cancel` and `Stop and Quit`. The app exits only after owned-request release is verified. A failed or uncertain release keeps the app alive and records the retryable warning. The diagnostic window shows a bounded, local in-memory session log.
 It excludes raw pointers, private tokens, credentials, arbitrary secrets, and
 unbounded sensitive paths. The tooltip and status menu use short runtime timing values such as `Running
-(1.000 ms)`, `Running (0.497 ms, finer)`, `Stopped (current: 0.497 ms)`,
-`Starting (1.000 ms)`, `Stopping (current: 0.497 ms)`, or `Error (invalid
-interval)`. They use `unknown` when no observation is available and never show
-raw HNS or full logs. Query, request, release, and power reconciliation
-observations are carried through controller and app state. A reported current
+(0.500 ms)`, `Running (0.497 ms, finer)`, `Stopped (current: 0.497 ms)`,
+`Starting (0.500 ms)`, `Stopping (current: 0.497 ms)`, or `Error (invalid
+interval)`. Values reflect the selected and effective observations, and another
+platform boundary is allowed. The captured `current_hns=9966` value was about
+`0.997 ms` because the old config requested `10000 HNS`. That config is migrated
+to automatic selection. They use `unknown` when no observation is available and never show
+raw HNS or full logs. The local diagnostic session records automatic selection,
+raw native boundaries, selected HNS, requested HNS, effective HNS, and an
+`equal`, `finer`, or `unverified` effective relation. Query, request, release,
+and power reconciliation observations are carried through controller and app state. A reported current
 value at or below the requested value is satisfied, with a lower value labeled
 finer. A higher value remains unverified. Unsupported native timer capability
 is surfaced as `Unsupported`, while error, blocked, degraded, unverified,
