@@ -79,6 +79,19 @@ const MB_ICONWARNING: u32 = 0x0000_0030;
 const TASKDIALOG_BUTTON_CANCEL: i32 = 1;
 const TASKDIALOG_BUTTON_STOP_AND_QUIT: i32 = 2;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuitDecision {
+    ExitNormally,
+    RequireSafetyDialog { reason: QuitSafetyReason },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuitSafetyReason {
+    OwnedActive,
+    OwnershipUncertain,
+    TimingNotSettled,
+}
+
 #[repr(C)]
 struct NotifyIconData {
     cb_size: u32,
@@ -498,35 +511,47 @@ fn apply_policy(app: &mut App) {
 }
 
 fn release_for_policy(app: &mut App, reason: tick_policy::PolicyReason) {
-    app.record("ownership.release.request", format!("reason={reason:?}"));
+    let released_status = match reason {
+        tick_policy::PolicyReason::BatteryRestricted
+        | tick_policy::PolicyReason::BatterySaverRestricted
+        | tick_policy::PolicyReason::PowerUnknown
+        | tick_policy::PolicyReason::GloballyDisabled => TrayStatus::Blocked,
+        tick_policy::PolicyReason::NoEligibleProfile
+        | tick_policy::PolicyReason::EligibleProfile => TrayStatus::Stopped,
+    };
+    let _ = guarded_release(app, format!("policy reason={reason:?}"), released_status);
+}
+
+fn guarded_release(
+    app: &mut App,
+    source: impl AsRef<str>,
+    released_status: TrayStatus,
+) -> Result<bool, String> {
+    app.record(
+        "ownership.release.request",
+        format!("source={}", source.as_ref()),
+    );
     app.tray_status = TrayStatus::Stopping;
     app.publish();
     let stop_result = app.controller.stop();
     app.sync_timing_observation();
-    app.tray_status = match stop_result {
+    match stop_result {
         Ok(released) => {
             app.record(
                 "ownership.changed",
                 format!("state=released changed={released}"),
             );
-            match reason {
-                tick_policy::PolicyReason::BatteryRestricted
-                | tick_policy::PolicyReason::BatterySaverRestricted
-                | tick_policy::PolicyReason::PowerUnknown
-                | tick_policy::PolicyReason::GloballyDisabled => TrayStatus::Blocked,
-                tick_policy::PolicyReason::NoEligibleProfile
-                | tick_policy::PolicyReason::EligibleProfile => TrayStatus::Stopped,
-            }
+            app.tray_status = released_status;
+            app.publish();
+            Ok(released)
         }
         Err(error) => {
             app.record("ownership.release.error", format!("error={error:?}"));
-            match error {
-                tick_platform_windows::TimerError::Unsupported => TrayStatus::Unsupported,
-                _ => TrayStatus::Unverified,
-            }
+            app.tray_status = TrayStatus::Unverified;
+            app.publish();
+            Err(format!("{error:?}"))
         }
-    };
-    app.publish();
+    }
 }
 
 fn manual_start(app: &mut App) {
@@ -538,27 +563,7 @@ fn manual_start(app: &mut App) {
 fn manual_stop(app: &mut App) {
     app.record("tray.command", "command=stop");
     app.record("lifecycle.stop_request", "source=manual");
-    app.tray_status = TrayStatus::Stopping;
-    app.publish();
-    let stop_result = app.controller.stop();
-    app.sync_timing_observation();
-    app.tray_status = match stop_result {
-        Ok(released) => {
-            app.record(
-                "ownership.changed",
-                format!("state=released changed={released}"),
-            );
-            TrayStatus::Stopped
-        }
-        Err(error) => {
-            app.record("ownership.release.error", format!("error={error:?}"));
-            match error {
-                tick_platform_windows::TimerError::Unsupported => TrayStatus::Unsupported,
-                _ => TrayStatus::Unverified,
-            }
-        }
-    };
-    app.publish();
+    let _ = guarded_release(app, "manual", TrayStatus::Stopped);
 }
 
 fn release_for_power_change(app: &mut App) {
@@ -606,9 +611,7 @@ impl App {
             return Ok(());
         }
         self.record("shutdown.cleanup", "attempt=guarded");
-        let stop_result = self.controller.stop();
-        self.sync_timing_observation();
-        match stop_result {
+        match guarded_release(self, "shutdown", TrayStatus::Stopped) {
             Ok(released) => {
                 self.shutdown_cleanup_done = true;
                 self.record(
@@ -618,13 +621,11 @@ impl App {
                 Ok(())
             }
             Err(error) => {
-                self.tray_status = TrayStatus::Unverified;
                 self.record(
                     "shutdown.cleanup.result",
-                    format!("result=unverified error={error:?}"),
+                    format!("result=unverified error={error}"),
                 );
-                self.publish();
-                Err(format!("{error:?}"))
+                Err(error)
             }
         }
     }
@@ -840,14 +841,17 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
         let Some(command) = returned_menu_command(command) else {
             break;
         };
-        handle_menu_command(hwnd, app, command);
-        if !menu_action_keeps_open(command) {
+        app.record(
+            "tray.command.dispatch",
+            format!("source=TPM_RETURNCMD id={command}"),
+        );
+        if !handle_menu_command(hwnd, app, command) {
             break;
         }
     }
 }
 
-unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) {
+unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) -> bool {
     app.record("tray.command.id", format!("id={command}"));
     match command {
         ID_START => manual_start(app),
@@ -864,42 +868,74 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
             app.record("tray.command", "command=quit");
             app.record("lifecycle.shutdown_request", "source=tray");
             app.record("quit.requested", "source=tray");
-            if quit_requires_confirmation(app) {
-                app.record("quit.warning.shown", "reason=active_or_uncertain");
-                match show_quit_warning(hwnd) {
-                    TASKDIALOG_BUTTON_STOP_AND_QUIT => {
-                        app.record("quit.stop_and_quit.selected", "result=selected");
-                        match app.cleanup_normal_shutdown() {
-                            Ok(()) => {
-                                app.record("quit.release.result", "result=verified");
-                                PostQuitMessage(0);
-                            }
-                            Err(error) => {
-                                app.record(
-                                    "quit.blocked.uncertain_cleanup",
-                                    format!("error={error}"),
-                                );
-                                let message = format!(
-                                    "Tick could not verify a safe stop. The app remains open.\n\n{error}"
-                                );
-                                MessageBoxW(
-                                    hwnd,
-                                    wide(&message).as_ptr(),
-                                    wide("True Tick quit warning").as_ptr(),
-                                    MB_ICONWARNING,
-                                );
+            let decision = quit_decision(app);
+            app.record(
+                "quit.active_state",
+                format!(
+                    "decision={decision:?} status={:?} ownership={:?} verification={:?}",
+                    app.tray_status,
+                    app.controller.ownership(),
+                    app.controller.verification()
+                ),
+            );
+            match decision {
+                QuitDecision::ExitNormally => {
+                    app.record("quit.cleanup.result", "result=not_needed");
+                    app.record("quit.exit.allowed", "result=allowed reason=already_stopped");
+                    PostQuitMessage(0);
+                    return false;
+                }
+                QuitDecision::RequireSafetyDialog { reason } => {
+                    app.record("quit.warning.shown", format!("reason={reason:?}"));
+                    match show_quit_warning(hwnd) {
+                        TASKDIALOG_BUTTON_STOP_AND_QUIT => {
+                            app.record("quit.dialog.result", "result=stop_and_quit");
+                            app.record("quit.stop_and_quit.selected", "result=selected");
+                            match app.cleanup_normal_shutdown() {
+                                Ok(()) => {
+                                    app.record("quit.cleanup.result", "result=verified");
+                                    app.record("quit.release.result", "result=verified");
+                                    app.record("quit.exit.allowed", "result=allowed");
+                                    PostQuitMessage(0);
+                                    return false;
+                                }
+                                Err(error) => {
+                                    app.record(
+                                        "quit.cleanup.result",
+                                        format!("result=unverified error={error}"),
+                                    );
+                                    app.record(
+                                        "quit.blocked.uncertain_cleanup",
+                                        format!("error={error}"),
+                                    );
+                                    app.record("quit.exit.allowed", "result=denied");
+                                    let message = format!(
+                                        "Tick could not verify a safe stop. The app remains open.\n\n{error}"
+                                    );
+                                    MessageBoxW(
+                                        hwnd,
+                                        wide(&message).as_ptr(),
+                                        wide("True Tick quit warning").as_ptr(),
+                                        MB_ICONWARNING,
+                                    );
+                                    return true;
+                                }
                             }
                         }
+                        _ => {
+                            app.record("quit.dialog.result", "result=cancel");
+                            app.record("quit.cancel.selected", "result=cancelled");
+                            app.record("quit.cleanup.result", "result=not_attempted");
+                            app.record("quit.exit.allowed", "result=denied");
+                            return true;
+                        }
                     }
-                    _ => app.record("quit.cancel.selected", "result=cancelled"),
                 }
-            } else {
-                app.record("quit.release.result", "result=not_needed");
-                PostQuitMessage(0);
             }
         }
         _ => {}
     }
+    menu_action_keeps_open(command)
 }
 
 unsafe fn open_diagnostic_window(app: &mut App) {
@@ -1253,20 +1289,38 @@ fn set_startup(app: &mut App, enabled: bool) {
     app.publish();
 }
 
-fn quit_requires_confirmation(app: &App) -> bool {
-    quit_requires_confirmation_for(app.tray_status, app.controller.ownership())
+fn quit_decision(app: &App) -> QuitDecision {
+    quit_decision_for(app.tray_status, app.controller.ownership())
 }
 
-fn quit_requires_confirmation_for(status: TrayStatus, ownership: OwnershipState) -> bool {
-    ownership != OwnershipState::Released
-        || matches!(
-            status,
-            TrayStatus::Running
-                | TrayStatus::Starting
-                | TrayStatus::Stopping
-                | TrayStatus::Unverified
-                | TrayStatus::Degraded
-        )
+fn quit_decision_for(status: TrayStatus, ownership: OwnershipState) -> QuitDecision {
+    match ownership {
+        OwnershipState::Owned => {
+            return QuitDecision::RequireSafetyDialog {
+                reason: QuitSafetyReason::OwnedActive,
+            };
+        }
+        OwnershipState::Uncertain => {
+            return QuitDecision::RequireSafetyDialog {
+                reason: QuitSafetyReason::OwnershipUncertain,
+            };
+        }
+        OwnershipState::Released => {}
+    }
+    if matches!(
+        status,
+        TrayStatus::Running
+            | TrayStatus::Starting
+            | TrayStatus::Stopping
+            | TrayStatus::Pending
+            | TrayStatus::Degraded
+            | TrayStatus::Unverified
+    ) {
+        return QuitDecision::RequireSafetyDialog {
+            reason: QuitSafetyReason::TimingNotSettled,
+        };
+    }
+    QuitDecision::ExitNormally
 }
 
 unsafe fn show_quit_warning(hwnd: *mut c_void) -> i32 {
@@ -1537,27 +1591,61 @@ mod tests {
     }
 
     #[test]
-    fn quit_guard_covers_active_and_uncertain_states() {
+    fn quit_decision_allows_only_settled_released_state_to_exit() {
+        assert_eq!(
+            quit_decision_for(TrayStatus::Stopped, OwnershipState::Released),
+            QuitDecision::ExitNormally
+        );
+        assert_eq!(
+            quit_decision_for(TrayStatus::Blocked, OwnershipState::Released),
+            QuitDecision::ExitNormally
+        );
+        assert_eq!(
+            quit_decision_for(TrayStatus::Running, OwnershipState::Owned),
+            QuitDecision::RequireSafetyDialog {
+                reason: QuitSafetyReason::OwnedActive
+            }
+        );
+    }
+
+    #[test]
+    fn quit_decision_requires_safety_for_running_transition_and_unverified_states() {
         for status in [
             TrayStatus::Running,
             TrayStatus::Starting,
             TrayStatus::Stopping,
+        ] {
+            assert_eq!(
+                quit_decision_for(status, OwnershipState::Released),
+                QuitDecision::RequireSafetyDialog {
+                    reason: QuitSafetyReason::TimingNotSettled
+                }
+            );
+        }
+        for status in [
             TrayStatus::Unverified,
             TrayStatus::Degraded,
+            TrayStatus::Pending,
         ] {
-            assert!(quit_requires_confirmation_for(
-                status,
-                OwnershipState::Released
-            ));
+            assert_eq!(
+                quit_decision_for(status, OwnershipState::Released),
+                QuitDecision::RequireSafetyDialog {
+                    reason: QuitSafetyReason::TimingNotSettled
+                }
+            );
         }
-        assert!(quit_requires_confirmation_for(
-            TrayStatus::Stopped,
-            OwnershipState::Uncertain
-        ));
-        assert!(!quit_requires_confirmation_for(
-            TrayStatus::Stopped,
-            OwnershipState::Released
-        ));
+    }
+
+    #[test]
+    fn quit_decision_requires_safety_when_ownership_is_uncertain() {
+        for status in [TrayStatus::Stopped, TrayStatus::Error] {
+            assert_eq!(
+                quit_decision_for(status, OwnershipState::Uncertain),
+                QuitDecision::RequireSafetyDialog {
+                    reason: QuitSafetyReason::OwnershipUncertain
+                }
+            );
+        }
     }
 
     #[test]
