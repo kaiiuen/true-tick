@@ -10,6 +10,7 @@ members = [
     "crates/tick-calibration",
     "crates/tick-startup-windows",
     "apps/true-tick",
+    "apps/launcher",
 ]
 
 [workspace.package]

@@ -143,6 +143,17 @@ pub fn run() {
         diagnostics.record("lifecycle.start", "application_start");
         let executable = get_module_file_name_w_path();
         diagnostics.record("lifecycle.executable_observed", "path=redacted");
+        if let Ok(root) = crate::portable::portable_root_from_slot_executable(&executable) {
+            diagnostics.record(
+                "portable.active_slot.selection",
+                format!("result={:?}", crate::portable::select(&root)),
+            );
+        } else {
+            diagnostics.record(
+                "portable.active_slot.selection",
+                "result=not_portable_slot_layout",
+            );
+        }
         let config_path = config::path_from_executable(&executable);
         let (loaded, config_status) = match config::load(&config_path) {
             Ok(config) => {

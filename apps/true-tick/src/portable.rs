@@ -63,17 +63,14 @@ pub fn select(root: &Path) -> Selection {
             )
         }
     };
-    let fallback = match preferred {
-        Slot::A => Slot::B,
-        Slot::B => Slot::A,
-    };
-    for slot in [preferred, fallback] {
-        let path = slots.join(slot.name());
-        if path.is_dir() && path.join("true-tick.exe").is_file() {
-            return Selection::Selected { slot, path };
-        }
+    let path = slots.join(preferred.name());
+    if path.is_dir() && path.join("true-tick.exe").is_file() {
+        return Selection::Selected {
+            slot: preferred,
+            path,
+        };
     }
-    Selection::RepairRequired("neither slot contains a recognizable internal executable".into())
+    Selection::RepairRequired("active slot lacks a recognizable internal executable".into())
 }
 
 #[cfg(test)]

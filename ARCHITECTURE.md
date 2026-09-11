@@ -41,10 +41,12 @@ hardware clock control, process detection, network services, installer, secure
 updater, or release machinery.
 Boot startup registration is a per-user Run-key operation controlled by
 `startup_enabled` in the local config. In portable A/B mode it registers the
-portable `Launcher.exe` entry point, not `true-tick.exe` from either slot. The
-launcher owns slot selection and validation before activation. The bounded path
-resolver derives the launcher path from a `Slots\A` or `Slots\B` executable shape
-without claiming runtime filesystem validation. Registration is non-elevated,
+buildable `Launcher.exe` entry point, not `true-tick.exe` from either slot. The
+launcher owns slot selection and validation before activation, and launches only
+the active slot with forwarded arguments. Missing or invalid metadata fails with
+repair required. Secure signatures and rollback are not implemented. The bounded
+path resolver derives the launcher path from a `Slots\A` or `Slots\B` executable
+shape without claiming runtime filesystem validation. Registration is non-elevated,
 idempotent, removable, and not performed by tests. It is not machine-wide
 installation and it is not the same as `automatic`, which controls timer
 activation after launch. Both settings are persisted through a flushed temporary

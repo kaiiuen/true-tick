@@ -1,0 +1,10 @@
+[package]
+name = "true-tick-launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "Launcher"
+path = "src/main.rs"

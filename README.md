@@ -26,10 +26,12 @@ from process start. The default bound is 512 events. Newest events are retained
 with a truncation marker when the bound is reached. Disk persistence for full
 session logs is deferred.
 
-Per-user boot registration targets the portable `Launcher.exe` entry point, never
-a slot payload. The launcher remains responsible for selecting and validating
-A/B before activation. Missing or invalid active-slot metadata reports repair
-required and never silently selects A. Boot registration is opt-in through local
+Per-user boot registration targets the buildable portable `Launcher.exe` entry
+point, never a slot payload. The launcher requires `active-slot.txt`, selects only
+the named A or B slot, validates the expected `true-tick.exe` file, and launches
+that slot with forwarded arguments. Missing or invalid metadata reports repair
+required and never silently selects A. Secure signatures and rollback are not
+implemented and remain deferred. Boot registration is opt-in through local
 config and is distinct from automatic timer activation after launch. The current
 path resolver only derives `Launcher.exe` from a `Slots\A` or `Slots\B`
 executable shape. It does not claim runtime path or file validation. It does not

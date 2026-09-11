@@ -67,3 +67,7 @@ dependencies = [
  "tick-policy",
  "tick-startup-windows",
 ]
+
+[[package]]
+name = "true-tick-launcher"
+version = "0.1.0"
