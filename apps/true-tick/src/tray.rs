@@ -652,21 +652,15 @@ impl App {
 fn refresh_timing_observation(app: &mut App) {
     match app.controller.query() {
         Ok(observation) => {
-            app.timing_observation = Some(observation);
-            let effective_relation = if observation.reported_current < observation.requested {
-                "finer"
-            } else if observation.reported_current == observation.requested {
-                "equal"
-            } else {
-                "unverified"
-            };
+            app.sync_timing_observation();
             app.record(
                 "timer.query.observation",
                 format!(
-                    "requested_hns={} effective_hns={} raw_status={} effective_relation={effective_relation}",
+                    "requested_hns={} effective_hns={} raw_status={} effective_relation={}",
                     observation.requested.value(),
                     observation.reported_current.value(),
-                    observation.raw_status
+                    observation.raw_status,
+                    observation.effective_relation()
                 ),
             );
         }
@@ -971,11 +965,12 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &App) {
     }
     let timing_details = match app.timing_observation {
         Some(observation) => format!(
-            "Timing observation: {} requested_hns={} effective_hns={} raw_status={}\r\n",
+            "Timing observation: {} requested_hns={} effective_hns={} raw_status={} effective_relation={}\r\n",
             tooltip(app.tray_status, app.timing_values()),
             observation.requested.value(),
             observation.reported_current.value(),
-            observation.raw_status
+            observation.raw_status,
+            observation.effective_relation()
         ),
         None => "Timing observation: unknown\r\n".to_owned(),
     };

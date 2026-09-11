@@ -75,6 +75,16 @@ impl TimerObservation {
     pub fn is_finer_than_requested(self) -> bool {
         self.reported_current < self.requested
     }
+
+    pub fn effective_relation(self) -> &'static str {
+        if self.reported_current < self.requested {
+            "finer"
+        } else if self.reported_current == self.requested {
+            "equal"
+        } else {
+            "unverified"
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

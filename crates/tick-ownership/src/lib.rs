@@ -215,6 +215,62 @@ impl Default for Ownership {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tick_platform_windows::{TimerBounds, TimerQuery};
+
+    #[derive(Debug)]
+    struct FixturePlatform {
+        request_observation: TimerObservation,
+        release_observation: TimerObservation,
+    }
+
+    impl FixturePlatform {
+        fn query_result(&mut self, _interval: Hns) -> TimerQuery {
+            TimerQuery {
+                bounds: TimerBounds {
+                    minimum_interval: Hns::new(156_250),
+                    maximum_interval: Hns::new(5_000),
+                },
+                reported_current: Hns::new(9_966),
+                raw_status: 0,
+            }
+        }
+    }
+
+    impl TimerPlatform for FixturePlatform {
+        fn query(&mut self, interval: Hns) -> Result<TimerQuery, TimerError> {
+            Ok(self.query_result(interval))
+        }
+
+        fn preflight(&mut self, interval: Hns) -> Result<TimerQuery, TimerError> {
+            Ok(self.query_result(interval))
+        }
+
+        fn request(&mut self, _interval: Hns) -> Result<TimerObservation, TimerError> {
+            Ok(self.request_observation)
+        }
+
+        fn release(&mut self, _interval: Hns) -> Result<TimerObservation, TimerError> {
+            Ok(self.release_observation)
+        }
+    }
+
+    fn fixture_controller() -> TimerController<FixturePlatform> {
+        TimerController::new(
+            FixturePlatform {
+                request_observation: TimerObservation {
+                    requested: Hns::new(5_000),
+                    reported_current: Hns::new(4_966),
+                    raw_status: 0,
+                },
+                release_observation: TimerObservation {
+                    requested: Hns::new(5_000),
+                    reported_current: Hns::new(4_000),
+                    raw_status: 0,
+                },
+            },
+            Hns::new(5_000),
+        )
+    }
 
     #[test]
     fn acquisition_and_release_are_matching_transitions() {
@@ -249,6 +305,33 @@ mod tests {
         assert!(!ownership.apply(Transition::Acquire).unwrap());
         assert!(ownership.apply(Transition::Release).unwrap());
         assert_eq!(ownership.state(), OwnershipState::Released);
+    }
+
+    #[test]
+    fn successful_request_replaces_preflight_effective_observation() {
+        let mut controller = fixture_controller();
+        assert_eq!(
+            controller.query().unwrap().reported_current,
+            Hns::new(9_966)
+        );
+        assert_eq!(controller.start(), Ok(Verification::FinerThanRequested));
+        assert_eq!(
+            controller.observation().unwrap().reported_current,
+            Hns::new(4_966)
+        );
+        assert_eq!(controller.observation().unwrap().raw_status, 0);
+    }
+
+    #[test]
+    fn successful_release_updates_the_effective_observation() {
+        let mut controller = fixture_controller();
+        controller.start().unwrap();
+        assert_eq!(controller.stop(), Ok(true));
+        let observation = controller.observation().unwrap();
+        assert_eq!(observation.reported_current, Hns::new(4_000));
+        assert_eq!(observation.requested, Hns::new(5_000));
+        assert_eq!(observation.raw_status, 0);
+        assert_eq!(controller.ownership(), OwnershipState::Released);
     }
 
     #[test]
