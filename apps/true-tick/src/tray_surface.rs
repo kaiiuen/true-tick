@@ -82,6 +82,8 @@ pub(crate) fn tooltip(status: TrayStatus) -> &'static str {
     }
 }
 
+pub(crate) const STATUS_COMMAND_ID: usize = 1009;
+
 pub(crate) fn menu_items(
     status: TrayStatus,
     startup_enabled: bool,
@@ -106,7 +108,7 @@ pub(crate) fn menu_items(
         },
         MenuItem {
             label: "Status",
-            enabled: false,
+            enabled: true,
         },
         MenuItem {
             label: "Quit",
@@ -118,6 +120,12 @@ pub(crate) fn menu_items(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_row_maps_to_diagnostic_command() {
+        assert_eq!(STATUS_COMMAND_ID, 1009);
+        assert!(menu_items(TrayStatus::Stopped, false, false)[4].enabled);
+    }
 
     #[test]
     fn compact_menu_contains_manual_controls_and_toggles() {
@@ -135,7 +143,7 @@ mod tests {
         );
         assert!(!items[0].enabled);
         assert!(items[1].enabled);
-        assert!(!items[4].enabled);
+        assert!(items[4].enabled);
     }
 
     #[test]

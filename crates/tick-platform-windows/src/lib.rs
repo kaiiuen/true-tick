@@ -4,7 +4,9 @@
 //! successful call proves API acceptance and the adapter's postcondition only.
 //! It does not prove a universal effective system value or exclusive ownership.
 
+use std::sync::Arc;
 use tick_core::Hns;
+use tick_diagnostics::DiagnosticStore;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimerBounds {
@@ -48,30 +50,88 @@ pub trait TimerPlatform {
 pub struct WindowsTimerPlatform {
     #[cfg(windows)]
     requested: Option<Hns>,
+    diagnostics: Option<Arc<DiagnosticStore>>,
+}
+
+impl WindowsTimerPlatform {
+    pub fn with_diagnostics(diagnostics: Arc<DiagnosticStore>) -> Self {
+        Self {
+            #[cfg(windows)]
+            requested: None,
+            diagnostics: Some(diagnostics),
+        }
+    }
+
+    fn log(&self, name: &str, details: impl AsRef<str>) {
+        if let Some(diagnostics) = &self.diagnostics {
+            diagnostics.record(name, details);
+        }
+    }
 }
 
 impl TimerPlatform for WindowsTimerPlatform {
     fn preflight(&mut self, interval: Hns) -> Result<TimerBounds, TimerError> {
+        self.log(
+            "timer.preflight",
+            format!(
+                "requested_hns={} requested_ms={}",
+                interval.value(),
+                interval.value() / 10_000
+            ),
+        );
         #[cfg(windows)]
         {
-            let bounds = query_resolution()?.0;
-            validate_interval(bounds, interval)?;
+            let bounds = match query_resolution() {
+                Ok((bounds, current)) => {
+                    self.log(
+                        "native.NtQueryTimerResolution.result",
+                        format!(
+                            "raw_status=0 minimum_hns={} maximum_hns={} current_hns={}",
+                            bounds.minimum_interval.value(),
+                            bounds.maximum_interval.value(),
+                            current.value()
+                        ),
+                    );
+                    bounds
+                }
+                Err(error) => {
+                    self.log(
+                        "native.NtQueryTimerResolution.error",
+                        format!("error={error:?}"),
+                    );
+                    return Err(error);
+                }
+            };
+            if let Err(error) = validate_interval(bounds, interval) {
+                self.log("timer.preflight.invalid", format!("error={error:?}"));
+                return Err(error);
+            }
+            self.log("timer.preflight.accepted", "interval within native bounds");
             return Ok(bounds);
         }
         #[cfg(not(windows))]
         {
+            self.log("timer.preflight.unsupported", "platform=non_windows");
             let _ = interval;
             Err(TimerError::Unsupported)
         }
     }
 
     fn request(&mut self, interval: Hns) -> Result<TimerObservation, TimerError> {
+        self.log(
+            "native.NtSetTimerResolution.request",
+            format!("desired_hns={} set=true", interval.value()),
+        );
         #[cfg(windows)]
         {
             let _ = self.preflight(interval)?;
             let mut current = 0u32;
             let status =
                 unsafe { nt_set_timer_resolution(interval.value() as u32, true, &mut current) };
+            self.log(
+                "native.NtSetTimerResolution.result",
+                format!("raw_status={} current_hns={}", status, current),
+            );
             if status != STATUS_SUCCESS {
                 return Err(TimerError::RequestFailed { raw_status: status });
             }
@@ -81,30 +141,48 @@ impl TimerPlatform for WindowsTimerPlatform {
                 raw_status: status,
             };
             if observation.reported_current != interval {
+                self.log(
+                    "timer.postcondition.unverified",
+                    format!("reported_hns={}", observation.reported_current.value()),
+                );
                 return Err(TimerError::PostconditionUnverified {
                     raw_status: status,
                     reported_current: observation.reported_current,
                 });
             }
+            self.log(
+                "timer.postcondition.verified",
+                format!("reported_hns={}", observation.reported_current.value()),
+            );
             self.requested = Some(interval);
             return Ok(observation);
         }
         #[cfg(not(windows))]
         {
+            self.log("timer.request.unsupported", "platform=non_windows");
             let _ = interval;
             Err(TimerError::Unsupported)
         }
     }
 
     fn release(&mut self, interval: Hns) -> Result<TimerObservation, TimerError> {
+        self.log(
+            "native.NtSetTimerResolution.release",
+            format!("desired_hns={} set=false", interval.value()),
+        );
         #[cfg(windows)]
         {
             if self.requested != Some(interval) {
+                self.log("timer.release.rejected", "ownership_interval_not_tracked");
                 return Err(TimerError::InvalidInterval);
             }
             let mut current = 0u32;
             let status =
                 unsafe { nt_set_timer_resolution(interval.value() as u32, false, &mut current) };
+            self.log(
+                "native.NtSetTimerResolution.release_result",
+                format!("raw_status={} current_hns={}", status, current),
+            );
             if status != STATUS_SUCCESS {
                 return Err(TimerError::ReleaseFailed { raw_status: status });
             }
@@ -117,6 +195,7 @@ impl TimerPlatform for WindowsTimerPlatform {
         }
         #[cfg(not(windows))]
         {
+            self.log("timer.release.unsupported", "platform=non_windows");
             let _ = interval;
             Err(TimerError::Unsupported)
         }

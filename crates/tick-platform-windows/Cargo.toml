@@ -7,3 +7,4 @@ publish.workspace = true
 
 [dependencies]
 tick-core = { path = "../tick-core" }
+tick-diagnostics = { path = "../tick-diagnostics" }

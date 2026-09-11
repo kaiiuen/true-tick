@@ -2,7 +2,9 @@ use crate::config;
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use tick_diagnostics::{format_event, DiagnosticStore, DEFAULT_MAX_EVENTS};
 use tick_observation_windows::{ObservationSource, WindowsObservation};
 use tick_ownership::{TimerController, Verification};
 use tick_platform_windows::WindowsTimerPlatform;
@@ -11,7 +13,7 @@ use tick_startup_windows::{
     startup_operation, StartupOperation, StartupRegistration, WindowsUserStartup,
 };
 
-use crate::tray_surface::{menu_items, tooltip, IconColor, TrayStatus};
+use crate::tray_surface::{menu_items, tooltip, IconColor, TrayStatus, STATUS_COMMAND_ID};
 
 const WM_APP: u32 = 0x8000;
 const WM_TRAY: u32 = WM_APP + 1;
@@ -28,6 +30,18 @@ const ID_STARTUP_ON: usize = 1005;
 const ID_STARTUP_OFF: usize = 1006;
 const ID_AUTOMATIC_ON: usize = 1007;
 const ID_AUTOMATIC_OFF: usize = 1008;
+
+const WM_SIZE: u32 = 0x0005;
+const WM_CLOSE: u32 = 0x0010;
+const WM_NCDESTROY: u32 = 0x0082;
+const WS_OVERLAPPEDWINDOW: u32 = 0x00cf0000;
+const WS_VISIBLE: u32 = 0x10000000;
+const WS_CHILD: u32 = 0x40000000;
+const WS_VSCROLL: u32 = 0x00200000;
+const ES_MULTILINE: u32 = 0x0004;
+const ES_READONLY: u32 = 0x0800;
+const ES_AUTOVSCROLL: u32 = 0x0040;
+const ES_AUTOHSCROLL: u32 = 0x0080;
 const TPM_RIGHTBUTTON: u32 = 0x0002;
 const MF_STRING: u32 = 0x0000;
 const MF_SEPARATOR: u32 = 0x0800;
@@ -40,6 +54,7 @@ const NIM_ADD: u32 = 0x0000;
 const NIM_DELETE: u32 = 0x0002;
 const NIM_MODIFY: u32 = 0x0001;
 const GWLP_USERDATA: i32 = -21;
+const GW_CHILD: u32 = 5;
 const IDI_APPLICATION: usize = 32512;
 const MB_ICONWARNING: u32 = 0x0000_0030;
 
@@ -109,33 +124,74 @@ struct App {
     executable: PathBuf,
     startup_status: String,
     tray_icon: Option<NotifyIconData>,
+    diagnostics: Arc<DiagnosticStore>,
+    diagnostic_window: Option<*mut c_void>,
 }
 
 pub fn run() {
     unsafe {
+        let diagnostics = Arc::new(DiagnosticStore::new(DEFAULT_MAX_EVENTS));
+        diagnostics.record("lifecycle.start", "application_start");
         let executable = get_module_file_name_w_path();
+        diagnostics.record("lifecycle.executable_observed", "path=redacted");
         let config_path = config::path_from_executable(&executable);
         let (loaded, config_status) = match config::load(&config_path) {
-            Ok(config) => (config, None),
-            Err(error) => (config::Config::default(), Some(format!("Red: {error}"))),
+            Ok(config) => {
+                diagnostics.record("config.load.result", "result=success");
+                (config, None)
+            }
+            Err(error) => {
+                diagnostics.record("config.load.result", format!("result=error error={error}"));
+                (config::Config::default(), Some(format!("Red: {error}")))
+            }
         };
+        diagnostics.record(
+            "startup.decision",
+            format!(
+                "enabled={} operation={:?}",
+                loaded.startup_enabled,
+                startup_operation(loaded.startup_enabled)
+            ),
+        );
         let startup_status = match (config_status, startup_operation(loaded.startup_enabled)) {
             (Some(error), _) => error,
             (None, StartupOperation::Register) => {
                 match crate::portable::launcher_path_from_slot_executable(&executable) {
                     Ok(launcher) => match WindowsUserStartup::default().register(&launcher) {
                         Ok(()) => {
+                            diagnostics.record("startup.registration.result", "result=success");
                             "boot startup registered for the current-user Launcher.exe entry point"
                                 .to_owned()
                         }
-                        Err(error) => format!("Red: boot startup registration error {error:?}"),
+                        Err(error) => {
+                            diagnostics.record(
+                                "startup.registration.result",
+                                format!("result=error error={error:?}"),
+                            );
+                            format!("Red: boot startup registration error {error:?}")
+                        }
                     },
-                    Err(error) => format!("Red: portable launcher path unavailable {error:?}"),
+                    Err(error) => {
+                        diagnostics.record(
+                            "startup.launcher_slot_selection",
+                            format!("result=error error={error:?}"),
+                        );
+                        format!("Red: portable launcher path unavailable {error:?}")
+                    }
                 }
             }
             (None, StartupOperation::Remove) => match WindowsUserStartup::default().remove() {
-                Ok(()) => "boot startup registration disabled by config".to_owned(),
-                Err(error) => format!("Red: boot startup removal error {error:?}"),
+                Ok(()) => {
+                    diagnostics.record("startup.registration.result", "result=removed");
+                    "boot startup registration disabled by config".to_owned()
+                }
+                Err(error) => {
+                    diagnostics.record(
+                        "startup.registration.result",
+                        format!("result=error error={error:?}"),
+                    );
+                    format!("Red: boot startup removal error {error:?}")
+                }
             },
         };
 
@@ -143,7 +199,7 @@ pub fn run() {
         let _ = observation.refresh_power();
         let app = Box::new(App {
             controller: TimerController::new(
-                WindowsTimerPlatform::default(),
+                WindowsTimerPlatform::with_diagnostics(diagnostics.clone()),
                 loaded.request_interval,
             ),
             observation,
@@ -157,6 +213,8 @@ pub fn run() {
             executable,
             startup_status,
             tray_icon: None,
+            diagnostics,
+            diagnostic_window: None,
         });
         let app_ptr = Box::into_raw(app);
         let app = &mut *app_ptr;
@@ -174,6 +232,20 @@ pub fn run() {
             class_name: class_name.as_ptr(),
         };
         RegisterClassW(&wnd_class);
+        let diagnostic_class_name = wide("TrueTickDiagnosticClass");
+        let diagnostic_class = WndClass {
+            style: 0,
+            wnd_proc: Some(diagnostic_window_proc),
+            cls_extra: 0,
+            wnd_extra: 0,
+            instance: wnd_class.instance,
+            icon: wnd_class.icon,
+            cursor: std::ptr::null_mut(),
+            background: std::ptr::null_mut(),
+            menu_name: std::ptr::null(),
+            class_name: diagnostic_class_name.as_ptr(),
+        };
+        RegisterClassW(&diagnostic_class);
         let hwnd = CreateWindowExW(
             0,
             class_name.as_ptr(),
@@ -192,6 +264,7 @@ pub fn run() {
         Shell_NotifyIconW(NIM_ADD, &mut icon);
         app.tray_icon = Some(icon);
         if app.config.automatic {
+            app.record("policy.startup_automatic", "enabled=true");
             reconcile(app);
         }
         app.publish();
@@ -203,27 +276,48 @@ pub fn run() {
         if let Some(mut icon) = app.tray_icon.take() {
             Shell_NotifyIconW(NIM_DELETE, &mut icon);
         }
+        app.record("lifecycle.shutdown", "application_shutdown");
         drop(Box::from_raw(app_ptr));
     }
 }
 
 fn reconcile(app: &mut App) {
+    app.record("policy.recalculate", "trigger=reconcile");
     apply_policy(app);
 }
 
 fn apply_policy(app: &mut App) {
+    let power = app.observation.power().state;
     let decision = decide(PolicyInput {
         enabled: true,
         eligible_profile: true,
-        power: app.observation.power().state,
+        power,
     });
+    app.record(
+        "policy.evaluation",
+        format!(
+            "power={power:?} status={:?} reason={:?}",
+            decision.status, decision.reason
+        ),
+    );
     if decision.status == tick_core::Status::Requested {
         app.tray_status = TrayStatus::Starting;
         app.publish();
+        app.record("ownership.acquire.request", "source=policy");
         app.tray_status = match app.controller.start() {
-            Ok(Verification::Verified) => TrayStatus::Running,
-            Ok(Verification::Unverified | Verification::NotCollected) => TrayStatus::Unverified,
-            Err(_error) => TrayStatus::Error,
+            Ok(Verification::Verified) => {
+                app.record("verification.result", "result=verified");
+                app.record("ownership.changed", "state=owned");
+                TrayStatus::Running
+            }
+            Ok(verification) => {
+                app.record("verification.result", format!("result={verification:?}"));
+                TrayStatus::Unverified
+            }
+            Err(error) => {
+                app.record("ownership.acquire.error", format!("error={error:?}"));
+                TrayStatus::Error
+            }
         };
         app.publish();
         return;
@@ -233,37 +327,64 @@ fn apply_policy(app: &mut App) {
 }
 
 fn release_for_policy(app: &mut App, reason: tick_policy::PolicyReason) {
+    app.record("ownership.release.request", format!("reason={reason:?}"));
     app.tray_status = TrayStatus::Stopping;
     app.publish();
     app.tray_status = match app.controller.stop() {
-        Ok(_) => match reason {
-            tick_policy::PolicyReason::BatteryRestricted
-            | tick_policy::PolicyReason::BatterySaverRestricted
-            | tick_policy::PolicyReason::PowerUnknown
-            | tick_policy::PolicyReason::GloballyDisabled => TrayStatus::Blocked,
-            tick_policy::PolicyReason::NoEligibleProfile
-            | tick_policy::PolicyReason::EligibleProfile => TrayStatus::Stopped,
-        },
-        Err(_error) => TrayStatus::Unverified,
+        Ok(released) => {
+            app.record(
+                "ownership.changed",
+                format!("state=released changed={released}"),
+            );
+            match reason {
+                tick_policy::PolicyReason::BatteryRestricted
+                | tick_policy::PolicyReason::BatterySaverRestricted
+                | tick_policy::PolicyReason::PowerUnknown
+                | tick_policy::PolicyReason::GloballyDisabled => TrayStatus::Blocked,
+                tick_policy::PolicyReason::NoEligibleProfile
+                | tick_policy::PolicyReason::EligibleProfile => TrayStatus::Stopped,
+            }
+        }
+        Err(error) => {
+            app.record("ownership.release.error", format!("error={error:?}"));
+            TrayStatus::Unverified
+        }
     };
     app.publish();
 }
 
 fn manual_start(app: &mut App) {
+    app.record("tray.command", "command=start");
+    app.record("lifecycle.start_request", "source=manual");
     apply_policy(app);
 }
 
 fn manual_stop(app: &mut App) {
+    app.record("tray.command", "command=stop");
+    app.record("lifecycle.stop_request", "source=manual");
     app.tray_status = TrayStatus::Stopping;
     app.publish();
     app.tray_status = match app.controller.stop() {
-        Ok(_) => TrayStatus::Stopped,
-        Err(_error) => TrayStatus::Unverified,
+        Ok(released) => {
+            app.record(
+                "ownership.changed",
+                format!("state=released changed={released}"),
+            );
+            TrayStatus::Stopped
+        }
+        Err(error) => {
+            app.record("ownership.release.error", format!("error={error:?}"));
+            TrayStatus::Unverified
+        }
     };
     app.publish();
 }
 
 fn release_for_power_change(app: &mut App) {
+    app.record(
+        "power.transition",
+        format!("state={:?}", app.observation.power().state),
+    );
     if app.observation.power().state != PowerState::Ac {
         release_for_policy(
             app,
@@ -278,7 +399,22 @@ fn release_for_power_change(app: &mut App) {
 }
 
 impl App {
+    fn record(&mut self, name: &str, details: impl AsRef<str>) {
+        self.diagnostics.record(name, details);
+        if let Some(window) = self.diagnostic_window {
+            unsafe { refresh_diagnostic_window(window, self) };
+        }
+    }
+
     fn publish(&mut self) {
+        self.record(
+            "tray.status.changed",
+            format!(
+                "status={:?} tooltip={}",
+                self.tray_status,
+                tooltip(self.tray_status)
+            ),
+        );
         if let Some(icon) = self.tray_icon.as_mut() {
             update_icon(icon, self.tray_status);
         }
@@ -342,11 +478,17 @@ unsafe extern "system" fn window_proc(
             WM_COMMAND => match w_param & 0xffff {
                 ID_START => manual_start(app),
                 ID_STOP => manual_stop(app),
+                STATUS_COMMAND_ID => {
+                    app.record("tray.command", "command=status");
+                    open_diagnostic_window(hwnd, app);
+                }
                 ID_STARTUP_ON => set_startup(app, true),
                 ID_STARTUP_OFF => set_startup(app, false),
                 ID_AUTOMATIC_ON => set_automatic(app, true),
                 ID_AUTOMATIC_OFF => set_automatic(app, false),
                 ID_QUIT => {
+                    app.record("tray.command", "command=quit");
+                    app.record("lifecycle.shutdown_request", "source=tray");
                     if let Err(error) = app.controller.stop() {
                         let message = format!(
                             "Normal shutdown release failed. Tick ownership is unverified.\n\n{error:?}"
@@ -365,7 +507,16 @@ unsafe extern "system" fn window_proc(
                 _ => {}
             },
             WM_POWERBROADCAST if w_param == PBT_APMPOWERSTATUSCHANGE => {
-                let _ = app.observation.refresh_power();
+                app.record("power.broadcast", "event=APMPOWERSTATUSCHANGE");
+                let previous = app.observation.power().state;
+                let result = app.observation.refresh_power();
+                app.record(
+                    "power.observation",
+                    format!(
+                        "previous={previous:?} result={result:?} current={:?}",
+                        app.observation.power().state
+                    ),
+                );
                 if app.config.automatic {
                     reconcile(app);
                 } else {
@@ -415,8 +566,8 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &App) {
     AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
     AppendMenuW(
         menu,
-        MF_STRING | MF_GRAYED,
-        0,
+        MF_STRING,
+        STATUS_COMMAND_ID,
         wide(&format!("Status: {}", app.tray_status.label())).as_ptr(),
     );
     AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
@@ -436,14 +587,125 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &App) {
     DestroyMenu(menu);
 }
 
+unsafe fn open_diagnostic_window(parent: *mut c_void, app: &mut App) {
+    if let Some(window) = app.diagnostic_window {
+        ShowWindow(window, 1);
+        SetForegroundWindow(window);
+        refresh_diagnostic_window(window, app);
+        return;
+    }
+    let class_name = wide("TrueTickDiagnosticClass");
+    let window = CreateWindowExW(
+        0,
+        class_name.as_ptr(),
+        wide("True Tick diagnostics").as_ptr(),
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        120,
+        120,
+        820,
+        560,
+        parent,
+        std::ptr::null_mut(),
+        GetModuleHandleW(std::ptr::null()),
+        app as *mut App as *mut c_void,
+    );
+    if window.is_null() {
+        app.record("diagnostic.window.result", "result=create_failed");
+    } else {
+        app.diagnostic_window = Some(window);
+        app.record("diagnostic.window.result", "result=opened");
+        refresh_diagnostic_window(window, app);
+    }
+}
+
+unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &App) {
+    let edit = GetWindow(window, GW_CHILD);
+    if edit.is_null() {
+        return;
+    }
+    let mut text = format!(
+        "Current status: {}\r\nLog is local to this process session. Maximum events: {}\r\n\r\n",
+        app.tray_status.label(),
+        app.diagnostics.maximum_events()
+    );
+    for event in app.diagnostics.snapshot() {
+        text.push_str(&format_event(&event));
+        text.push_str("\r\n");
+    }
+    let text = wide(&text);
+    SetWindowTextW(edit, text.as_ptr());
+}
+
+unsafe extern "system" fn diagnostic_window_proc(
+    hwnd: *mut c_void,
+    message: u32,
+    _w_param: usize,
+    l_param: isize,
+) -> isize {
+    let app = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;
+    if message == WM_CREATE {
+        let create = l_param as *const CreateStruct;
+        let app_ptr = app_create_params(create);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, app_ptr as isize);
+        let edit_class = wide("EDIT");
+        let edit = CreateWindowExW(
+            0,
+            edit_class.as_ptr(),
+            std::ptr::null(),
+            WS_CHILD
+                | WS_VISIBLE
+                | WS_VSCROLL
+                | ES_MULTILINE
+                | ES_READONLY
+                | ES_AUTOVSCROLL
+                | ES_AUTOHSCROLL,
+            0,
+            0,
+            800,
+            500,
+            hwnd,
+            std::ptr::null_mut(),
+            GetModuleHandleW(std::ptr::null()),
+            std::ptr::null_mut(),
+        );
+        if !app_ptr.is_null() {
+            refresh_diagnostic_window(hwnd, &*(app_ptr as *mut App));
+        }
+        return if edit.is_null() { 1 } else { 0 };
+    }
+    if !app.is_null() {
+        if message == WM_SIZE {
+            let width = (l_param as u32 & 0xffff) as i32;
+            let height = ((l_param as u32 >> 16) & 0xffff) as i32;
+            let edit = GetWindow(hwnd, GW_CHILD);
+            MoveWindow(edit, 0, 0, width, height, 1);
+        } else if message == WM_CLOSE {
+            DestroyWindow(hwnd);
+        } else if message == WM_NCDESTROY {
+            (*app).diagnostic_window = None;
+        }
+    }
+    DefWindowProcW(hwnd, message, 0, l_param)
+}
+
 fn set_automatic(app: &mut App, enabled: bool) {
+    app.record(
+        "tray.command",
+        format!("command=automatic enabled={enabled}"),
+    );
+    app.record(
+        "policy.automatic_setting_changed",
+        format!("enabled={enabled}"),
+    );
     let mut next = app.config.clone();
     next.automatic = enabled;
-    if config::save_atomic(&app.config_path, &next).is_err() {
+    if let Err(error) = config::save_atomic(&app.config_path, &next) {
+        app.record("config.save.result", format!("result=error error={error}"));
         app.tray_status = TrayStatus::Error;
         app.publish();
         return;
     }
+    app.record("config.save.result", "result=success setting=automatic");
     app.config = next;
     if enabled {
         reconcile(app);
@@ -453,6 +715,7 @@ fn set_automatic(app: &mut App, enabled: bool) {
 }
 
 fn set_startup(app: &mut App, enabled: bool) {
+    app.record("tray.command", format!("command=startup enabled={enabled}"));
     let registration = if enabled {
         match crate::portable::launcher_path_from_slot_executable(&app.executable) {
             Ok(launcher) => WindowsUserStartup::default().register(&launcher),
@@ -461,7 +724,11 @@ fn set_startup(app: &mut App, enabled: bool) {
     } else {
         WindowsUserStartup::default().remove()
     };
-    if registration.is_err() {
+    if let Err(error) = registration {
+        app.record(
+            "startup.registration.result",
+            format!("result=error error={error:?}"),
+        );
         app.startup_status = "startup registration error".into();
         app.tray_status = TrayStatus::Error;
         app.publish();
@@ -469,13 +736,22 @@ fn set_startup(app: &mut App, enabled: bool) {
     }
     let mut next = app.config.clone();
     next.startup_enabled = enabled;
-    if config::save_atomic(&app.config_path, &next).is_err() {
+    if let Err(error) = config::save_atomic(&app.config_path, &next) {
+        app.record("config.save.result", format!("result=error error={error}"));
         app.startup_status = "startup config error".into();
         app.tray_status = TrayStatus::Stopped;
         app.publish();
         return;
     }
+    app.record(
+        "config.save.result",
+        "result=success setting=startup_enabled",
+    );
     app.config = next;
+    app.record(
+        "startup.registration.result",
+        format!("result=success enabled={enabled}"),
+    );
     app.startup_status = if enabled {
         "boot startup registered for the current-user Launcher.exe entry point".into()
     } else {
@@ -569,6 +845,18 @@ extern "system" {
         rect: *const c_void,
     ) -> i32;
     fn DestroyMenu(menu: *mut c_void) -> i32;
+    fn DestroyWindow(window: *mut c_void) -> i32;
+    fn ShowWindow(window: *mut c_void, command: i32) -> i32;
+    fn GetWindow(window: *mut c_void, command: u32) -> *mut c_void;
+    fn SetWindowTextW(window: *mut c_void, text: *const u16) -> i32;
+    fn MoveWindow(
+        window: *mut c_void,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        repaint: i32,
+    ) -> i32;
     fn GetCursorPos(point: *mut Point) -> i32;
     fn LoadIconW(instance: *mut c_void, name: *const u16) -> *mut c_void;
     fn GetModuleHandleW(name: *const u16) -> *mut c_void;
