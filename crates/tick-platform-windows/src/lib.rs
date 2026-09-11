@@ -10,8 +10,33 @@ use tick_diagnostics::DiagnosticStore;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimerBounds {
+    /// The value returned through the API's minimum-resolution output.
+    ///
+    /// Windows output labels are retained for diagnostics. They are not used
+    /// as an ordering guarantee because the observed values can be reversed.
     pub minimum_interval: Hns,
+    /// The value returned through the API's maximum-resolution output.
+    ///
+    /// Windows output labels are retained for diagnostics. They are not used
+    /// as an ordering guarantee because the observed values can be reversed.
     pub maximum_interval: Hns,
+}
+
+impl TimerBounds {
+    pub fn numeric_interval(self) -> (Hns, Hns) {
+        if self.minimum_interval <= self.maximum_interval {
+            (self.minimum_interval, self.maximum_interval)
+        } else {
+            (self.maximum_interval, self.minimum_interval)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TimerQuery {
+    pub bounds: TimerBounds,
+    pub reported_current: Hns,
+    pub raw_status: NtStatus,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -19,6 +44,16 @@ pub struct TimerObservation {
     pub requested: Hns,
     pub reported_current: Hns,
     pub raw_status: NtStatus,
+}
+
+impl TimerObservation {
+    pub fn is_satisfied(self) -> bool {
+        self.reported_current <= self.requested
+    }
+
+    pub fn is_finer_than_requested(self) -> bool {
+        self.reported_current < self.requested
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,7 +76,8 @@ pub enum TimerError {
 }
 
 pub trait TimerPlatform {
-    fn preflight(&mut self, interval: Hns) -> Result<TimerBounds, TimerError>;
+    fn query(&mut self, interval: Hns) -> Result<TimerQuery, TimerError>;
+    fn preflight(&mut self, interval: Hns) -> Result<TimerQuery, TimerError>;
     fn request(&mut self, interval: Hns) -> Result<TimerObservation, TimerError>;
     fn release(&mut self, interval: Hns) -> Result<TimerObservation, TimerError>;
 }
@@ -70,9 +106,9 @@ impl WindowsTimerPlatform {
 }
 
 impl TimerPlatform for WindowsTimerPlatform {
-    fn preflight(&mut self, interval: Hns) -> Result<TimerBounds, TimerError> {
+    fn query(&mut self, interval: Hns) -> Result<TimerQuery, TimerError> {
         self.log(
-            "timer.preflight",
+            "timer.query",
             format!(
                 "requested_hns={} requested_ms={}",
                 interval.value(),
@@ -81,19 +117,8 @@ impl TimerPlatform for WindowsTimerPlatform {
         );
         #[cfg(windows)]
         {
-            let bounds = match query_resolution() {
-                Ok((bounds, current)) => {
-                    self.log(
-                        "native.NtQueryTimerResolution.result",
-                        format!(
-                            "raw_status=0 minimum_hns={} maximum_hns={} current_hns={}",
-                            bounds.minimum_interval.value(),
-                            bounds.maximum_interval.value(),
-                            current.value()
-                        ),
-                    );
-                    bounds
-                }
+            let (bounds, current) = match query_resolution() {
+                Ok(values) => values,
                 Err(error) => {
                     self.log(
                         "native.NtQueryTimerResolution.error",
@@ -102,19 +127,45 @@ impl TimerPlatform for WindowsTimerPlatform {
                     return Err(error);
                 }
             };
-            if let Err(error) = validate_interval(bounds, interval) {
-                self.log("timer.preflight.invalid", format!("error={error:?}"));
-                return Err(error);
-            }
-            self.log("timer.preflight.accepted", "interval within native bounds");
-            Ok(bounds)
+            self.log(
+                "native.NtQueryTimerResolution.result",
+                format!(
+                    "raw_status=0 minimum_hns={} maximum_hns={} current_hns={}",
+                    bounds.minimum_interval.value(),
+                    bounds.maximum_interval.value(),
+                    current.value()
+                ),
+            );
+            Ok(TimerQuery {
+                bounds,
+                reported_current: current,
+                raw_status: STATUS_SUCCESS,
+            })
         }
         #[cfg(not(windows))]
         {
-            self.log("timer.preflight.unsupported", "platform=non_windows");
+            self.log("timer.query.unsupported", "platform=non_windows");
             let _ = interval;
             Err(TimerError::Unsupported)
         }
+    }
+
+    fn preflight(&mut self, interval: Hns) -> Result<TimerQuery, TimerError> {
+        self.log(
+            "timer.preflight",
+            format!(
+                "requested_hns={} requested_ms={}",
+                interval.value(),
+                interval.value() / 10_000
+            ),
+        );
+        let query = self.query(interval)?;
+        if let Err(error) = validate_interval(query.bounds, interval) {
+            self.log("timer.preflight.invalid", format!("error={error:?}"));
+            return Err(error);
+        }
+        self.log("timer.preflight.accepted", "interval within native bounds");
+        Ok(query)
     }
 
     fn request(&mut self, interval: Hns) -> Result<TimerObservation, TimerError> {
@@ -141,7 +192,7 @@ impl TimerPlatform for WindowsTimerPlatform {
                 raw_status: status,
             };
             self.requested = Some(interval);
-            if observation.reported_current != interval {
+            if !observation.is_satisfied() {
                 self.log(
                     "timer.postcondition.unverified",
                     format!("reported_hns={}", observation.reported_current.value()),
@@ -151,10 +202,17 @@ impl TimerPlatform for WindowsTimerPlatform {
                     reported_current: observation.reported_current,
                 });
             }
-            self.log(
-                "timer.postcondition.verified",
-                format!("reported_hns={}", observation.reported_current.value()),
-            );
+            if observation.is_finer_than_requested() {
+                self.log(
+                    "timer.postcondition.finer_than_requested",
+                    format!("reported_hns={}", observation.reported_current.value()),
+                );
+            } else {
+                self.log(
+                    "timer.postcondition.verified",
+                    format!("reported_hns={}", observation.reported_current.value()),
+                );
+            }
             Ok(observation)
         }
         #[cfg(not(windows))]
@@ -243,11 +301,11 @@ fn native_resolution_values(
 }
 
 fn validate_interval(bounds: TimerBounds, interval: Hns) -> Result<(), TimerError> {
+    let (lower, upper) = bounds.numeric_interval();
     if interval == Hns::ZERO
         || interval.value() > u32::MAX as u64
-        || bounds.minimum_interval > bounds.maximum_interval
-        || interval < bounds.minimum_interval
-        || interval > bounds.maximum_interval
+        || interval < lower
+        || interval > upper
     {
         return Err(TimerError::InvalidInterval);
     }
@@ -296,11 +354,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn query_fixture_preserves_native_bound_order() {
-        let (bounds, current) = native_resolution_values(5_000, 15_625, 10_000);
-        assert_eq!(bounds.minimum_interval, Hns::new(5_000));
-        assert_eq!(bounds.maximum_interval, Hns::new(15_625));
-        assert_eq!(current, Hns::new(10_000));
+    fn query_fixture_preserves_raw_fields_and_normalizes_numeric_order() {
+        let (bounds, current) = native_resolution_values(156_250, 5_000, 4_966);
+        assert_eq!(bounds.minimum_interval, Hns::new(156_250));
+        assert_eq!(bounds.maximum_interval, Hns::new(5_000));
+        assert_eq!(
+            bounds.numeric_interval(),
+            (Hns::new(5_000), Hns::new(156_250))
+        );
+        assert_eq!(current, Hns::new(4_966));
+    }
+
+    #[test]
+    fn captured_reversed_boundaries_accept_the_requested_interval() {
+        let (bounds, current) = native_resolution_values(156_250, 5_000, 4_966);
+        assert_eq!(validate_interval(bounds, Hns::new(10_000)), Ok(()));
+        assert_eq!(current, Hns::new(4_966));
     }
 
     #[test]
@@ -313,20 +382,20 @@ mod tests {
     }
 
     #[test]
-    fn interval_validation_accepts_both_boundaries() {
+    fn interval_validation_accepts_both_numeric_boundaries() {
         let bounds = TimerBounds {
-            minimum_interval: Hns::new(5_000),
-            maximum_interval: Hns::new(15_625),
+            minimum_interval: Hns::new(15_625),
+            maximum_interval: Hns::new(5_000),
         };
-        assert_eq!(validate_interval(bounds, bounds.minimum_interval), Ok(()));
-        assert_eq!(validate_interval(bounds, bounds.maximum_interval), Ok(()));
+        assert_eq!(validate_interval(bounds, Hns::new(5_000)), Ok(()));
+        assert_eq!(validate_interval(bounds, Hns::new(15_625)), Ok(()));
     }
 
     #[test]
     fn interval_validation_rejects_zero_and_out_of_range_values() {
         let bounds = TimerBounds {
-            minimum_interval: Hns::new(5_000),
-            maximum_interval: Hns::new(15_625),
+            minimum_interval: Hns::new(15_625),
+            maximum_interval: Hns::new(5_000),
         };
         assert_eq!(
             validate_interval(bounds, Hns::ZERO),
@@ -340,6 +409,28 @@ mod tests {
             validate_interval(bounds, Hns::new(15_626)),
             Err(TimerError::InvalidInterval)
         );
+    }
+
+    #[test]
+    fn finer_effective_observation_satisfies_the_request() {
+        let observation = TimerObservation {
+            requested: Hns::new(10_000),
+            reported_current: Hns::new(4_966),
+            raw_status: STATUS_SUCCESS,
+        };
+        assert!(observation.is_satisfied());
+        assert!(observation.is_finer_than_requested());
+    }
+
+    #[test]
+    fn coarser_effective_observation_is_not_satisfied() {
+        let observation = TimerObservation {
+            requested: Hns::new(10_000),
+            reported_current: Hns::new(10_001),
+            raw_status: STATUS_SUCCESS,
+        };
+        assert!(!observation.is_satisfied());
+        assert!(!observation.is_finer_than_requested());
     }
 
     #[test]
