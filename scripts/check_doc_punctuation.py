@@ -6,7 +6,7 @@ import sys
 def files_under(root: Path):
     for path in root.rglob("*"):
         if path.is_file() and path.suffix.lower() in {".md", ".markdown", ".txt"}:
-            if "archive" not in path.parts:
+            if "archive" not in {part.lower() for part in path.parts}:
                 yield path
 
 
