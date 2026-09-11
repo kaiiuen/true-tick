@@ -7,7 +7,7 @@ This repository contains an internal v1 runtime, not a production release.
 - `tick-ownership` models one serialized runtime instance's tracked contribution and idempotent transitions.
 - `tick-platform-windows` isolates the native timer request and release calls. Its manual `ntdll` boundary uses signed `i32` NTSTATUS values and an explicit `u8` Windows BOOLEAN representation, with raw statuses preserved.
 - `tick-observation-windows` is the event and power observation boundary.
-- `tick-ownership` serializes preflight, request, verification, postcondition, and release.
+- `tick-ownership` serializes preflight, request, verification, postcondition, and release while retaining the latest timer observation.
 - `tick-diagnostics` owns truthful status formatting and a bounded synchronized in-memory session event store.
 - `tick-calibration` remains an explicit unsupported future boundary. It is not a
   production control path.
@@ -18,6 +18,8 @@ This repository contains an internal v1 runtime, not a production release.
 The tray's native loader failure was confirmed from PE inspection. `true-tick.exe` imported ordinal 345 from `COMCTL32.dll`, which is `TaskDialogIndirect`, without an embedded application manifest. Windows therefore selected legacy Common Controls and failed before `main` with `STATUS_ORDINAL_NOT_FOUND`. The tray package now uses `build.rs` to pass MSVC `/MANIFEST:EMBED` and `/MANIFESTINPUT` for its checked-in manifest. That manifest activates Common Controls version 6, declares Windows 10 and later compatibility, and requests `asInvoker` execution without administrator or UI access claims. The Launcher has no corresponding common controls or `TaskDialogIndirect` import and remains unchanged. Static PE checks and runtime Windows validation remain separate tasks.
 
 Manual declarations for the timer functions link explicitly to `ntdll`. Manual kernel32 declarations for file replacement, power observation, last-error retrieval, and module-path lookup explicitly link to `kernel32`. The manifest integration is limited to the tray binary and does not add a GUI framework or a runtime import workaround.
+
+The timer adapter retains the raw `minimum` and `maximum` output labels and values from `NtQueryTimerResolution` for diagnostics. It normalizes the two numeric values into a lower and upper bound before inclusive validation. The output labels describe API parameters and do not guarantee ascending order. The captured raw values `minimum_hns=156250` and `maximum_hns=5000` therefore accept `requested_hns=10000`.
 Core Windows DLLs such as `kernel32.dll`, `user32.dll`, `ntdll.dll`, `shell32.dll`,
 `gdi32.dll`, and `comctl32.dll` are OS components, not bundled compatibility files.
 The embedded Common Controls v6 manifest remains the compatibility mechanism. The
@@ -93,8 +95,14 @@ yellow or red rather than being reported as green. The tray maps running and ver
 pending, degraded, or unverified behavior to yellow, and stopped, blocked,
 unsupported, or error behavior to red. Each public tray status is reachable from
 an explicit runtime path or is covered by a deterministic boundary test.
-The tooltip uses `Running (current timing)` and `Stopped (current timing)` for
-steady states, with concise transition labels such as `Starting...` and
-`Stopping...`. Current observation verifies
+The tooltip and status menu use concise observed or requested values such as
+`Running (1.000 ms)`, `Running (0.497 ms, finer)`, `Stopped (current: 0.497 ms)`,
+`Starting (1.000 ms)`, `Stopping (current: 0.497 ms)`, and
+`Error (invalid interval)`. They use `unknown` when no timing observation is
+available. Raw HNS and full event details remain in the diagnostic window.
+Controller and app state carry observations through query, request, release,
+and power reconciliation. A current value at or below the requested interval
+satisfies the postcondition. A lower current value is explicitly finer than
+requested. A higher current value is unverified. Current observation verifies
 only the available system power query and one power broadcast path. Full Battery
 Saver, session, lock, suspend, and resume notification support is not claimed.

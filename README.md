@@ -35,9 +35,14 @@ tray behavior, startup registration, or launcher handoff.
 
 The v1 uses a narrow native timer adapter with raw status preservation, an
 explicit released, owned, or uncertain ownership lifecycle, controlled recovery,
-conservative power policy, a native tray
+conservative power policy, and a native tray
 surface, atomically replaced local configuration, per-user boot startup
-registration, and a bounded portable A/B launcher scaffold. The compact tray
+registration, and a bounded portable A/B launcher scaffold. The adapter retains
+the raw `minimum` and `maximum` output labels and values from
+`NtQueryTimerResolution` for diagnostics, then normalizes their numeric order
+before inclusive interval validation. The labels are API field names, not an
+ordering guarantee. For example, raw values `156250` and `5000` accept a
+requested `10000` interval. The compact tray
 menu exposes `Start`, `Stop`, `Auto-start: On/Off`, `Auto-time: On/Off`, a clickable short status item, and `Quit`. Auto-start controls launch at Windows login. Auto-time controls automatic timer acquisition after launch. The new defaults are `startup_enabled = true` and `automatic = false`, so login launch does not acquire timing until the user manually starts it. Status opens a normal taskbar
 diagnostic window titled `True Tick Status and Diagnostics` without changing timer
 state. It is a normal taskbar window with standard title-bar controls, a resizable
@@ -53,11 +58,17 @@ not create duplicate menus. Start and Stop remain
 manual controls and use the same guarded policy and ownership lifecycle as automatic
 activation. Quit requires a safe stop when timing is active or ownership is uncertain. The warning offers `Cancel` and `Stop and Quit`. The app exits only after owned-request release is verified. A failed or uncertain release keeps the app alive and records the retryable warning. The diagnostic window shows a bounded, local in-memory session log.
 It excludes raw pointers, private tokens, credentials, arbitrary secrets, and
-unbounded sensitive paths. The tooltip uses short runtime wording: `Running
-(current timing)`, `Stopped (current timing)`, or a concise transition or warning
-label. Unsupported native timer capability is surfaced as `Unsupported`, while
-error, blocked, degraded, unverified, starting, stopping, running, and stopped
-retain consistent icon colors and menu meanings. Status icon canvases use the current
+unbounded sensitive paths. The tooltip and status menu use short runtime timing values such as `Running
+(1.000 ms)`, `Running (0.497 ms, finer)`, `Stopped (current: 0.497 ms)`,
+`Starting (1.000 ms)`, `Stopping (current: 0.497 ms)`, or `Error (invalid
+interval)`. They use `unknown` when no observation is available and never show
+raw HNS or full logs. Query, request, release, and power reconciliation
+observations are carried through controller and app state. A reported current
+value at or below the requested value is satisfied, with a lower value labeled
+finer. A higher value remains unverified. Unsupported native timer capability
+is surfaced as `Unsupported`, while error, blocked, degraded, unverified,
+starting, stopping, running, and stopped retain consistent icon colors and menu
+meanings. Status icon canvases use the current
 window DPI where available: 16, 20, 24, 32, or 64 pixels for 100, 125, 150, 200,
 or 400 percent. Unsupported intermediate DPI values use the nearest supported canvas.
 The tray shell may apply its own additional rendering scale. Calibration remains an
@@ -90,6 +101,8 @@ release signing.
 
 Unsupported platform behavior remains explicit. Native API acceptance and the
 adapter postcondition are not claims about a universal effective system value.
+The controller retains the latest raw-status timer observation from query,
+request, or release, and the app refreshes it during power reconciliation.
 Power observation currently verifies only the available system power query and
 one power broadcast path. Battery Saver, session, lock, suspend, and resume
 notification coverage remains incomplete and is shown as unknown or degraded

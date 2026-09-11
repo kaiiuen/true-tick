@@ -319,6 +319,13 @@ mod tests {
     }
 
     #[test]
+    fn timing_format_rounds_hns_without_exposing_raw_units() {
+        assert_eq!(format_ms(Hns::new(4_966)), "0.497");
+        assert_eq!(format_ms(Hns::new(10_000)), "1.000");
+        assert_eq!(format_ms(Hns::new(156_250)), "15.625");
+    }
+
+    #[test]
     fn transition_and_degraded_states_are_yellow() {
         for status in [
             TrayStatus::Starting,
