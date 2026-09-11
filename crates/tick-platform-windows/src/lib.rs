@@ -54,18 +54,9 @@ impl TimerPlatform for WindowsTimerPlatform {
     fn preflight(&mut self, interval: Hns) -> Result<TimerBounds, TimerError> {
         #[cfg(windows)]
         {
-            let (minimum, maximum, _current) = query_resolution()?;
-            if interval < minimum
-                || interval > maximum
-                || interval == Hns::ZERO
-                || interval.value() > u32::MAX as u64
-            {
-                return Err(TimerError::InvalidInterval);
-            }
-            return Ok(TimerBounds {
-                minimum_interval: minimum,
-                maximum_interval: maximum,
-            });
+            let bounds = query_resolution()?.0;
+            validate_interval(bounds, interval)?;
+            return Ok(bounds);
         }
         #[cfg(not(windows))]
         {
@@ -136,26 +127,58 @@ impl TimerPlatform for WindowsTimerPlatform {
 const STATUS_SUCCESS: u32 = 0;
 
 #[cfg(windows)]
-fn query_resolution() -> Result<(Hns, Hns, Hns), TimerError> {
-    let mut minimum = 0u32;
-    let mut maximum = 0u32;
-    let mut current = 0u32;
-    let status = unsafe { nt_query_timer_resolution(&mut minimum, &mut maximum, &mut current) };
+fn query_resolution() -> Result<(TimerBounds, Hns), TimerError> {
+    let mut minimum_resolution = 0u32;
+    let mut maximum_resolution = 0u32;
+    let mut current_resolution = 0u32;
+    let status = unsafe {
+        nt_query_timer_resolution(
+            &mut minimum_resolution,
+            &mut maximum_resolution,
+            &mut current_resolution,
+        )
+    };
     if status != STATUS_SUCCESS {
         return Err(TimerError::QueryFailed { raw_status: status });
     }
-    Ok((
-        Hns::new(maximum as u64),
-        Hns::new(minimum as u64),
-        Hns::new(current as u64),
+    Ok(native_resolution_values(
+        minimum_resolution,
+        maximum_resolution,
+        current_resolution,
     ))
+}
+
+fn native_resolution_values(
+    minimum_resolution: u32,
+    maximum_resolution: u32,
+    current_resolution: u32,
+) -> (TimerBounds, Hns) {
+    (
+        TimerBounds {
+            minimum_interval: Hns::new(minimum_resolution as u64),
+            maximum_interval: Hns::new(maximum_resolution as u64),
+        },
+        Hns::new(current_resolution as u64),
+    )
+}
+
+fn validate_interval(bounds: TimerBounds, interval: Hns) -> Result<(), TimerError> {
+    if interval == Hns::ZERO
+        || interval.value() > u32::MAX as u64
+        || bounds.minimum_interval > bounds.maximum_interval
+        || interval < bounds.minimum_interval
+        || interval > bounds.maximum_interval
+    {
+        return Err(TimerError::InvalidInterval);
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
 extern "system" {
     fn NtQueryTimerResolution(
-        maximum_resolution: *mut u32,
         minimum_resolution: *mut u32,
+        maximum_resolution: *mut u32,
         current_resolution: *mut u32,
     ) -> u32;
     fn NtSetTimerResolution(
@@ -167,11 +190,11 @@ extern "system" {
 
 #[cfg(windows)]
 unsafe fn nt_query_timer_resolution(
-    maximum: *mut u32,
     minimum: *mut u32,
+    maximum: *mut u32,
     current: *mut u32,
 ) -> u32 {
-    NtQueryTimerResolution(maximum, minimum, current)
+    NtQueryTimerResolution(minimum, maximum, current)
 }
 
 #[cfg(windows)]
@@ -181,8 +204,54 @@ unsafe fn nt_set_timer_resolution(desired: u32, set: bool, current: *mut u32) ->
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(windows))]
     use super::*;
+
+    #[test]
+    fn query_fixture_preserves_native_bound_order() {
+        let (bounds, current) = native_resolution_values(5_000, 15_625, 10_000);
+        assert_eq!(bounds.minimum_interval, Hns::new(5_000));
+        assert_eq!(bounds.maximum_interval, Hns::new(15_625));
+        assert_eq!(current, Hns::new(10_000));
+    }
+
+    #[test]
+    fn interval_validation_accepts_an_ordinary_value() {
+        let bounds = TimerBounds {
+            minimum_interval: Hns::new(5_000),
+            maximum_interval: Hns::new(15_625),
+        };
+        assert_eq!(validate_interval(bounds, Hns::new(10_000)), Ok(()));
+    }
+
+    #[test]
+    fn interval_validation_accepts_both_boundaries() {
+        let bounds = TimerBounds {
+            minimum_interval: Hns::new(5_000),
+            maximum_interval: Hns::new(15_625),
+        };
+        assert_eq!(validate_interval(bounds, bounds.minimum_interval), Ok(()));
+        assert_eq!(validate_interval(bounds, bounds.maximum_interval), Ok(()));
+    }
+
+    #[test]
+    fn interval_validation_rejects_zero_and_out_of_range_values() {
+        let bounds = TimerBounds {
+            minimum_interval: Hns::new(5_000),
+            maximum_interval: Hns::new(15_625),
+        };
+        assert_eq!(
+            validate_interval(bounds, Hns::ZERO),
+            Err(TimerError::InvalidInterval)
+        );
+        assert_eq!(
+            validate_interval(bounds, Hns::new(4_999)),
+            Err(TimerError::InvalidInterval)
+        );
+        assert_eq!(
+            validate_interval(bounds, Hns::new(15_626)),
+            Err(TimerError::InvalidInterval)
+        );
+    }
 
     #[test]
     fn non_windows_adapter_is_explicitly_unsupported() {
