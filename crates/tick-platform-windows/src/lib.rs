@@ -30,6 +30,15 @@ impl TimerBounds {
             (self.maximum_interval, self.minimum_interval)
         }
     }
+
+    pub fn smallest_supported_boundary(self) -> Result<Hns, TimerError> {
+        let (lower, _) = self.numeric_interval();
+        if lower == Hns::ZERO || lower.value() > u32::MAX as u64 {
+            Err(TimerError::InvalidInterval)
+        } else {
+            Ok(lower)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,6 +46,18 @@ pub struct TimerQuery {
     pub bounds: TimerBounds,
     pub reported_current: Hns,
     pub raw_status: NtStatus,
+}
+
+impl TimerQuery {
+    pub fn resolve_request(self, requested: Hns) -> Result<Hns, TimerError> {
+        let selected = if requested == Hns::ZERO {
+            self.bounds.smallest_supported_boundary()?
+        } else {
+            requested
+        };
+        validate_interval(self.bounds, selected)?;
+        Ok(selected)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,6 +98,12 @@ pub enum TimerError {
 
 pub trait TimerPlatform {
     fn query(&mut self, interval: Hns) -> Result<TimerQuery, TimerError>;
+
+    fn resolve(&mut self, requested: Hns) -> Result<Hns, TimerError> {
+        let query = self.query(requested)?;
+        query.resolve_request(requested)
+    }
+
     fn preflight(&mut self, interval: Hns) -> Result<TimerQuery, TimerError>;
     fn request(&mut self, interval: Hns) -> Result<TimerObservation, TimerError>;
     fn release(&mut self, interval: Hns) -> Result<TimerObservation, TimerError>;
@@ -150,6 +177,46 @@ impl TimerPlatform for WindowsTimerPlatform {
         }
     }
 
+    fn resolve(&mut self, requested: Hns) -> Result<Hns, TimerError> {
+        let query = self.query(requested)?;
+        let selected = query.resolve_request(requested);
+        match selected {
+            Ok(interval) => {
+                self.log(
+                    "timer.selection",
+                    format!(
+                        "mode={} raw_status={} raw_minimum_hns={} raw_maximum_hns={} selected_hns={} requested_hns={} effective_hns={} effective_relation={}",
+                        if requested == Hns::ZERO { "automatic" } else { "fixed" },
+                        query.raw_status,
+                        query.bounds.minimum_interval.value(),
+                        query.bounds.maximum_interval.value(),
+                        interval.value(),
+                        requested.value(),
+                        query.reported_current.value(),
+                        effective_relation(query.reported_current, interval)
+                    ),
+                );
+                Ok(interval)
+            }
+            Err(error) => {
+                self.log(
+                    "timer.selection.rejected",
+                    format!(
+                        "mode={} raw_status={} raw_minimum_hns={} raw_maximum_hns={} requested_hns={} effective_hns={} effective_relation={} error={error:?}",
+                        if requested == Hns::ZERO { "automatic" } else { "fixed" },
+                        query.raw_status,
+                        query.bounds.minimum_interval.value(),
+                        query.bounds.maximum_interval.value(),
+                        requested.value(),
+                        query.reported_current.value(),
+                        effective_relation(query.reported_current, requested)
+                    ),
+                );
+                Err(error)
+            }
+        }
+    }
+
     fn preflight(&mut self, interval: Hns) -> Result<TimerQuery, TimerError> {
         self.log(
             "timer.preflight",
@@ -181,7 +248,13 @@ impl TimerPlatform for WindowsTimerPlatform {
                 unsafe { nt_set_timer_resolution(interval.value() as u32, true, &mut current) };
             self.log(
                 "native.NtSetTimerResolution.result",
-                format!("raw_status={} current_hns={}", status, current),
+                format!(
+                    "raw_status={} requested_hns={} effective_hns={} effective_relation={}",
+                    status,
+                    interval.value(),
+                    current,
+                    effective_relation(Hns::new(current as u64), interval)
+                ),
             );
             if status != STATUS_SUCCESS {
                 return Err(TimerError::RequestFailed { raw_status: status });
@@ -195,7 +268,11 @@ impl TimerPlatform for WindowsTimerPlatform {
             if !observation.is_satisfied() {
                 self.log(
                     "timer.postcondition.unverified",
-                    format!("reported_hns={}", observation.reported_current.value()),
+                    format!(
+                        "requested_hns={} effective_hns={} effective_relation=unverified",
+                        observation.requested.value(),
+                        observation.reported_current.value()
+                    ),
                 );
                 return Err(TimerError::PostconditionUnverified {
                     raw_status: status,
@@ -205,12 +282,20 @@ impl TimerPlatform for WindowsTimerPlatform {
             if observation.is_finer_than_requested() {
                 self.log(
                     "timer.postcondition.finer_than_requested",
-                    format!("reported_hns={}", observation.reported_current.value()),
+                    format!(
+                        "requested_hns={} effective_hns={} effective_relation=finer",
+                        observation.requested.value(),
+                        observation.reported_current.value()
+                    ),
                 );
             } else {
                 self.log(
                     "timer.postcondition.verified",
-                    format!("reported_hns={}", observation.reported_current.value()),
+                    format!(
+                        "requested_hns={} effective_hns={} effective_relation=equal",
+                        observation.requested.value(),
+                        observation.reported_current.value()
+                    ),
                 );
             }
             Ok(observation)
@@ -239,7 +324,13 @@ impl TimerPlatform for WindowsTimerPlatform {
                 unsafe { nt_set_timer_resolution(interval.value() as u32, false, &mut current) };
             self.log(
                 "native.NtSetTimerResolution.release_result",
-                format!("raw_status={} current_hns={}", status, current),
+                format!(
+                    "raw_status={} requested_hns={} effective_hns={} effective_relation={}",
+                    status,
+                    interval.value(),
+                    current,
+                    effective_relation(Hns::new(current as u64), interval)
+                ),
             );
             if status != STATUS_SUCCESS {
                 return Err(TimerError::ReleaseFailed { raw_status: status });
@@ -298,6 +389,16 @@ fn native_resolution_values(
         },
         Hns::new(current_resolution as u64),
     )
+}
+
+fn effective_relation(effective: Hns, requested: Hns) -> &'static str {
+    if effective < requested {
+        "finer"
+    } else if effective == requested {
+        "equal"
+    } else {
+        "unverified"
+    }
 }
 
 fn validate_interval(bounds: TimerBounds, interval: Hns) -> Result<(), TimerError> {
@@ -367,9 +468,36 @@ mod tests {
 
     #[test]
     fn captured_reversed_boundaries_accept_the_requested_interval() {
-        let (bounds, current) = native_resolution_values(156_250, 5_000, 4_966);
+        let (bounds, current) = native_resolution_values(156_250, 5_000, 9_966);
         assert_eq!(validate_interval(bounds, Hns::new(10_000)), Ok(()));
-        assert_eq!(current, Hns::new(4_966));
+        assert_eq!(current, Hns::new(9_966));
+    }
+
+    #[test]
+    fn automatic_selection_uses_the_smallest_numeric_boundary() {
+        let (bounds, current) = native_resolution_values(156_250, 5_000, 9_966);
+        let query = TimerQuery {
+            bounds,
+            reported_current: current,
+            raw_status: STATUS_SUCCESS,
+        };
+        assert_eq!(query.resolve_request(Hns::ZERO), Ok(Hns::new(5_000)));
+    }
+
+    #[test]
+    fn automatic_selection_rejects_unavailable_boundaries() {
+        let query = TimerQuery {
+            bounds: TimerBounds {
+                minimum_interval: Hns::ZERO,
+                maximum_interval: Hns::new(15_625),
+            },
+            reported_current: Hns::ZERO,
+            raw_status: STATUS_SUCCESS,
+        };
+        assert_eq!(
+            query.resolve_request(Hns::ZERO),
+            Err(TimerError::InvalidInterval)
+        );
     }
 
     #[test]
@@ -415,7 +543,7 @@ mod tests {
     fn finer_effective_observation_satisfies_the_request() {
         let observation = TimerObservation {
             requested: Hns::new(10_000),
-            reported_current: Hns::new(4_966),
+            reported_current: Hns::new(9_966),
             raw_status: STATUS_SUCCESS,
         };
         assert!(observation.is_satisfied());

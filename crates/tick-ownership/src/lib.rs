@@ -76,26 +76,39 @@ pub enum Verification {
 pub struct TimerController<P> {
     platform: P,
     ownership: Ownership,
-    interval: Hns,
+    requested_interval: Hns,
+    selected_interval: Option<Hns>,
     verification: Verification,
     observation: Option<TimerObservation>,
 }
 
 impl<P: TimerPlatform> TimerController<P> {
-    pub const fn new(platform: P, interval: Hns) -> Self {
+    pub const fn new(platform: P, requested_interval: Hns) -> Self {
         Self {
             platform,
             ownership: Ownership::new(),
-            interval,
+            requested_interval,
+            selected_interval: None,
             verification: Verification::NotCollected,
             observation: None,
         }
     }
 
+    fn selected_for_query(&mut self) -> Result<Hns, TimerError> {
+        if let Some(interval) = self.selected_interval {
+            Ok(interval)
+        } else {
+            let interval = self.platform.resolve(self.requested_interval)?;
+            self.selected_interval = Some(interval);
+            Ok(interval)
+        }
+    }
+
     pub fn query(&mut self) -> Result<TimerObservation, TimerError> {
-        let query = self.platform.query(self.interval)?;
+        let interval = self.selected_for_query()?;
+        let query = self.platform.query(interval)?;
         let observation = TimerObservation {
-            requested: self.interval,
+            requested: interval,
             reported_current: query.reported_current,
             raw_status: query.raw_status,
         };
@@ -109,20 +122,22 @@ impl<P: TimerPlatform> TimerController<P> {
         {
             return Ok(self.verification);
         }
-        let query = self.platform.preflight(self.interval)?;
+        let interval = self.platform.resolve(self.requested_interval)?;
+        self.selected_interval = Some(interval);
+        let query = self.platform.preflight(interval)?;
         self.observation = Some(TimerObservation {
-            requested: self.interval,
+            requested: interval,
             reported_current: query.reported_current,
             raw_status: query.raw_status,
         });
-        if let Err(error) = self.platform.request(self.interval) {
+        if let Err(error) = self.platform.request(interval) {
             if let TimerError::PostconditionUnverified {
                 raw_status,
                 reported_current,
             } = error
             {
                 self.observation = Some(TimerObservation {
-                    requested: self.interval,
+                    requested: interval,
                     reported_current,
                     raw_status,
                 });
@@ -148,7 +163,8 @@ impl<P: TimerPlatform> TimerController<P> {
         if self.ownership.state() == OwnershipState::Released {
             return Ok(false);
         }
-        let observation = match self.platform.release(self.interval) {
+        let interval = self.selected_interval.ok_or(TimerError::InvalidInterval)?;
+        let observation = match self.platform.release(interval) {
             Ok(observation) => observation,
             Err(error) => {
                 self.verification = Verification::Unverified;
@@ -160,6 +176,7 @@ impl<P: TimerPlatform> TimerController<P> {
             .map_err(|_| TimerError::ReleaseFailed { raw_status: 0 })?;
         self.verification = Verification::NotCollected;
         self.observation = Some(observation);
+        self.selected_interval = None;
         Ok(true)
     }
 

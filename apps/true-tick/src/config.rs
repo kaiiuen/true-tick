@@ -2,6 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tick_core::Hns;
 
+/// Zero is the persisted sentinel for selecting the smallest native boundary.
+pub const AUTOMATIC_REQUEST_INTERVAL: Hns = Hns::ZERO;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     pub automatic: bool,
@@ -14,7 +17,7 @@ impl Default for Config {
         Self {
             automatic: false,
             startup_enabled: true,
-            request_interval: Hns::new(10_000),
+            request_interval: AUTOMATIC_REQUEST_INTERVAL,
         }
     }
 }
@@ -45,9 +48,18 @@ pub fn path_from_executable(executable: &Path) -> PathBuf {
         .join("true-tick.toml")
 }
 
+#[cfg(test)]
 pub fn load(path: &Path) -> Result<Config, ConfigError> {
+    load_with_migration(path).map(|(config, _)| config)
+}
+
+pub fn load_with_migration(path: &Path) -> Result<(Config, bool), ConfigError> {
     let text = fs::read_to_string(path).map_err(ConfigError::Read)?;
-    parse(&text)
+    let (config, migrated) = parse_with_migration(&text)?;
+    if migrated {
+        save_atomic(path, &config)?;
+    }
+    Ok((config, migrated))
 }
 
 pub fn save_atomic(path: &Path, config: &Config) -> Result<(), ConfigError> {
@@ -107,8 +119,14 @@ extern "system" {
     fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
 }
 
+#[cfg(test)]
 pub fn parse(text: &str) -> Result<Config, ConfigError> {
+    parse_with_migration(text).map(|(config, _)| config)
+}
+
+fn parse_with_migration(text: &str) -> Result<(Config, bool), ConfigError> {
     let mut config = Config::default();
+    let mut migrated = false;
     for (line_number, raw) in text.lines().enumerate() {
         let line = raw.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
@@ -147,7 +165,12 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                         line_number + 1
                     ))
                 })?;
-                config.request_interval = Hns::new(value);
+                config.request_interval = if value == 10_000 {
+                    migrated = true;
+                    AUTOMATIC_REQUEST_INTERVAL
+                } else {
+                    Hns::new(value)
+                };
             }
             other => {
                 return Err(ConfigError::Invalid(format!(
@@ -156,7 +179,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             }
         }
     }
-    Ok(config)
+    Ok((config, migrated))
 }
 
 #[cfg(test)]
@@ -170,7 +193,7 @@ mod tests {
             Config {
                 automatic: false,
                 startup_enabled: true,
-                request_interval: Hns::new(10_000)
+                request_interval: AUTOMATIC_REQUEST_INTERVAL
             }
         );
     }
@@ -185,7 +208,7 @@ mod tests {
             Config {
                 automatic: true,
                 startup_enabled: true,
-                request_interval: Hns::new(10_000)
+                request_interval: AUTOMATIC_REQUEST_INTERVAL
             }
         );
     }
@@ -195,7 +218,17 @@ mod tests {
         let config = parse("automatic = false\nstartup_enabled = false\n").unwrap();
         assert!(!config.automatic);
         assert!(!config.startup_enabled);
-        assert_eq!(config.request_interval, Hns::new(10_000));
+        assert_eq!(config.request_interval, AUTOMATIC_REQUEST_INTERVAL);
+    }
+
+    #[test]
+    fn migrates_the_legacy_one_millisecond_request_to_automatic_selection() {
+        let (config, migrated) = parse_with_migration(
+            "automatic = false\nstartup_enabled = true\nrequest_interval_hns = 10000\n",
+        )
+        .unwrap();
+        assert!(migrated);
+        assert_eq!(config.request_interval, AUTOMATIC_REQUEST_INTERVAL);
     }
 
     #[test]
@@ -211,7 +244,7 @@ mod tests {
         let config = Config {
             automatic: true,
             startup_enabled: true,
-            request_interval: Hns::new(10_000),
+            request_interval: AUTOMATIC_REQUEST_INTERVAL,
         };
         save_atomic(&path, &config).unwrap();
         assert_eq!(load(&path).unwrap(), config);

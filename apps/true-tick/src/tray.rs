@@ -251,16 +251,30 @@ pub fn run() {
             );
         }
         let config_path = config::path_from_executable(&executable);
-        let (loaded, config_status) = match config::load(&config_path) {
-            Ok(config) => {
-                diagnostics.record("config.load.result", "result=success");
-                (config, None)
-            }
-            Err(error) => {
-                diagnostics.record("config.load.result", format!("result=error error={error}"));
-                (config::Config::default(), Some(format!("Red: {error}")))
-            }
-        };
+        let (loaded, config_status, config_migrated) =
+            match config::load_with_migration(&config_path) {
+                Ok((config, migrated)) => {
+                    diagnostics.record(
+                        "config.load.result",
+                        format!("result=success migrated={migrated}"),
+                    );
+                    (config, None, migrated)
+                }
+                Err(error) => {
+                    diagnostics.record("config.load.result", format!("result=error error={error}"));
+                    (
+                        config::Config::default(),
+                        Some(format!("Red: {error}")),
+                        false,
+                    )
+                }
+            };
+        if config_migrated {
+            diagnostics.record(
+                "config.migration",
+                "legacy_request_hns=10000 result=automatic_selection",
+            );
+        }
         diagnostics.record(
             "startup.decision",
             format!(
@@ -576,7 +590,10 @@ impl App {
             requested: self
                 .timing_observation
                 .map(|observation| observation.requested)
-                .or(Some(self.config.request_interval)),
+                .or_else(|| {
+                    (self.config.request_interval != config::AUTOMATIC_REQUEST_INTERVAL)
+                        .then_some(self.config.request_interval)
+                }),
             effective: self
                 .timing_observation
                 .map(|observation| observation.reported_current),
@@ -636,10 +653,17 @@ fn refresh_timing_observation(app: &mut App) {
     match app.controller.query() {
         Ok(observation) => {
             app.timing_observation = Some(observation);
+            let effective_relation = if observation.reported_current < observation.requested {
+                "finer"
+            } else if observation.reported_current == observation.requested {
+                "equal"
+            } else {
+                "unverified"
+            };
             app.record(
                 "timer.query.observation",
                 format!(
-                    "requested_hns={} current_hns={} raw_status={}",
+                    "requested_hns={} effective_hns={} raw_status={} effective_relation={effective_relation}",
                     observation.requested.value(),
                     observation.reported_current.value(),
                     observation.raw_status
