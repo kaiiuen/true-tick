@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/tick-core",
     "crates/tick-policy",
+    "crates/tick-ownership",
 ]
 
 [workspace.package]
