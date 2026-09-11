@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use tick_observation_windows::{ObservationSource, WindowsObservation};
 use tick_ownership::{TimerController, Verification};
 use tick_platform_windows::WindowsTimerPlatform;
+use tick_policy::{decide, PolicyInput, PowerState};
 use tick_startup_windows::{
     startup_operation, StartupOperation, StartupRegistration, WindowsUserStartup,
 };
@@ -200,7 +201,16 @@ pub fn run() {
 }
 
 fn reconcile(app: &mut App) {
-    if app.observation.power().state == tick_policy::PowerState::Ac {
+    apply_policy(app);
+}
+
+fn apply_policy(app: &mut App) {
+    let decision = decide(PolicyInput {
+        enabled: true,
+        eligible_profile: true,
+        power: app.observation.power().state,
+    });
+    if decision.status == tick_core::Status::Requested {
         match app.controller.start() {
             Ok(Verification::Verified) => app.status_text = "Green: active and verified".into(),
             Ok(Verification::Unverified | Verification::NotCollected) => {
@@ -208,18 +218,45 @@ fn reconcile(app: &mut App) {
             }
             Err(error) => app.status_text = format!("Red: request error {error:?}"),
         }
-    } else {
-        let _ = app.controller.stop();
-        app.status_text = match app.observation.power().state {
-            tick_policy::PowerState::Battery => "Yellow: released by battery policy".into(),
-            tick_policy::PowerState::BatterySaver => {
-                "Red: automatic activation blocked by Battery Saver".into()
+        return;
+    }
+
+    release_for_policy(app, decision.reason);
+}
+
+fn release_for_policy(app: &mut App, reason: tick_policy::PolicyReason) {
+    match app.controller.stop() {
+        Ok(_) => {
+            app.status_text = match reason {
+                tick_policy::PolicyReason::BatteryRestricted => {
+                    "Yellow: released by battery policy".into()
+                }
+                tick_policy::PolicyReason::BatterySaverRestricted => {
+                    "Yellow: released, Battery Saver blocks activation".into()
+                }
+                tick_policy::PolicyReason::PowerUnknown => {
+                    "Yellow: released, power state is unknown".into()
+                }
+                _ => "Yellow: released by policy".into(),
             }
-            tick_policy::PowerState::Unknown => {
-                "Red: automatic activation blocked by unknown power state".into()
-            }
-            tick_policy::PowerState::Ac => "Yellow: released".into(),
-        };
+        }
+        Err(error) => {
+            app.status_text = format!("Yellow: release failed, ownership unverified {error:?}")
+        }
+    }
+}
+
+fn release_for_power_change(app: &mut App) {
+    if app.observation.power().state != PowerState::Ac {
+        release_for_policy(
+            app,
+            match app.observation.power().state {
+                PowerState::Battery => tick_policy::PolicyReason::BatteryRestricted,
+                PowerState::BatterySaver => tick_policy::PolicyReason::BatterySaverRestricted,
+                PowerState::Unknown => tick_policy::PolicyReason::PowerUnknown,
+                PowerState::Ac => unreachable!(),
+            },
+        );
     }
 }
 
@@ -299,11 +336,7 @@ unsafe extern "system" fn window_proc(
             WM_COMMAND => match w_param & 0xffff {
                 ID_START => {
                     app.automatic = false;
-                    app.status_text = match app.controller.start() {
-                        Ok(Verification::Verified) => "Green: active and verified".into(),
-                        Ok(_) => "Yellow: request accepted but unverified".into(),
-                        Err(error) => format!("Red: request error {error:?}"),
-                    };
+                    apply_policy(app);
                     app.publish();
                 }
                 ID_STOP => {
@@ -319,13 +352,23 @@ unsafe extern "system" fn window_proc(
                     reconcile(app);
                     app.publish();
                 }
-                ID_QUIT => PostQuitMessage(0),
+                ID_QUIT => {
+                    if let Err(error) = app.controller.stop() {
+                        app.status_text = format!(
+                            "Yellow: normal shutdown release failed, ownership unverified {error:?}"
+                        );
+                        app.publish();
+                    }
+                    PostQuitMessage(0);
+                }
                 _ => {}
             },
             WM_POWERBROADCAST if w_param == PBT_APMPOWERSTATUSCHANGE => {
                 let _ = app.observation.refresh_power();
                 if app.automatic {
                     reconcile(app);
+                } else {
+                    release_for_power_change(app);
                 }
                 app.publish();
             }
