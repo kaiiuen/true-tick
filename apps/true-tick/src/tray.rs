@@ -40,6 +40,7 @@ const NIM_DELETE: u32 = 0x0002;
 const NIM_MODIFY: u32 = 0x0001;
 const GWLP_USERDATA: i32 = -21;
 const IDI_APPLICATION: usize = 32512;
+const MB_ICONWARNING: u32 = 0x0000_0030;
 
 #[repr(C)]
 struct NotifyIconData {
@@ -363,10 +364,19 @@ unsafe extern "system" fn window_proc(
                 ID_AUTOMATIC_OFF => set_automatic(app, false),
                 ID_QUIT => {
                     if let Err(error) = app.controller.stop() {
+                        let message = format!(
+                            "Normal shutdown release failed. Tick ownership is unverified.\n\n{error:?}"
+                        );
                         app.status_text = format!(
                             "Yellow: normal shutdown release failed, ownership unverified {error:?}"
                         );
                         app.publish();
+                        MessageBoxW(
+                            hwnd,
+                            wide(&message).as_ptr(),
+                            wide("True Tick shutdown warning").as_ptr(),
+                            MB_ICONWARNING,
+                        );
                     }
                     PostQuitMessage(0);
                 }
@@ -597,6 +607,7 @@ extern "system" {
     fn GetWindowLongPtrW(hwnd: *mut c_void, index: i32) -> isize;
     fn SetWindowLongPtrW(hwnd: *mut c_void, index: i32, value: isize) -> isize;
     fn PostQuitMessage(code: i32);
+    fn MessageBoxW(hwnd: *mut c_void, text: *const u16, title: *const u16, flags: u32) -> i32;
     fn CreatePopupMenu() -> *mut c_void;
     fn AppendMenuW(menu: *mut c_void, flags: u32, id: usize, text: *const u16) -> i32;
     fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
