@@ -130,32 +130,33 @@ impl<P: TimerPlatform> TimerController<P> {
             reported_current: query.reported_current,
             raw_status: query.raw_status,
         });
-        if let Err(error) = self.platform.request(interval) {
-            if let TimerError::PostconditionUnverified {
-                raw_status,
-                reported_current,
-            } = error
-            {
-                self.observation = Some(TimerObservation {
-                    requested: interval,
-                    reported_current,
+        let request_observation = match self.platform.request(interval) {
+            Ok(observation) => observation,
+            Err(error) => {
+                if let TimerError::PostconditionUnverified {
                     raw_status,
-                });
-                self.ownership.mark_uncertain();
-                self.verification = Verification::Unverified;
+                    reported_current,
+                } = error
+                {
+                    self.observation = Some(TimerObservation {
+                        requested: interval,
+                        reported_current,
+                        raw_status,
+                    });
+                    self.ownership.mark_uncertain();
+                    self.verification = Verification::Unverified;
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
+        };
+        self.observation = Some(request_observation);
         self.ownership.apply(Transition::Acquire).map_err(|_| {
             TimerError::PostconditionUnverified {
                 raw_status: 0,
                 reported_current: Hns::ZERO,
             }
         })?;
-        self.verification = verification_for_observation(
-            self.observation
-                .expect("successful request records an observation"),
-        );
+        self.verification = verification_for_observation(request_observation);
         Ok(self.verification)
     }
 
@@ -171,11 +172,11 @@ impl<P: TimerPlatform> TimerController<P> {
                 return Err(error);
             }
         };
+        self.observation = Some(observation);
         self.ownership
             .apply(Transition::Release)
             .map_err(|_| TimerError::ReleaseFailed { raw_status: 0 })?;
         self.verification = Verification::NotCollected;
-        self.observation = Some(observation);
         self.selected_interval = None;
         Ok(true)
     }
