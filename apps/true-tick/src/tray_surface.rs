@@ -84,6 +84,18 @@ pub(crate) fn tooltip(status: TrayStatus) -> &'static str {
 
 pub(crate) const STATUS_COMMAND_ID: usize = 1009;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TrayClickAction {
+    OpenMenu,
+}
+
+pub(crate) const fn tray_click_action(notification: usize) -> Option<TrayClickAction> {
+    match notification {
+        0x0202 | 0x0205 => Some(TrayClickAction::OpenMenu),
+        _ => None,
+    }
+}
+
 pub(crate) const fn menu_action_keeps_open(command_id: usize) -> bool {
     matches!(command_id, 1005..=1008)
 }
@@ -129,6 +141,15 @@ mod tests {
     fn status_row_maps_to_diagnostic_command() {
         assert_eq!(STATUS_COMMAND_ID, 1009);
         assert!(menu_items(TrayStatus::Stopped, false, false)[4].enabled);
+    }
+
+    #[test]
+    fn left_and_right_button_release_open_one_menu_event() {
+        assert_eq!(tray_click_action(0x0202), Some(TrayClickAction::OpenMenu));
+        assert_eq!(tray_click_action(0x0205), Some(TrayClickAction::OpenMenu));
+        for notification in [0x0201, 0x0204, 0x0203, 0x0206, 0x0000_0000] {
+            assert_eq!(tray_click_action(notification), None);
+        }
     }
 
     #[test]

@@ -14,7 +14,8 @@ use tick_startup_windows::{
 };
 
 use crate::tray_surface::{
-    menu_action_keeps_open, menu_items, tooltip, IconColor, TrayStatus, STATUS_COMMAND_ID,
+    menu_action_keeps_open, menu_items, tooltip, tray_click_action, IconColor, TrayClickAction,
+    TrayStatus, STATUS_COMMAND_ID,
 };
 
 const WM_APP: u32 = 0x8000;
@@ -22,7 +23,6 @@ const WM_TRAY: u32 = WM_APP + 1;
 const WM_CREATE: u32 = 0x0001;
 const WM_COMMAND: u32 = 0x0111;
 const WM_DESTROY: u32 = 0x0002;
-const WM_RBUTTONUP: usize = 0x0205;
 const WM_POWERBROADCAST: u32 = 0x0218;
 const PBT_APMPOWERSTATUSCHANGE: usize = 0x000A;
 const ID_START: usize = 1001;
@@ -592,7 +592,14 @@ unsafe extern "system" fn window_proc(
     if !app.is_null() {
         let app = &mut *app;
         match message {
-            WM_TRAY if l_param as usize == WM_RBUTTONUP => show_menu(hwnd, app),
+            WM_TRAY
+                if matches!(
+                    tray_click_action(l_param as usize),
+                    Some(TrayClickAction::OpenMenu)
+                ) =>
+            {
+                show_menu(hwnd, app)
+            }
             WM_COMMAND => {
                 handle_menu_command(hwnd, app, w_param & 0xffff);
             }
