@@ -84,6 +84,10 @@ pub(crate) fn tooltip(status: TrayStatus) -> &'static str {
 
 pub(crate) const STATUS_COMMAND_ID: usize = 1009;
 
+pub(crate) const fn menu_action_keeps_open(command_id: usize) -> bool {
+    matches!(command_id, 1005..=1008)
+}
+
 pub(crate) fn menu_items(
     status: TrayStatus,
     startup_enabled: bool,
@@ -125,6 +129,16 @@ mod tests {
     fn status_row_maps_to_diagnostic_command() {
         assert_eq!(STATUS_COMMAND_ID, 1009);
         assert!(menu_items(TrayStatus::Stopped, false, false)[4].enabled);
+    }
+
+    #[test]
+    fn only_toggle_actions_keep_the_native_menu_open() {
+        for command in [1005, 1006, 1007, 1008] {
+            assert!(menu_action_keeps_open(command));
+        }
+        for command in [1001, 1002, STATUS_COMMAND_ID, 1004] {
+            assert!(!menu_action_keeps_open(command));
+        }
     }
 
     #[test]

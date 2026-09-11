@@ -18,7 +18,9 @@ The v1 tray menu is intentionally compact. It contains `Start`, `Stop`, current
 Auto-start and automatic timing activation toggles, a disabled short status item,
 and Quit. Start and Stop remain the core manual controls and use the same guarded
 policy and ownership lifecycle as automatic activation. The clickable status row
-opens a basic native Windows diagnostic window and never changes timer state. Full
+opens a normal overlapped taskbar diagnostic window and never changes timer state.
+The two setting toggles use a non recursive return-command loop so the menu stays
+open after a toggle. Full
 system reports, config paths, raw HNS values, power explanations, and full errors
 remain excluded from the compact menu and tooltip.
 

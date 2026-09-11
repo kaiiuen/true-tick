@@ -13,7 +13,9 @@ use tick_startup_windows::{
     startup_operation, StartupOperation, StartupRegistration, WindowsUserStartup,
 };
 
-use crate::tray_surface::{menu_items, tooltip, IconColor, TrayStatus, STATUS_COMMAND_ID};
+use crate::tray_surface::{
+    menu_action_keeps_open, menu_items, tooltip, IconColor, TrayStatus, STATUS_COMMAND_ID,
+};
 
 const WM_APP: u32 = 0x8000;
 const WM_TRAY: u32 = WM_APP + 1;
@@ -44,6 +46,8 @@ const ES_READONLY: u32 = 0x0800;
 const ES_AUTOVSCROLL: u32 = 0x0040;
 const ES_AUTOHSCROLL: u32 = 0x0080;
 const TPM_RIGHTBUTTON: u32 = 0x0002;
+const TPM_NONOTIFY: u32 = 0x0080;
+const TPM_RETURNCMD: u32 = 0x0100;
 const MF_STRING: u32 = 0x0000;
 const MF_SEPARATOR: u32 = 0x0800;
 const MF_GRAYED: u32 = 0x0001;
@@ -483,37 +487,9 @@ unsafe extern "system" fn window_proc(
         let app = &mut *app;
         match message {
             WM_TRAY if l_param as usize == WM_RBUTTONUP => show_menu(hwnd, app),
-            WM_COMMAND => match w_param & 0xffff {
-                ID_START => manual_start(app),
-                ID_STOP => manual_stop(app),
-                STATUS_COMMAND_ID => {
-                    app.record("tray.command", "command=status");
-                    open_diagnostic_window(hwnd, app);
-                }
-                ID_STARTUP_ON => set_startup(app, true),
-                ID_STARTUP_OFF => set_startup(app, false),
-                ID_AUTOMATIC_ON => set_automatic(app, true),
-                ID_AUTOMATIC_OFF => set_automatic(app, false),
-                ID_QUIT => {
-                    app.record("tray.command", "command=quit");
-                    app.record("lifecycle.shutdown_request", "source=tray");
-                    if let Err(error) = app.controller.stop() {
-                        let message = format!(
-                            "Normal shutdown release failed. Tick ownership is unverified.\n\n{error:?}"
-                        );
-                        app.tray_status = TrayStatus::Unverified;
-                        app.publish();
-                        MessageBoxW(
-                            hwnd,
-                            wide(&message).as_ptr(),
-                            wide("True Tick shutdown warning").as_ptr(),
-                            MB_ICONWARNING,
-                        );
-                    }
-                    PostQuitMessage(0);
-                }
-                _ => {}
-            },
+            WM_COMMAND => {
+                handle_menu_command(hwnd, app, w_param & 0xffff);
+            }
             WM_POWERBROADCAST if w_param == PBT_APMPOWERSTATUSCHANGE => {
                 app.record("power.broadcast", "event=APMPOWERSTATUSCHANGE");
                 let previous = app.observation.power().state;
@@ -540,60 +516,103 @@ unsafe extern "system" fn window_proc(
     DefWindowProcW(hwnd, message, w_param, l_param)
 }
 
-unsafe fn show_menu(hwnd: *mut c_void, app: &App) {
-    let menu = CreatePopupMenu();
-    let items = menu_items(
-        app.tray_status,
-        app.config.startup_enabled,
-        app.config.automatic,
-    );
-    let start_flags = if items[0].enabled {
-        MF_STRING
-    } else {
-        MF_STRING | MF_GRAYED
-    };
-    let stop_flags = if items[1].enabled {
-        MF_STRING
-    } else {
-        MF_STRING | MF_GRAYED
-    };
-    let startup_id = if app.config.startup_enabled {
-        ID_STARTUP_OFF
-    } else {
-        ID_STARTUP_ON
-    };
-    let automatic_id = if app.config.automatic {
-        ID_AUTOMATIC_OFF
-    } else {
-        ID_AUTOMATIC_ON
-    };
-    AppendMenuW(menu, start_flags, ID_START, wide(items[0].label).as_ptr());
-    AppendMenuW(menu, stop_flags, ID_STOP, wide(items[1].label).as_ptr());
-    AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-    AppendMenuW(menu, MF_STRING, startup_id, wide(items[2].label).as_ptr());
-    AppendMenuW(menu, MF_STRING, automatic_id, wide(items[3].label).as_ptr());
-    AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-    AppendMenuW(
-        menu,
-        MF_STRING,
-        STATUS_COMMAND_ID,
-        wide(&format!("Status: {}", app.tray_status.label())).as_ptr(),
-    );
-    AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-    AppendMenuW(menu, MF_STRING, ID_QUIT, wide(items[5].label).as_ptr());
-    let mut point = Point { x: 0, y: 0 };
-    GetCursorPos(&mut point);
-    SetForegroundWindow(hwnd);
-    TrackPopupMenu(
-        menu,
-        TPM_RIGHTBUTTON,
-        point.x,
-        point.y,
-        0,
-        hwnd,
-        std::ptr::null(),
-    );
-    DestroyMenu(menu);
+unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
+    loop {
+        let menu = CreatePopupMenu();
+        let items = menu_items(
+            app.tray_status,
+            app.config.startup_enabled,
+            app.config.automatic,
+        );
+        let start_flags = if items[0].enabled {
+            MF_STRING
+        } else {
+            MF_STRING | MF_GRAYED
+        };
+        let stop_flags = if items[1].enabled {
+            MF_STRING
+        } else {
+            MF_STRING | MF_GRAYED
+        };
+        let startup_id = if app.config.startup_enabled {
+            ID_STARTUP_OFF
+        } else {
+            ID_STARTUP_ON
+        };
+        let automatic_id = if app.config.automatic {
+            ID_AUTOMATIC_OFF
+        } else {
+            ID_AUTOMATIC_ON
+        };
+        AppendMenuW(menu, start_flags, ID_START, wide(items[0].label).as_ptr());
+        AppendMenuW(menu, stop_flags, ID_STOP, wide(items[1].label).as_ptr());
+        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+        AppendMenuW(menu, MF_STRING, startup_id, wide(items[2].label).as_ptr());
+        AppendMenuW(menu, MF_STRING, automatic_id, wide(items[3].label).as_ptr());
+        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            STATUS_COMMAND_ID,
+            wide(&format!("Status: {}", app.tray_status.label())).as_ptr(),
+        );
+        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+        AppendMenuW(menu, MF_STRING, ID_QUIT, wide(items[5].label).as_ptr());
+        let mut point = Point { x: 0, y: 0 };
+        GetCursorPos(&mut point);
+        SetForegroundWindow(hwnd);
+        let command = TrackPopupMenu(
+            menu,
+            TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_RETURNCMD,
+            point.x,
+            point.y,
+            0,
+            hwnd,
+            std::ptr::null(),
+        ) as usize;
+        DestroyMenu(menu);
+        if command == 0 {
+            break;
+        }
+        handle_menu_command(hwnd, app, command);
+        if !menu_action_keeps_open(command) {
+            break;
+        }
+    }
+}
+
+unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) {
+    match command {
+        ID_START => manual_start(app),
+        ID_STOP => manual_stop(app),
+        STATUS_COMMAND_ID => {
+            app.record("tray.command", "command=status");
+            open_diagnostic_window(hwnd, app);
+        }
+        ID_STARTUP_ON => set_startup(app, true),
+        ID_STARTUP_OFF => set_startup(app, false),
+        ID_AUTOMATIC_ON => set_automatic(app, true),
+        ID_AUTOMATIC_OFF => set_automatic(app, false),
+        ID_QUIT => {
+            app.record("tray.command", "command=quit");
+            app.record("lifecycle.shutdown_request", "source=tray");
+            if let Err(error) = app.controller.stop() {
+                let message = format!(
+                    "Normal shutdown release failed. Tick ownership is unverified.\n\n{error:?}"
+                );
+                app.tray_status = TrayStatus::Unverified;
+                app.publish();
+                MessageBoxW(
+                    hwnd,
+                    wide(&message).as_ptr(),
+                    wide("True Tick shutdown warning").as_ptr(),
+                    MB_ICONWARNING,
+                );
+            }
+            PostQuitMessage(0);
+        }
+        _ => {}
+    }
 }
 
 unsafe fn open_diagnostic_window(parent: *mut c_void, app: &mut App) {

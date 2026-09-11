@@ -12,7 +12,7 @@ activation after the application has launched.
 
 The tray has compact `Start` and `Stop` manual controls, current-state Auto-start
 and automatic timing activation items, one clickable short status item, and Quit. The
-status row opens a basic native Windows diagnostic window without changing timer state.
+The status row opens a normal taskbar diagnostic window without changing timer state. The native menu keeps both setting toggles open after a toggle and closes for action commands.
 Start and Stop use the same guarded policy and ownership lifecycle as automatic
 activation. The tray tooltip uses `Running (current timing)`, `Stopped (current
 timing)`, and concise transition or warning labels. Full system reports, config

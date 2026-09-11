@@ -8,8 +8,9 @@ serialized owned-request lifecycle, conservative power policy, a native tray
 surface, atomically replaced local configuration, per-user boot startup
 registration, and a bounded portable A/B launcher scaffold. The compact tray
 menu exposes `Start`, `Stop`, current Auto-start and automatic timing activation
-toggles, a clickable short status item, and `Quit`. Status opens a crude native
-Windows diagnostic window without changing timer state. Start and Stop remain
+toggles, a clickable short status item, and `Quit`. Status opens a normal taskbar
+diagnostic window without changing timer state. The native menu keeps the two
+setting toggles open after each toggle and closes for other commands. Start and Stop remain
 manual controls and use the same guarded policy and ownership lifecycle as automatic
 activation. The diagnostic window shows a bounded, local in-memory session log.
 It excludes raw pointers, private tokens, credentials, arbitrary secrets, and
