@@ -52,8 +52,11 @@ pub enum Lifecycle {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Status {
     Released,
+    Active,
     Requested,
+    Warning,
     Blocked,
+    Error,
     Unknown,
     Unsupported,
 }

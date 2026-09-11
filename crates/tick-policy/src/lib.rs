@@ -65,7 +65,7 @@ pub fn decide(input: PolicyInput) -> PolicyDecision {
             reason: PolicyReason::BatterySaverRestricted,
         },
         PowerState::Unknown => PolicyDecision {
-            status: Status::Unknown,
+            status: Status::Blocked,
             reason: PolicyReason::PowerUnknown,
         },
     }
@@ -105,13 +105,13 @@ mod tests {
     }
 
     #[test]
-    fn unknown_power_is_not_treated_as_ac() {
+    fn unknown_power_is_conservatively_blocked() {
         let input = PolicyInput {
             enabled: true,
             eligible_profile: true,
             power: PowerState::Unknown,
         };
-        assert_eq!(decide(input).status, Status::Unknown);
+        assert_eq!(decide(input).status, Status::Blocked);
     }
 
     #[test]

@@ -1,10 +1,10 @@
-//! Serialized logical ownership bookkeeping.
+//! Serialized ownership bookkeeping for one Tick runtime instance.
 //!
-//! This is not an implementation of any Windows ownership mechanism. It models
-//! one runtime instance's tracked contribution and never restores a guessed
-//! global default.
+//! The controller records only a successful adapter request. It never infers
+//! ownership from an effective value and never writes a guessed global default.
 
-use tick_core::{CoreError, Status};
+use tick_core::{CoreError, Hns, Status};
+use tick_platform_windows::{TimerError, TimerPlatform};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OwnershipState {
@@ -53,8 +53,74 @@ impl Ownership {
     pub const fn status(self) -> Status {
         match self.state {
             OwnershipState::Released => Status::Released,
-            OwnershipState::Owned => Status::Requested,
+            OwnershipState::Owned => Status::Active,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Verification {
+    NotCollected,
+    Verified,
+    Unverified,
+}
+
+#[derive(Debug)]
+pub struct TimerController<P> {
+    platform: P,
+    ownership: Ownership,
+    interval: Hns,
+    verification: Verification,
+}
+
+impl<P: TimerPlatform> TimerController<P> {
+    pub const fn new(platform: P, interval: Hns) -> Self {
+        Self {
+            platform,
+            ownership: Ownership::new(),
+            interval,
+            verification: Verification::NotCollected,
+        }
+    }
+
+    pub fn start(&mut self) -> Result<Verification, TimerError> {
+        if self.ownership.state() == OwnershipState::Owned {
+            return Ok(self.verification);
+        }
+        self.platform.preflight(self.interval)?;
+        self.platform.request(self.interval)?;
+        self.ownership.apply(Transition::Acquire).map_err(|_| {
+            TimerError::PostconditionUnverified {
+                raw_status: 0,
+                reported_current: Hns::ZERO,
+            }
+        })?;
+        self.verification = Verification::Verified;
+        Ok(self.verification)
+    }
+
+    pub fn stop(&mut self) -> Result<bool, TimerError> {
+        if self.ownership.state() == OwnershipState::Released {
+            return Ok(false);
+        }
+        self.platform.release(self.interval)?;
+        self.ownership
+            .apply(Transition::Release)
+            .map_err(|_| TimerError::ReleaseFailed { raw_status: 0 })?;
+        self.verification = Verification::NotCollected;
+        Ok(true)
+    }
+
+    pub const fn ownership(&self) -> OwnershipState {
+        self.ownership.state()
+    }
+
+    pub const fn verification(&self) -> Verification {
+        self.verification
+    }
+
+    pub const fn status(&self) -> Status {
+        self.ownership.status()
     }
 }
 

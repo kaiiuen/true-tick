@@ -32,6 +32,7 @@ name = "tick-ownership"
 version = "0.1.0"
 dependencies = [
  "tick-core",
+ "tick-platform-windows",
 ]
 
 [[package]]

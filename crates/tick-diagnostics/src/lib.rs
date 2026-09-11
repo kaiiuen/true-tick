@@ -23,7 +23,7 @@ impl fmt::Display for StatusRecord {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "status={:?}; evidence={:?}",
+            "status={:?}, evidence={:?}",
             self.status, self.evidence
         )
     }
@@ -45,7 +45,7 @@ mod tests {
         };
         assert_eq!(
             format_status(record),
-            "status=Unsupported; evidence=Unsupported"
+            "status=Unsupported, evidence=Unsupported"
         );
     }
 }
