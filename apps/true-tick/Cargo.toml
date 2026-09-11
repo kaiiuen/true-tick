@@ -12,3 +12,4 @@ tick-policy = { path = "../../crates/tick-policy" }
 tick-observation-windows = { path = "../../crates/tick-observation-windows" }
 tick-ownership = { path = "../../crates/tick-ownership" }
 tick-platform-windows = { path = "../../crates/tick-platform-windows" }
+tick-startup-windows = { path = "../../crates/tick-startup-windows" }

@@ -51,6 +51,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tick-startup-windows"
+version = "0.1.0"
+
+[[package]]
 name = "true-tick"
 version = "0.1.0"
 dependencies = [
@@ -60,4 +64,5 @@ dependencies = [
  "tick-ownership",
  "tick-platform-windows",
  "tick-policy",
+ "tick-startup-windows",
 ]

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use tick_observation_windows::{ObservationSource, WindowsObservation};
 use tick_ownership::{TimerController, Verification};
 use tick_platform_windows::WindowsTimerPlatform;
+use tick_startup_windows::{StartupRegistration, WindowsUserStartup};
 
 const WM_APP: u32 = 0x8000;
 const WM_TRAY: u32 = WM_APP + 1;
@@ -69,6 +70,7 @@ struct App {
     automatic: bool,
     status_text: String,
     config_path: PathBuf,
+    startup_status: String,
 }
 
 pub fn run() {
@@ -76,6 +78,14 @@ pub fn run() {
         let executable = get_module_file_name_w_path();
         let config_path = config::path_from_executable(&executable);
         let loaded = config::load(&config_path).unwrap_or_default();
+        let startup_status = if loaded.startup_enabled {
+            match WindowsUserStartup::default().register(&executable) {
+                Ok(()) => "boot startup registered for the current user".to_owned(),
+                Err(error) => format!("Red: boot startup registration error {error:?}"),
+            }
+        } else {
+            "boot startup registration disabled by config".to_owned()
+        };
         let portable_status = match crate::portable::select(
             executable
                 .parent()
@@ -99,6 +109,7 @@ pub fn run() {
             automatic: loaded.automatic,
             status_text: format!("Yellow: waiting for a verified request, {portable_status}"),
             config_path,
+            startup_status,
         });
         let app_ptr = Box::into_raw(app);
         let app = &mut *app_ptr;
@@ -172,8 +183,9 @@ fn reconcile(app: &mut App) {
 
 fn status(app: &App) -> String {
     format!(
-        "{} | config: {}",
+        "{} | {} | config: {}",
         app.status_text,
+        app.startup_status,
         app.config_path.display()
     )
 }

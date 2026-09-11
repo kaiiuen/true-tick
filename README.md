@@ -5,9 +5,11 @@ production release and is not authorized for publication.
 
 The v1 uses a narrow native timer adapter with raw status preservation, a
 serialized owned-request lifecycle, conservative power policy, a native tray
-surface, explicit local configuration, and a bounded portable A/B launcher
-scaffold. It does not include profiles, process detection, True™ Time, NTP,
-an installer, a secure updater, or release signing.
+surface, explicit local configuration, per-user boot startup registration, and
+a bounded portable A/B launcher scaffold. Boot registration is opt-in through
+local config and is distinct from automatic timer activation after launch. It
+does not include profiles, process detection, True™ Time, NTP, an installer, a
+secure updater, or release signing.
 
 Unsupported platform behavior remains explicit. Native API acceptance and the
 adapter postcondition are not claims about a universal effective system value.

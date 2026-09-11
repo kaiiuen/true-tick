@@ -5,6 +5,7 @@ use tick_core::Hns;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     pub automatic: bool,
+    pub startup_enabled: bool,
     pub request_interval: Hns,
 }
 
@@ -12,6 +13,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             automatic: false,
+            startup_enabled: false,
             request_interval: Hns::new(10_000),
         }
     }
@@ -68,6 +70,17 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                     }
                 }
             }
+            "startup_enabled" => {
+                config.startup_enabled = match value.trim() {
+                    "true" => true,
+                    "false" => false,
+                    other => {
+                        return Err(ConfigError::Invalid(format!(
+                            "invalid startup_enabled value {other}"
+                        )))
+                    }
+                }
+            }
             "request_interval_hns" => {
                 let value = value.trim().parse::<u64>().map_err(|_| {
                     ConfigError::Invalid(format!(
@@ -93,11 +106,14 @@ mod tests {
 
     #[test]
     fn parses_explicit_local_configuration() {
-        let config = parse("automatic = true\nrequest_interval_hns = 10000\n").unwrap();
+        let config =
+            parse("automatic = true\nstartup_enabled = true\nrequest_interval_hns = 10000\n")
+                .unwrap();
         assert_eq!(
             config,
             Config {
                 automatic: true,
+                startup_enabled: true,
                 request_interval: Hns::new(10_000)
             }
         );
