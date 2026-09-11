@@ -3,8 +3,9 @@
 True™ Tick is an internal v1 tray-only Windows application. It is not a
 production release and is not authorized for publication.
 
-The v1 uses a narrow native timer adapter with raw status preservation, a
-serialized owned-request lifecycle, conservative power policy, a native tray
+The v1 uses a narrow native timer adapter with raw status preservation, an
+explicit released, owned, or uncertain ownership lifecycle, controlled recovery,
+conservative power policy, a native tray
 surface, atomically replaced local configuration, per-user boot startup
 registration, and a bounded portable A/B launcher scaffold. The compact tray
 menu exposes `Start`, `Stop`, current Auto-start and automatic timing activation
@@ -21,7 +22,10 @@ unbounded sensitive paths. The tooltip uses short runtime wording: `Running
 (current timing)`, `Stopped (current timing)`, or a concise transition or warning
 label. All activation paths use
 the same conservative power policy, so battery, Battery Saver, and unknown power
-states do not acquire. Events use monotonic sequence numbers and elapsed time
+states do not acquire. If a native request may have succeeded but its postcondition
+is inconclusive, the runtime records uncertain ownership, blocks duplicate acquire,
+and attempts only a controlled matching release. Normal message-loop shutdown
+attempts this cleanup once and preserves an unverified warning when it fails. Events use monotonic sequence numbers and elapsed time
 from process start. The default bound is 512 events. Newest events are retained
 with a truncation marker when the bound is reached. Disk persistence for full
 session logs is deferred.

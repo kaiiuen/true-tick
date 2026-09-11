@@ -4,7 +4,10 @@
 
 The workspace builds an internal tray-only v1 with focused deterministic tests.
 Timer ownership is isolated behind a Windows adapter and remains explicit about
-API acceptance versus effective system behavior. Opt-in current-user boot startup registration is isolated behind its own Windows
+API acceptance versus effective system behavior. A postcondition mismatch preserves
+uncertain ownership and suppresses duplicate acquisition until controlled cleanup
+recovers or reports the state. Normal message-loop shutdown attempts centralized
+cleanup once and keeps an unverified warning if release is not confirmed. Opt-in current-user boot startup registration is isolated behind its own Windows
 adapter and targets the buildable portable `Launcher.exe` entry point. The launcher
 requires valid active-slot metadata, validates the named A or B executable, and
 launches that slot before activation. Registration is distinct from automatic timer

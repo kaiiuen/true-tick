@@ -33,8 +33,11 @@ events, with newest-event retention and one truncation marker. The store sanitiz
 control layout and bounds each field. Disk persistence for a full session log is
 deferred. The UI refreshes from a current snapshot and shows the current tray state.
 
-An inconclusive adapter postcondition enters an unverified state and suppresses
-repeat acquisition or guessed cleanup. The runtime does not use a busy loop,
+An inconclusive adapter postcondition enters an explicit uncertain ownership state
+and suppresses repeat acquisition. The adapter retains enough request identity for
+a controlled matching release or recovery attempt. Normal message-loop shutdown
+uses one centralized cleanup guard, attempts release exactly once, and preserves an
+unverified warning when cleanup cannot be confirmed. The runtime does not use a busy loop,
 high priority, affinity, QoS, execution-state requests, power-plan changes,
 registry tuning beyond the explicit current-user startup boundary, driver,
 hardware clock control, process detection, network services, installer, secure

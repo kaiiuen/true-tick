@@ -135,6 +135,7 @@ struct App {
     tray_icon: Option<NotifyIconData>,
     diagnostics: Arc<DiagnosticStore>,
     diagnostic_window: Option<*mut c_void>,
+    shutdown_cleanup_done: bool,
 }
 
 pub fn run() {
@@ -242,6 +243,7 @@ pub fn run() {
             tray_icon: None,
             diagnostics,
             diagnostic_window: None,
+            shutdown_cleanup_done: false,
         });
         let app_ptr = Box::into_raw(app);
         let app = &mut *app_ptr;
@@ -300,6 +302,7 @@ pub fn run() {
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+        let _ = app.cleanup_normal_shutdown();
         if let Some(mut icon) = app.tray_icon.take() {
             Shell_NotifyIconW(NIM_DELETE, &mut icon);
         }
@@ -426,6 +429,32 @@ fn release_for_power_change(app: &mut App) {
 }
 
 impl App {
+    fn cleanup_normal_shutdown(&mut self) -> Result<(), String> {
+        if self.shutdown_cleanup_done {
+            return Ok(());
+        }
+        self.shutdown_cleanup_done = true;
+        self.record("shutdown.cleanup", "attempt=one_time");
+        match self.controller.stop() {
+            Ok(released) => {
+                self.record(
+                    "shutdown.cleanup.result",
+                    format!("result=verified released={released}"),
+                );
+                Ok(())
+            }
+            Err(error) => {
+                self.tray_status = TrayStatus::Unverified;
+                self.record(
+                    "shutdown.cleanup.result",
+                    format!("result=unverified error={error:?}"),
+                );
+                self.publish();
+                Err(format!("{error:?}"))
+            }
+        }
+    }
+
     fn record(&mut self, name: &str, details: impl AsRef<str>) {
         self.diagnostics.record(name, details);
         if let Some(window) = self.diagnostic_window {
@@ -611,12 +640,10 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
         ID_QUIT => {
             app.record("tray.command", "command=quit");
             app.record("lifecycle.shutdown_request", "source=tray");
-            if let Err(error) = app.controller.stop() {
+            if let Err(error) = app.cleanup_normal_shutdown() {
                 let message = format!(
-                    "Normal shutdown release failed. Tick ownership is unverified.\n\n{error:?}"
+                    "Normal shutdown release failed. Tick ownership is unverified.\n\n{error}"
                 );
-                app.tray_status = TrayStatus::Unverified;
-                app.publish();
                 MessageBoxW(
                     hwnd,
                     wide(&message).as_ptr(),

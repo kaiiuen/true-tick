@@ -10,6 +10,7 @@ use tick_platform_windows::{TimerError, TimerPlatform};
 pub enum OwnershipState {
     Released,
     Owned,
+    Uncertain,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,20 +41,25 @@ impl Ownership {
                 self.state = OwnershipState::Owned;
                 true
             }
-            (OwnershipState::Owned, Transition::Release) => {
+            (OwnershipState::Owned | OwnershipState::Uncertain, Transition::Release) => {
                 self.state = OwnershipState::Released;
                 true
             }
-            (OwnershipState::Owned, Transition::Acquire)
+            (OwnershipState::Owned | OwnershipState::Uncertain, Transition::Acquire)
             | (OwnershipState::Released, Transition::Release) => false,
         };
         Ok(changed)
+    }
+
+    pub fn mark_uncertain(&mut self) {
+        self.state = OwnershipState::Uncertain;
     }
 
     pub const fn status(self) -> Status {
         match self.state {
             OwnershipState::Released => Status::Released,
             OwnershipState::Owned => Status::Active,
+            OwnershipState::Uncertain => Status::Unknown,
         }
     }
 }
@@ -84,7 +90,7 @@ impl<P: TimerPlatform> TimerController<P> {
     }
 
     pub fn start(&mut self) -> Result<Verification, TimerError> {
-        if self.ownership.state() == OwnershipState::Owned
+        if self.ownership.state() != OwnershipState::Released
             || self.verification == Verification::Unverified
         {
             return Ok(self.verification);
@@ -92,6 +98,7 @@ impl<P: TimerPlatform> TimerController<P> {
         self.platform.preflight(self.interval)?;
         if let Err(error) = self.platform.request(self.interval) {
             if matches!(error, TimerError::PostconditionUnverified { .. }) {
+                self.ownership.mark_uncertain();
                 self.verification = Verification::Unverified;
             }
             return Err(error);
@@ -166,6 +173,16 @@ mod tests {
     fn release_without_tracked_ownership_is_a_noop() {
         let mut ownership = Ownership::new();
         assert!(!ownership.apply(Transition::Release).unwrap());
+        assert_eq!(ownership.state(), OwnershipState::Released);
+    }
+
+    #[test]
+    fn uncertain_ownership_blocks_acquisition_until_controlled_release() {
+        let mut ownership = Ownership::new();
+        ownership.mark_uncertain();
+        assert_eq!(ownership.state(), OwnershipState::Uncertain);
+        assert!(!ownership.apply(Transition::Acquire).unwrap());
+        assert!(ownership.apply(Transition::Release).unwrap());
         assert_eq!(ownership.state(), OwnershipState::Released);
     }
 }

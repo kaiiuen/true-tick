@@ -140,6 +140,7 @@ impl TimerPlatform for WindowsTimerPlatform {
                 reported_current: Hns::new(current as u64),
                 raw_status: status,
             };
+            self.requested = Some(interval);
             if observation.reported_current != interval {
                 self.log(
                     "timer.postcondition.unverified",
@@ -154,7 +155,6 @@ impl TimerPlatform for WindowsTimerPlatform {
                 "timer.postcondition.verified",
                 format!("reported_hns={}", observation.reported_current.value()),
             );
-            self.requested = Some(interval);
             return Ok(observation);
         }
         #[cfg(not(windows))]
