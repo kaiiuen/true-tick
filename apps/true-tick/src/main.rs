@@ -1,15 +1,17 @@
-//! True™ Tick application composition placeholder.
-//!
-//! This binary intentionally performs no system changes and does not start a
-//! runtime, tray, observer, timer request, calibration, or integration layer.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
-use tick_core::Status;
-use tick_diagnostics::{format_status, Evidence, StatusRecord};
+mod config;
+mod portable;
 
+#[cfg(windows)]
+mod tray;
+
+#[cfg(windows)]
 fn main() {
-    let record = StatusRecord {
-        status: Status::Unsupported,
-        evidence: Evidence::NotCollected,
-    };
-    println!("True™ Tick skeleton: {}", format_status(record));
+    tray::run();
+}
+
+#[cfg(not(windows))]
+fn main() {
+    println!("True Tick is a Windows tray application");
 }

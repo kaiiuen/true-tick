@@ -8,3 +8,7 @@ publish.workspace = true
 [dependencies]
 tick-core = { path = "../../crates/tick-core" }
 tick-diagnostics = { path = "../../crates/tick-diagnostics" }
+tick-policy = { path = "../../crates/tick-policy" }
+tick-observation-windows = { path = "../../crates/tick-observation-windows" }
+tick-ownership = { path = "../../crates/tick-ownership" }
+tick-platform-windows = { path = "../../crates/tick-platform-windows" }

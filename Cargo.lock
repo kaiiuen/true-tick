@@ -25,6 +25,7 @@ name = "tick-observation-windows"
 version = "0.1.0"
 dependencies = [
  "tick-core",
+ "tick-policy",
 ]
 
 [[package]]
@@ -55,4 +56,8 @@ version = "0.1.0"
 dependencies = [
  "tick-core",
  "tick-diagnostics",
+ "tick-observation-windows",
+ "tick-ownership",
+ "tick-platform-windows",
+ "tick-policy",
 ]
