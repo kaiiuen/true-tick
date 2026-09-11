@@ -10,18 +10,20 @@ API acceptance versus effective system behavior. A postcondition mismatch preser
 uncertain ownership and suppresses duplicate acquisition until controlled cleanup
 recovers or reports the state. Normal message-loop shutdown attempts centralized
 cleanup once and keeps an unverified warning if release is not confirmed. Tray Quit now requires a native confirmation when timing is active or ownership is uncertain. `Stop and Quit` exits only after a guarded release is verified. Failed cleanup keeps the app alive, updates the icon and diagnostic log, and allows retry. Opt-in current-user boot startup registration is isolated behind its own Windows
-adapter and targets the buildable portable `Launcher.exe` entry point. The launcher
-requires valid active-slot metadata, validates the named A or B executable, and
-launches that slot before activation. Registration is distinct from automatic timer
-activation after the application has launched. Secure signatures and rollback are
-not implemented.
+adapter. Portable A/B mode targets the buildable `Launcher.exe` entry point. The
+launcher requires valid active-slot metadata, validates the named A or B
+executable, and launches that slot before activation. A normal debug run uses a
+separate fallback that registers the actual `target/debug/true-tick.exe` tray
+executable when no portable launcher path is available. Registration is distinct
+from automatic timer activation after the application has launched. Secure
+signatures and rollback are not implemented.
 
 The tray has compact `Start` and `Stop` manual controls, `Auto-start: On/Off` and
 `Auto-time: On/Off` items, one clickable short status item, and Quit. Auto-start
 launches the app at Windows login. Auto-time controls automatic timing acquisition
 and defaults to off. Both tray left-button-up and right-button-up notifications open
 the same compact menu. Button-down and double-click notifications are ignored to
-avoid duplicate menus. The status row opens a normal taskbar diagnostic window titled `True Tick Status and Diagnostics` without changing timer state. It uses a normal overlapped style, `WS_EX_APPWINDOW`, no `WS_EX_TOOLWINDOW`, standard title-bar controls, a resizable read-only status and session log view, and a fresh snapshot each time it is reopened. Reopening restores and activates the existing window. The native menu keeps both setting toggles open after a toggle and closes for action commands.
+avoid duplicate menus. The status row opens a normal taskbar diagnostic window titled `True Tick Status and Diagnostics` without changing timer state. It uses a normal overlapped style, `WS_EX_APPWINDOW`, no `WS_EX_TOOLWINDOW`, no child style, no owner, standard title-bar controls, a resizable read-only status and session log view, and a fresh snapshot each time it is reopened. Reopening restores and activates the existing window. The native menu keeps both setting toggles open after a toggle and closes for action commands. Reopening after a toggle reuses the original popup anchor POINT, and returned command IDs are dispatched once.
 Start and Stop use the same guarded policy and ownership lifecycle as automatic
 activation. The tray tooltip uses `Running (current timing)`, `Stopped (current
 timing)`, and concise transition or warning labels. Full system reports, config
@@ -33,8 +35,11 @@ a truncation marker, and defers disk persistence. Fields are sanitized and bound
 so raw pointers, credentials, private tokens, arbitrary secrets, and unbounded
 sensitive paths are not recorded.
 Configuration writes use a flushed temporary file replacement. Parse and write
-errors remain visible. Startup registration validates the existing `Launcher.exe`
-file before registry writes and attempts rollback if config persistence fails.
+errors remain visible. Portable startup registration validates the existing
+`Launcher.exe` file before registry writes. The debug fallback validates the
+current executable shape and existence. Real registry changes attempt rollback if
+config persistence fails. An unavailable nonportable target leaves the preference
+persistent with a visible warning.
 Initial power observation records success or the native failure reason, and failed
 observation remains unknown and blocks acquisition. Manual and automatic activation share the same policy.
 Battery, Battery Saver, and unknown power states remain non-acquiring. A
@@ -58,9 +63,10 @@ Intentionally absent:
 - public compatibility, performance, energy, security, or release claims
 - runtime registration validation against the development machine
 - interactive runtime validation of launcher handoff and slot execution
-- interactive runtime validation of the Windows diagnostic window
+- interactive runtime validation of the Windows diagnostic window appearance,
+  taskbar presence, title-bar controls, restore, and close behavior
 
-The Windows support matrix, exact native API behavior, and runtime confirmation of the loader fix remain bounded internal validation work. The exact tray target is built with `cargo build -p true-tick --bin true-tick` and inspected without launching it. Core Windows DLLs such as `kernel32.dll`, `user32.dll`, `ntdll.dll`, `shell32.dll`, `gdi32.dll`, and `comctl32.dll` are OS components and must not be copied or bundled. The embedded Common Controls v6 manifest is the compatibility mechanism. The current MSVC build has a non-system dependency on the Microsoft Visual C++ runtime and Universal CRT. A static binary scan found `VCRUNTIME140.dll` and `api-ms-win-crt-*` imports. The eventual distribution choice is a documented VC++ Redistributable prerequisite or a validated static CRT build. No installer or arbitrary DLL copy is added. The deterministic PE evidence check uses Visual Studio `dumpbin` for `/DEPENDENTS`, `/IMPORTS`, the `.rsrc` section headers, and `.rsrc` raw data. It must show the ordinal 345 import, a non-empty resource directory, and the embedded Common Controls dependency. No runtime Windows success is claimed here. Power observation does not yet provide full Battery Saver,
+The Windows support matrix, exact native API behavior, and runtime confirmation of the loader fix remain bounded internal validation work. The exact tray target is built with `cargo build -p true-tick --bin true-tick` and inspected without launching it. Core Windows DLLs such as `kernel32.dll`, `user32.dll`, `ntdll.dll`, `shell32.dll`, `gdi32.dll`, and `comctl32.dll` are OS components and must not be copied or bundled. The embedded Common Controls v6 manifest is the compatibility mechanism. The current MSVC build has a non-system dependency on the Microsoft Visual C++ runtime and Universal CRT. A static binary scan found `VCRUNTIME140.dll` and `api-ms-win-crt-*` imports. The eventual distribution choice is a documented VC++ Redistributable prerequisite or a validated static CRT build. No installer or arbitrary DLL copy is added. The deterministic PE evidence check uses Visual Studio `dumpbin` for `/DEPENDENTS`, `/IMPORTS`, the `.rsrc` section headers, and `.rsrc` raw data. It must show the ordinal 345 import, a non-empty resource directory, and the embedded Common Controls dependency. No runtime Windows success is claimed here. The diagnostic window style contract is source-tested, but its actual appearance, taskbar registration, title-bar controls, restore, and close behavior remain runtime-unverified because the app is not launched. Power observation does not yet provide full Battery Saver,
 session, lock, suspend, or resume notification coverage. Unknown observation is
 reported as degraded and blocks acquisition. A/B selection is a safe local
 scaffold. Missing or invalid active-slot metadata requires repair. It does not

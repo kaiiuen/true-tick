@@ -42,11 +42,12 @@ menu exposes `Start`, `Stop`, `Auto-start: On/Off`, `Auto-time: On/Off`, a click
 diagnostic window titled `True Tick Status and Diagnostics` without changing timer
 state. It is a normal taskbar window with standard title-bar controls, a resizable
 read-only status and session log view, and snapshot refresh on reopen. The native
-window uses a normal overlapped style with `WS_EX_APPWINDOW` and no
-`WS_EX_TOOLWINDOW`, so it is intended to appear in the taskbar with minimize,
-maximize, restore, close, and resize behavior. Closing it only destroys the diagnostic
+window uses a normal overlapped style with `WS_EX_APPWINDOW`, no
+`WS_EX_TOOLWINDOW`, no child style, and no owner, so it is intended to appear in
+the taskbar with minimize, maximize, restore, close, and resize behavior. Closing it only destroys the diagnostic
 window and does not change timer state. The native menu keeps the two setting toggles
-open after each toggle and closes for other commands. Tray left-button-up and right-button-up notifications open this same menu.
+open after each toggle and closes for other commands. Each toggle reopen uses the
+original popup anchor POINT, so the menu does not jump when the cursor moves. Tray left-button-up and right-button-up notifications open this same menu.
 Button-down and double-click notifications are ignored, so one Windows notification does
 not create duplicate menus. Start and Stop remain
 manual controls and use the same guarded policy and ownership lifecycle as automatic
@@ -70,17 +71,22 @@ from process start. The default bound is 512 events. Newest events are retained
 with a truncation marker when the bound is reached. Disk persistence for full
 session logs is deferred.
 
-Per-user boot registration targets the buildable portable `Launcher.exe` entry
-point, never a slot payload. The launcher requires `active-slot.txt`, selects only
+Portable A/B boot registration targets the buildable portable `Launcher.exe`
+entry point, never a slot payload. The launcher requires `active-slot.txt`, selects only
 the named A or B slot, validates the expected `true-tick.exe` file, and launches
 that slot with forwarded arguments. Missing or invalid metadata reports repair
 required and never silently selects A. Secure signatures and rollback are not
 implemented and remain deferred. Boot registration is opt-in through local
 config and is distinct from automatic timer activation after launch. The path resolver only derives `Launcher.exe` from a `Slots\A` or `Slots\B`
-executable shape. The launcher performs the separate runtime metadata and file
-checks before handoff. It does not
-include profiles, process detection, True™ Time, NTP, an installer, a secure
-updater, or release signing.
+executable shape. Normal debug runs use a separate explicit fallback: a debug
+build whose actual executable is `target/debug/true-tick.exe` registers that
+current tray executable for the current user when no portable launcher path is
+available. Portable A/B paths always retain launcher semantics. A nonportable
+non-debug path keeps the preference with a visible registration-unavailable
+status rather than writing an unvalidated target. The launcher performs the
+separate runtime metadata and file checks before handoff. It does not include
+profiles, process detection, True™ Time, NTP, an installer, a secure updater, or
+release signing.
 
 Unsupported platform behavior remains explicit. Native API acceptance and the
 adapter postcondition are not claims about a universal effective system value.
@@ -89,12 +95,14 @@ one power broadcast path. Battery Saver, session, lock, suspend, and resume
 notification coverage remains incomplete and is shown as unknown or degraded
 rather than claimed as fully observed.
 
-Startup registration validates that the target exists and is exactly
-`Launcher.exe` before writing the current-user value. Config persistence and the
-registry operation are kept transactionally consistent with a rollback attempt or
-an explicit repair-needed status. Initial power observation records success or the
-failure reason in the diagnostic log. A failed observation remains unknown and
-blocks acquisition.
+Portable startup registration validates that the target exists and is exactly
+`Launcher.exe` before writing the current-user value. The debug fallback validates
+the current executable shape and existence before writing. Registration is
+non-elevated, idempotent, removable, and not performed by tests. Config
+persistence and a real registry operation are kept transactionally consistent
+with a rollback attempt or an explicit repair-needed status. Initial power
+observation records success or the failure reason in the diagnostic log. A failed
+observation remains unknown and blocks acquisition.
 
 Active documentation is checked with `scripts/check_doc_punctuation.py`. The
 checker rejects em dash and semicolon characters and skips historical archive
@@ -156,6 +164,9 @@ The evidence should show `COMCTL32.dll` with ordinal 345, a non-empty resource
 directory and `.rsrc` section, and the embedded Common Controls dependency in
 resource data. These checks do not launch the executable. They establish
 embedding and static dependencies only. Runtime Windows resolution remains
-unverified until the user runs the rebuilt tray app.
+unverified until the user runs the rebuilt tray app. The diagnostic window's
+actual appearance, taskbar presence, title-bar controls, restore, and close
+behavior also remain runtime-unverified because validation does not launch this
+internal application.
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) and [`STATUS.md`](STATUS.md).

@@ -32,13 +32,18 @@ and Quit. Auto-start controls Windows login launch. Auto-time controls automatic
 policy and ownership lifecycle as automatic activation. The clickable status row
 opens a normal overlapped taskbar diagnostic window and never changes timer state.
 The two setting toggles use a non recursive return-command loop so the menu stays
-open after a toggle. The diagnostic window is a normal taskbar window titled
+open after a toggle. The original popup anchor POINT is captured once and reused
+when the menu reopens. Returned command IDs are dispatched once, and toggle
+requests record command, save, and resulting-value events. The diagnostic window is
+a normal taskbar window titled
 `True Tick Status and Diagnostics`. It uses `WS_OVERLAPPEDWINDOW` and
 `WS_EX_APPWINDOW` without `WS_EX_TOOLWINDOW`, so it has standard minimize,
 maximize, restore, close, taskbar, and resize behavior. It shows current status,
 power observation, startup result, and the bounded read-only session snapshot.
 Reopening validates the existing handle, restores minimized state, activates the
-same window, and refreshes its snapshot. Closing it destroys only the window and
+same window, and refreshes its snapshot. The style contract is source-tested, but
+actual taskbar appearance and runtime control behavior remain unverified because
+validation does not launch the app. Closing it destroys only the window and
 does not affect timer ownership. Full system reports, config paths, raw HNS values,
 power explanations, and full errors remain excluded from the compact menu and tooltip.
 
@@ -62,9 +67,11 @@ registry tuning beyond the explicit current-user startup boundary, driver,
 hardware clock control, process detection, network services, installer, secure
 updater, or release machinery.
 Boot startup registration is a per-user Run-key operation controlled by
-`startup_enabled` in the local config. In portable A/B mode it registers the
-buildable `Launcher.exe` entry point, not `true-tick.exe` from either slot. The
-launcher owns slot selection and validation before activation, and launches only
+`startup_enabled` in the local config. Portable A/B mode registers the buildable
+`Launcher.exe` entry point, not `true-tick.exe` from either slot. Normal debug
+runs have a separate explicit fallback that registers the actual
+`target/debug/true-tick.exe` tray executable when no portable launcher path is
+available. The launcher owns slot selection and validation before activation, and launches only
 the active slot with forwarded arguments. Missing or invalid metadata fails with
 repair required. Secure signatures and rollback are not implemented. The bounded
 path resolver derives the launcher path from a `Slots\A` or `Slots\B` executable
@@ -74,9 +81,12 @@ installation and it is not the same as `automatic`, which controls timer
 activation after launch. Both settings are persisted through a flushed temporary
 file replacement. Parse and write failures are surfaced in the tray status.
 Missing or invalid A/B metadata requires repair and never defaults to slot A.
-Startup registration validates launcher existence and executable identity before
-writing. If config persistence fails after a registry change, the inverse
-operation is attempted and failure is marked repair required. Initial power query
+Portable startup registration validates launcher existence and executable identity before
+writing. The debug fallback validates the current executable shape and existence.
+If config persistence fails after a registry change, the inverse operation is
+attempted and failure is marked repair required. If no safe target is available,
+the preference remains persistent with a visible registration-unavailable status.
+Initial power query
 errors are recorded with their native status and remain conservative unknown
 observation. True™ Time is not a dependency. Platform behavior that cannot be verified remains
 yellow or red rather than being reported as green. The tray maps running and verified ownership to green, starting, stopping,
