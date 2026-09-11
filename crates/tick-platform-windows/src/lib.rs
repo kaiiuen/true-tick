@@ -55,7 +55,11 @@ impl TimerPlatform for WindowsTimerPlatform {
         #[cfg(windows)]
         {
             let (minimum, maximum, _current) = query_resolution()?;
-            if interval < minimum || interval > maximum || interval == Hns::ZERO {
+            if interval < minimum
+                || interval > maximum
+                || interval == Hns::ZERO
+                || interval.value() > u32::MAX as u64
+            {
                 return Err(TimerError::InvalidInterval);
             }
             return Ok(TimerBounds {
@@ -141,8 +145,8 @@ fn query_resolution() -> Result<(Hns, Hns, Hns), TimerError> {
         return Err(TimerError::QueryFailed { raw_status: status });
     }
     Ok((
-        Hns::new(minimum as u64),
         Hns::new(maximum as u64),
+        Hns::new(minimum as u64),
         Hns::new(current as u64),
     ))
 }

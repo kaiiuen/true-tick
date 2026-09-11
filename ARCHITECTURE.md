@@ -12,8 +12,10 @@ This repository contains an internal v1 runtime, not a production release.
 - `tick-calibration` remains an explicit unsupported boundary.
 - `apps/true-tick` owns the tray composition, startup configuration, and portable launcher framing.
 
-The runtime does not use a busy loop, high priority, affinity, QoS, execution-state
-requests, power-plan changes, registry tuning, driver, hardware clock control,
-process detection, network services, installer, secure updater, or release machinery.
+An inconclusive adapter postcondition enters an unverified state and suppresses
+repeat acquisition or guessed cleanup. The runtime does not use a busy loop,
+high priority, affinity, QoS, execution-state requests, power-plan changes,
+registry tuning, driver, hardware clock control, process detection, network
+services, installer, secure updater, or release machinery.
 True™ Time is not a dependency. Platform behavior that cannot be verified remains
 yellow or red rather than being reported as green.

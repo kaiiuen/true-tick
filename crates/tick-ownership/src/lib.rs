@@ -84,11 +84,18 @@ impl<P: TimerPlatform> TimerController<P> {
     }
 
     pub fn start(&mut self) -> Result<Verification, TimerError> {
-        if self.ownership.state() == OwnershipState::Owned {
+        if self.ownership.state() == OwnershipState::Owned
+            || self.verification == Verification::Unverified
+        {
             return Ok(self.verification);
         }
         self.platform.preflight(self.interval)?;
-        self.platform.request(self.interval)?;
+        if let Err(error) = self.platform.request(self.interval) {
+            if matches!(error, TimerError::PostconditionUnverified { .. }) {
+                self.verification = Verification::Unverified;
+            }
+            return Err(error);
+        }
         self.ownership.apply(Transition::Acquire).map_err(|_| {
             TimerError::PostconditionUnverified {
                 raw_status: 0,
@@ -103,7 +110,10 @@ impl<P: TimerPlatform> TimerController<P> {
         if self.ownership.state() == OwnershipState::Released {
             return Ok(false);
         }
-        self.platform.release(self.interval)?;
+        if let Err(error) = self.platform.release(self.interval) {
+            self.verification = Verification::Unverified;
+            return Err(error);
+        }
         self.ownership
             .apply(Transition::Release)
             .map_err(|_| TimerError::ReleaseFailed { raw_status: 0 })?;
