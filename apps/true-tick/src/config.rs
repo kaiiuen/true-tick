@@ -22,6 +22,7 @@ impl Default for Config {
 #[derive(Debug)]
 pub enum ConfigError {
     Read(std::io::Error),
+    Write(std::io::Error),
     Invalid(String),
 }
 
@@ -29,6 +30,7 @@ impl std::fmt::Display for ConfigError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Read(error) => write!(formatter, "configuration read error: {error}"),
+            Self::Write(error) => write!(formatter, "configuration write error: {error}"),
             Self::Invalid(reason) => write!(formatter, "invalid configuration: {reason}"),
         }
     }
@@ -46,6 +48,62 @@ pub fn path_from_executable(executable: &Path) -> PathBuf {
 pub fn load(path: &Path) -> Result<Config, ConfigError> {
     let text = fs::read_to_string(path).map_err(ConfigError::Read)?;
     parse(&text)
+}
+
+pub fn save_atomic(path: &Path, config: &Config) -> Result<(), ConfigError> {
+    let temporary = path.with_extension("toml.tmp");
+    let text = format!(
+        "automatic = {}\nstartup_enabled = {}\nrequest_interval_hns = {}\n",
+        config.automatic,
+        config.startup_enabled,
+        config.request_interval.value()
+    );
+    let result = (|| {
+        let mut file = fs::File::create(&temporary).map_err(ConfigError::Write)?;
+        use std::io::Write;
+        file.write_all(text.as_bytes())
+            .map_err(ConfigError::Write)?;
+        file.sync_all().map_err(ConfigError::Write)?;
+        replace_file(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn replace_file(temporary: &Path, path: &Path) -> Result<(), ConfigError> {
+    fs::rename(temporary, path).map_err(ConfigError::Write)
+}
+
+#[cfg(windows)]
+fn replace_file(temporary: &Path, path: &Path) -> Result<(), ConfigError> {
+    use std::os::windows::ffi::OsStrExt;
+    let source: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
+    let target: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let ok = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        Err(ConfigError::Write(std::io::Error::last_os_error()))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+#[cfg(windows)]
+const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+
+#[cfg(windows)]
+extern "system" {
+    fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
 }
 
 pub fn parse(text: &str) -> Result<Config, ConfigError> {
@@ -122,5 +180,20 @@ mod tests {
     #[test]
     fn rejects_unknown_configuration() {
         assert!(parse("profile = game").is_err());
+    }
+
+    #[test]
+    fn serializes_configuration_for_persistence() {
+        let root = std::env::temp_dir().join(format!("true-tick-config-{}", std::process::id()));
+        let path = root.join("true-tick.toml");
+        fs::create_dir_all(&root).unwrap();
+        let config = Config {
+            automatic: true,
+            startup_enabled: true,
+            request_interval: Hns::new(10_000),
+        };
+        save_atomic(&path, &config).unwrap();
+        assert_eq!(load(&path).unwrap(), config);
+        fs::remove_dir_all(root).unwrap();
     }
 }

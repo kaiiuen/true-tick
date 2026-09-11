@@ -21,11 +21,17 @@ const WM_POWERBROADCAST: u32 = 0x0218;
 const PBT_APMPOWERSTATUSCHANGE: usize = 0x000A;
 const ID_START: usize = 1001;
 const ID_STOP: usize = 1002;
-const ID_AUTOMATIC: usize = 1003;
 const ID_QUIT: usize = 1004;
+const ID_STARTUP_ON: usize = 1005;
+const ID_STARTUP_OFF: usize = 1006;
+const ID_AUTOMATIC_ON: usize = 1007;
+const ID_AUTOMATIC_OFF: usize = 1008;
 const TPM_RIGHTBUTTON: u32 = 0x0002;
 const MF_STRING: u32 = 0x0000;
 const MF_SEPARATOR: u32 = 0x0800;
+const MF_GRAYED: u32 = 0x0001;
+const MF_CHECKED: u32 = 0x0008;
+const MF_POPUP: u32 = 0x0010;
 const NIF_MESSAGE: u32 = 0x0001;
 const NIF_ICON: u32 = 0x0002;
 const NIF_TIP: u32 = 0x0004;
@@ -95,9 +101,10 @@ struct WndClass {
 struct App {
     controller: TimerController<WindowsTimerPlatform>,
     observation: WindowsObservation,
-    automatic: bool,
+    config: config::Config,
     status_text: String,
     config_path: PathBuf,
+    executable: PathBuf,
     startup_status: String,
     tray_icon: Option<NotifyIconData>,
 }
@@ -106,9 +113,13 @@ pub fn run() {
     unsafe {
         let executable = get_module_file_name_w_path();
         let config_path = config::path_from_executable(&executable);
-        let loaded = config::load(&config_path).unwrap_or_default();
-        let startup_status = match startup_operation(loaded.startup_enabled) {
-            StartupOperation::Register => {
+        let (loaded, config_status) = match config::load(&config_path) {
+            Ok(config) => (config, None),
+            Err(error) => (config::Config::default(), Some(format!("Red: {error}"))),
+        };
+        let startup_status = match (config_status, startup_operation(loaded.startup_enabled)) {
+            (Some(error), _) => error,
+            (None, StartupOperation::Register) => {
                 match crate::portable::launcher_path_from_slot_executable(&executable) {
                     Ok(launcher) => match WindowsUserStartup::default().register(&launcher) {
                         Ok(()) => {
@@ -120,7 +131,7 @@ pub fn run() {
                     Err(error) => format!("Red: portable launcher path unavailable {error:?}"),
                 }
             }
-            StartupOperation::Remove => match WindowsUserStartup::default().remove() {
+            (None, StartupOperation::Remove) => match WindowsUserStartup::default().remove() {
                 Ok(()) => "boot startup registration disabled by config".to_owned(),
                 Err(error) => format!("Red: boot startup removal error {error:?}"),
             },
@@ -145,9 +156,10 @@ pub fn run() {
                 loaded.request_interval,
             ),
             observation,
-            automatic: loaded.automatic,
+            config: loaded,
             status_text: format!("Yellow: waiting for a verified request, {portable_status}"),
             config_path,
+            executable,
             startup_status,
             tray_icon: None,
         });
@@ -184,7 +196,7 @@ pub fn run() {
         let mut icon = NotifyIconData::new(hwnd, status(app));
         Shell_NotifyIconW(NIM_ADD, &mut icon);
         app.tray_icon = Some(icon);
-        if app.automatic {
+        if app.config.automatic {
             reconcile(app);
         }
         app.publish();
@@ -335,23 +347,20 @@ unsafe extern "system" fn window_proc(
             WM_TRAY if l_param as usize == WM_RBUTTONUP => show_menu(hwnd, app),
             WM_COMMAND => match w_param & 0xffff {
                 ID_START => {
-                    app.automatic = false;
                     apply_policy(app);
                     app.publish();
                 }
                 ID_STOP => {
-                    app.automatic = false;
                     match app.controller.stop() {
                         Ok(_) => app.status_text = "Yellow: stopped and released".into(),
                         Err(error) => app.status_text = format!("Red: release error {error:?}"),
                     }
                     app.publish();
                 }
-                ID_AUTOMATIC => {
-                    app.automatic = true;
-                    reconcile(app);
-                    app.publish();
-                }
+                ID_STARTUP_ON => set_startup(app, true),
+                ID_STARTUP_OFF => set_startup(app, false),
+                ID_AUTOMATIC_ON => set_automatic(app, true),
+                ID_AUTOMATIC_OFF => set_automatic(app, false),
                 ID_QUIT => {
                     if let Err(error) = app.controller.stop() {
                         app.status_text = format!(
@@ -365,7 +374,7 @@ unsafe extern "system" fn window_proc(
             },
             WM_POWERBROADCAST if w_param == PBT_APMPOWERSTATUSCHANGE => {
                 let _ = app.observation.refresh_power();
-                if app.automatic {
+                if app.config.automatic {
                     reconcile(app);
                 } else {
                     release_for_power_change(app);
@@ -383,12 +392,65 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &App) {
     let menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, ID_START, wide("Start").as_ptr());
     AppendMenuW(menu, MF_STRING, ID_STOP, wide("Stop").as_ptr());
-    AppendMenuW(menu, MF_STRING, ID_AUTOMATIC, wide("Automatic").as_ptr());
-    AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-    AppendMenuW(menu, MF_STRING, 0, wide(&status(app)).as_ptr());
+
+    let startup = CreatePopupMenu();
+    let startup_on = if app.config.startup_enabled {
+        MF_STRING | MF_CHECKED
+    } else {
+        MF_STRING
+    };
+    AppendMenuW(startup, startup_on, ID_STARTUP_ON, wide("On").as_ptr());
+    AppendMenuW(
+        startup,
+        if app.config.startup_enabled {
+            MF_STRING
+        } else {
+            MF_STRING | MF_CHECKED
+        },
+        ID_STARTUP_OFF,
+        wide("Off").as_ptr(),
+    );
     AppendMenuW(
         menu,
-        MF_STRING,
+        MF_STRING | MF_POPUP,
+        startup as usize,
+        wide("Auto-start").as_ptr(),
+    );
+
+    let automatic = CreatePopupMenu();
+    let automatic_on = if app.config.automatic {
+        MF_STRING | MF_CHECKED
+    } else {
+        MF_STRING
+    };
+    AppendMenuW(
+        automatic,
+        automatic_on,
+        ID_AUTOMATIC_ON,
+        wide("On").as_ptr(),
+    );
+    AppendMenuW(
+        automatic,
+        if app.config.automatic {
+            MF_STRING
+        } else {
+            MF_STRING | MF_CHECKED
+        },
+        ID_AUTOMATIC_OFF,
+        wide("Off").as_ptr(),
+    );
+    AppendMenuW(
+        menu,
+        MF_STRING | MF_POPUP,
+        automatic as usize,
+        wide("Automatic timing activation").as_ptr(),
+    );
+
+    AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, wide(&status(app)).as_ptr());
+    AppendMenuW(
+        menu,
+        MF_STRING | MF_GRAYED,
         0,
         wide("Power and timing are event-driven").as_ptr(),
     );
@@ -406,7 +468,62 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &App) {
         hwnd,
         std::ptr::null(),
     );
+    DestroyMenu(automatic);
+    DestroyMenu(startup);
     DestroyMenu(menu);
+}
+
+fn set_automatic(app: &mut App, enabled: bool) {
+    let mut next = app.config.clone();
+    next.automatic = enabled;
+    if let Err(error) = config::save_atomic(&app.config_path, &next) {
+        app.status_text = format!("Red: automatic activation config error {error}");
+        app.publish();
+        return;
+    }
+    app.config = next;
+    if enabled {
+        reconcile(app);
+    } else {
+        match app.controller.stop() {
+            Ok(_) => app.status_text = "Yellow: automatic timing activation disabled".into(),
+            Err(error) => {
+                app.status_text =
+                    format!("Yellow: automatic activation disabled, release unverified {error:?}")
+            }
+        }
+    }
+    app.publish();
+}
+
+fn set_startup(app: &mut App, enabled: bool) {
+    let registration = if enabled {
+        match crate::portable::launcher_path_from_slot_executable(&app.executable) {
+            Ok(launcher) => WindowsUserStartup::default().register(&launcher),
+            Err(_error) => Err(tick_startup_windows::StartupError::InvalidExecutablePath),
+        }
+    } else {
+        WindowsUserStartup::default().remove()
+    };
+    if let Err(error) = registration {
+        app.startup_status = format!("Red: startup registration error {error:?}");
+        app.publish();
+        return;
+    }
+    let mut next = app.config.clone();
+    next.startup_enabled = enabled;
+    if let Err(error) = config::save_atomic(&app.config_path, &next) {
+        app.startup_status = format!("Red: startup config error {error}");
+        app.publish();
+        return;
+    }
+    app.config = next;
+    app.startup_status = if enabled {
+        "boot startup registered for the current-user Launcher.exe entry point".into()
+    } else {
+        "boot startup registration disabled by config".into()
+    };
+    app.publish();
 }
 
 fn wide(value: &str) -> Vec<u16> {
