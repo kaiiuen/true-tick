@@ -1,7 +1,7 @@
 use crate::config;
 use std::ffi::c_void;
 use std::mem::size_of;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tick_diagnostics::{format_event, DiagnosticStore, DEFAULT_MAX_EVENTS};
@@ -175,6 +175,45 @@ struct WndClass {
     class_name: *const u16,
 }
 
+enum StartupTarget {
+    PortableLauncher(PathBuf),
+    DevelopmentExecutable(PathBuf),
+}
+
+impl StartupTarget {
+    fn description(&self) -> &'static str {
+        match self {
+            Self::PortableLauncher(_) => "portable Launcher.exe entry point",
+            Self::DevelopmentExecutable(_) => "debug true-tick.exe development fallback",
+        }
+    }
+}
+
+fn startup_target(executable: &Path) -> Result<StartupTarget, String> {
+    match crate::portable::launcher_path_from_slot_executable(executable) {
+        Ok(launcher) => Ok(StartupTarget::PortableLauncher(launcher)),
+        Err(_error)
+            if cfg!(debug_assertions)
+                && tick_startup_windows::is_development_executable(executable) =>
+        {
+            Ok(StartupTarget::DevelopmentExecutable(
+                executable.to_path_buf(),
+            ))
+        }
+        Err(error) => Err(format!("portable launcher path unavailable {error:?}")),
+    }
+}
+
+fn register_startup_target(
+    target: &StartupTarget,
+) -> Result<(), tick_startup_windows::StartupError> {
+    let mut startup = WindowsUserStartup;
+    match target {
+        StartupTarget::PortableLauncher(path) => startup.register(path),
+        StartupTarget::DevelopmentExecutable(path) => startup.register_development(path),
+    }
+}
+
 struct App {
     controller: TimerController<WindowsTimerPlatform>,
     observation: WindowsObservation,
@@ -228,35 +267,38 @@ pub fn run() {
         );
         let startup_status = match (config_status, startup_operation(loaded.startup_enabled)) {
             (Some(error), _) => error,
-            (None, StartupOperation::Register) => {
-                match crate::portable::launcher_path_from_slot_executable(&executable) {
-                    Ok(launcher) => {
-                        diagnostics
-                            .record("native.RegSetValueExW.call", "value=TrueTick path=redacted");
-                        match WindowsUserStartup.register(&launcher) {
-                            Ok(()) => {
-                                diagnostics.record("startup.registration.result", "result=success");
-                                "boot startup registered for the current-user Launcher.exe entry point"
-                                .to_owned()
-                            }
-                            Err(error) => {
-                                diagnostics.record(
-                                    "startup.registration.result",
-                                    format!("result=error error={error:?}"),
-                                );
-                                format!("Red: boot startup registration error {error:?}")
-                            }
+            (None, StartupOperation::Register) => match startup_target(&executable) {
+                Ok(target) => {
+                    diagnostics
+                        .record("native.RegSetValueExW.call", "value=TrueTick path=redacted");
+                    match register_startup_target(&target) {
+                        Ok(()) => {
+                            diagnostics.record(
+                                "startup.registration.result",
+                                format!("result=success target={}", target.description()),
+                            );
+                            format!(
+                                "boot startup registered for current-user {}",
+                                target.description()
+                            )
+                        }
+                        Err(error) => {
+                            diagnostics.record(
+                                "startup.registration.result",
+                                format!("result=error error={error:?}"),
+                            );
+                            format!("Red: boot startup registration error {error:?}")
                         }
                     }
-                    Err(error) => {
-                        diagnostics.record(
-                            "startup.launcher_slot_selection",
-                            format!("result=error error={error:?}"),
-                        );
-                        format!("Red: portable launcher path unavailable {error:?}")
-                    }
                 }
-            }
+                Err(error) => {
+                    diagnostics.record(
+                        "startup.launcher_slot_selection",
+                        format!("result=error error={error}"),
+                    );
+                    format!("Red: {error}")
+                }
+            },
             (None, StartupOperation::Remove) => {
                 diagnostics.record("native.RegDeleteValueW.call", "value=TrueTick");
                 match WindowsUserStartup.remove() {
@@ -969,39 +1011,110 @@ fn set_automatic(app: &mut App, enabled: bool) {
 
 fn set_startup(app: &mut App, enabled: bool) {
     app.record("tray.command", format!("command=startup enabled={enabled}"));
-    let registration = if enabled {
-        match crate::portable::launcher_path_from_slot_executable(&app.executable) {
-            Ok(launcher) => WindowsUserStartup.register(&launcher),
-            Err(_error) => Err(tick_startup_windows::StartupError::InvalidExecutablePath),
+    app.record(
+        "toggle.requested",
+        format!("setting=startup_enabled requested={enabled}"),
+    );
+
+    let target = if enabled {
+        match startup_target(&app.executable) {
+            Ok(target) => Some(target),
+            Err(error) => {
+                app.record(
+                    "startup.registration.result",
+                    format!("result=unavailable error={error}"),
+                );
+                let mut next = app.config.clone();
+                next.startup_enabled = enabled;
+                if let Err(save_error) = config::save_atomic(&app.config_path, &next) {
+                    app.record(
+                        "config.save.result",
+                        format!("result=error setting=startup_enabled error={save_error}"),
+                    );
+                    app.record(
+                        "toggle.result",
+                        format!(
+                            "setting=startup_enabled value={} result=unchanged",
+                            app.config.startup_enabled
+                        ),
+                    );
+                    app.startup_status =
+                        "startup registration unavailable and config persistence failed".into();
+                } else {
+                    app.record(
+                        "config.save.result",
+                        "result=success setting=startup_enabled value=true",
+                    );
+                    app.config = next;
+                    app.record(
+                        "toggle.result",
+                        "setting=startup_enabled value=true result=applied",
+                    );
+                    app.startup_status = format!(
+                        "auto-start enabled in config, current-user registration unavailable: {error}"
+                    );
+                }
+                app.tray_status = TrayStatus::Error;
+                app.publish();
+                return;
+            }
         }
     } else {
-        WindowsUserStartup.remove()
+        None
+    };
+
+    let registration = if let Some(target) = target.as_ref() {
+        app.record("native.RegSetValueExW.call", "value=TrueTick path=redacted");
+        register_startup_target(target)
+    } else {
+        app.record("native.RegDeleteValueW.call", "value=TrueTick");
+        let mut startup = WindowsUserStartup;
+        startup.remove()
     };
     if let Err(error) = registration {
         app.record(
             "startup.registration.result",
             format!("result=error error={error:?}"),
         );
+        app.record(
+            "toggle.result",
+            format!(
+                "setting=startup_enabled value={} result=unchanged",
+                app.config.startup_enabled
+            ),
+        );
         app.startup_status = "startup registration error".into();
         app.tray_status = TrayStatus::Error;
         app.publish();
         return;
     }
+
     let mut next = app.config.clone();
     next.startup_enabled = enabled;
     if let Err(error) = config::save_atomic(&app.config_path, &next) {
-        app.record("config.save.result", format!("result=error error={error}"));
+        app.record(
+            "config.save.result",
+            format!("result=error setting=startup_enabled error={error}"),
+        );
         let rollback = if enabled {
-            WindowsUserStartup.remove()
+            let mut startup = WindowsUserStartup;
+            startup.remove()
         } else {
-            match crate::portable::launcher_path_from_slot_executable(&app.executable) {
-                Ok(launcher) => WindowsUserStartup.register(&launcher),
-                Err(_) => Err(tick_startup_windows::StartupError::InvalidExecutablePath),
+            match startup_target(&app.executable) {
+                Ok(target) => register_startup_target(&target),
+                Err(_error) => Err(tick_startup_windows::StartupError::InvalidExecutablePath),
             }
         };
         app.record(
             "startup.registration.rollback",
             format!("result={rollback:?}"),
+        );
+        app.record(
+            "toggle.result",
+            format!(
+                "setting=startup_enabled value={} result=unchanged",
+                app.config.startup_enabled
+            ),
         );
         app.startup_status = if rollback.is_ok() {
             "startup config persistence failed, registry change rolled back".into()
@@ -1018,15 +1131,25 @@ fn set_startup(app: &mut App, enabled: bool) {
     }
     app.record(
         "config.save.result",
-        "result=success setting=startup_enabled",
+        format!("result=success setting=startup_enabled value={enabled}"),
     );
     app.config = next;
+    app.record(
+        "toggle.result",
+        format!(
+            "setting=startup_enabled value={} result=applied",
+            app.config.startup_enabled
+        ),
+    );
     app.record(
         "startup.registration.result",
         format!("result=success enabled={enabled}"),
     );
-    app.startup_status = if enabled {
-        "boot startup registered for the current-user Launcher.exe entry point".into()
+    app.startup_status = if let Some(target) = target {
+        format!(
+            "boot startup registered for current-user {}",
+            target.description()
+        )
     } else {
         "boot startup registration disabled by config".into()
     };

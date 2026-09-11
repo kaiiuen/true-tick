@@ -29,6 +29,7 @@ pub enum StartupError {
     InvalidExecutablePath,
     LauncherMissing,
     NotLauncher,
+    NotDevelopmentExecutable,
     OpenKey { raw_status: u32 },
     SetValue { raw_status: u32 },
     RemoveValue { raw_status: u32 },
@@ -36,6 +37,7 @@ pub enum StartupError {
 
 pub trait StartupRegistration {
     fn register(&mut self, executable: &Path) -> Result<(), StartupError>;
+    fn register_development(&mut self, executable: &Path) -> Result<(), StartupError>;
     fn remove(&mut self) -> Result<(), StartupError>;
 }
 
@@ -47,27 +49,20 @@ impl StartupRegistration for WindowsUserStartup {
         #[cfg(windows)]
         {
             validate_launcher_path(executable)?;
-            let command = startup_command(executable)?;
-            let key = open_run_key()?;
-            let name = wide(VALUE_NAME);
-            let value = wide(&command);
-            let status = unsafe {
-                RegSetValueExW(
-                    key,
-                    name.as_ptr(),
-                    0,
-                    REG_SZ,
-                    value.as_ptr() as *const u8,
-                    (value.len() * 2) as u32,
-                )
-            };
-            unsafe {
-                RegCloseKey(key);
-            }
-            if status != ERROR_SUCCESS {
-                return Err(StartupError::SetValue { raw_status: status });
-            }
-            Ok(())
+            register_validated(executable)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = executable;
+            Err(StartupError::Unsupported)
+        }
+    }
+
+    fn register_development(&mut self, executable: &Path) -> Result<(), StartupError> {
+        #[cfg(windows)]
+        {
+            validate_development_path(executable)?;
+            register_validated(executable)
         }
         #[cfg(not(windows))]
         {
@@ -111,6 +106,64 @@ fn validate_launcher_path(executable: &Path) -> Result<(), StartupError> {
     }
     if !executable.is_file() {
         return Err(StartupError::InvalidExecutablePath);
+    }
+    Ok(())
+}
+
+fn validate_development_path(executable: &Path) -> Result<(), StartupError> {
+    if !is_development_executable(executable) {
+        return Err(StartupError::NotDevelopmentExecutable);
+    }
+    if !executable.exists() {
+        return Err(StartupError::LauncherMissing);
+    }
+    if !executable.is_file() {
+        return Err(StartupError::InvalidExecutablePath);
+    }
+    Ok(())
+}
+
+pub fn is_development_executable(executable: &Path) -> bool {
+    let name_matches = executable
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("true-tick.exe"));
+    let has_target = executable.components().any(|component| {
+        component
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("target")
+    });
+    let has_debug = executable.components().any(|component| {
+        component
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("debug")
+    });
+    name_matches && has_target && has_debug
+}
+
+#[cfg(windows)]
+fn register_validated(executable: &Path) -> Result<(), StartupError> {
+    let command = startup_command(executable)?;
+    let key = open_run_key()?;
+    let name = wide(VALUE_NAME);
+    let value = wide(&command);
+    let status = unsafe {
+        RegSetValueExW(
+            key,
+            name.as_ptr(),
+            0,
+            REG_SZ,
+            value.as_ptr() as *const u8,
+            (value.len() * 2) as u32,
+        )
+    };
+    unsafe {
+        RegCloseKey(key);
+    }
+    if status != ERROR_SUCCESS {
+        return Err(StartupError::SetValue { raw_status: status });
     }
     Ok(())
 }
@@ -216,6 +269,19 @@ mod tests {
             startup_command(&PathBuf::from(r#"C:\bad"name\true-tick.exe"#)),
             Err(StartupError::InvalidExecutablePath)
         );
+    }
+
+    #[test]
+    fn development_fallback_requires_target_debug_true_tick() {
+        assert!(is_development_executable(&PathBuf::from(
+            r"C:\Tick\target\debug\true-tick.exe"
+        )));
+        assert!(!is_development_executable(&PathBuf::from(
+            r"C:\Tick\target\release\true-tick.exe"
+        )));
+        assert!(!is_development_executable(&PathBuf::from(
+            r"C:\Tick\Slots\A\true-tick.exe"
+        )));
     }
 
     #[test]
