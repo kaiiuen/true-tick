@@ -27,6 +27,10 @@ resolver derives the launcher path from a `Slots\A` or `Slots\B` executable shap
 without claiming runtime filesystem validation. Registration is non-elevated,
 idempotent, removable, and not performed by tests. It is not machine-wide
 installation and it is not the same as `automatic`, which controls timer
-activation after launch.
+activation after launch. Both settings are persisted through a flushed temporary
+file replacement. Parse and write failures are surfaced in the tray status.
+Missing or invalid A/B metadata requires repair and never defaults to slot A.
 True™ Time is not a dependency. Platform behavior that cannot be verified remains
-yellow or red rather than being reported as green.
+yellow or red rather than being reported as green. Current observation verifies
+only the available system power query and one power broadcast path. Full Battery
+Saver, session, lock, suspend, and resume notification support is not claimed.

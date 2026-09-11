@@ -10,6 +10,13 @@ registration is isolated behind its own Windows adapter and targets the portable
 validates A/B before activation. Registration is distinct from automatic timer
 activation after the application has launched.
 
+The tray has persistent Auto-start and automatic timing activation submenus.
+Configuration writes use a flushed temporary file replacement. Parse and write
+errors remain visible. Manual and automatic activation share the same policy.
+Battery, Battery Saver, and unknown power states remain non-acquiring. A
+restrictive power transition or normal Quit attempts to release owned state and
+reports release failure as yellow and unverified.
+
 Intentionally absent:
 
 - profiles, application detection, foreground hooks, launcher runtime validation or child processes
@@ -20,6 +27,9 @@ Intentionally absent:
 - runtime validation of the resolved portable launcher path
 
 The Windows support matrix and exact native API behavior remain bounded internal
-validation work. A/B selection is a safe local scaffold and does not verify a
-signed package or perform rollback. No package, installer, signed artifact, tag,
-GitHub Release, or public publication is created here.
+validation work. Power observation does not yet provide full Battery Saver,
+session, lock, suspend, or resume notification coverage. Unknown observation is
+reported as degraded and blocks acquisition. A/B selection is a safe local
+scaffold. Missing or invalid active-slot metadata requires repair. It does not
+verify a signed package or perform rollback. No package, installer, signed
+artifact, tag, GitHub Release, or public publication is created here.
