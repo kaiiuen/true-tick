@@ -45,7 +45,23 @@ a truncation marker, and defers disk persistence. The diagnostic header uses the
 latest verified effective observation and keeps requested HNS, selected HNS,
 effective HNS, raw boundaries, raw status, and relation distinct. Fields are
 sanitized and bounded so raw pointers, credentials, private tokens, arbitrary
-secrets, and unbounded sensitive paths are not recorded.
+secrets, and unbounded sensitive paths are not recorded. Ownership state is
+logged separately from effective system state. After release, a remaining finer
+value is labeled external without claiming Tick ownership, and a later query
+may show the effective value returning to baseline.
+
+Startup always queries current timing after the tray surface is ready, even when
+Tick is stopped and Auto-time is off. A successful query displays stopped current
+timing without claiming ownership. A failed query displays `Stopped (timing
+unknown)` and records the failure. The selected or requested boundary remains
+separate from the current effective observation.
+
+Power broadcasts refresh timing and recalculate the visible state whether
+Auto-time is on or off. With Auto-time off, AC and no owned request show stopped
+current timing and wait for manual Start. Battery, Battery Saver, and unknown
+power release owned timing conservatively and retain the policy reason. AC with
+Auto-time on attempts acquisition. Battery-to-AC with Auto-time off shows
+stopped current timing rather than remaining blocked.
 Configuration writes use a flushed temporary file replacement. Parse and write
 errors remain visible. Portable startup registration validates the existing
 `Launcher.exe` file before registry writes. The debug fallback validates the

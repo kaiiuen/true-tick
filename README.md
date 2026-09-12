@@ -83,7 +83,11 @@ current value in controller and app state. After release, the returned current
 observation is retained as effective external state when another client remains
 finer or otherwise active, without implying Tick ownership. The captured
 `current_hns=9966` value was about `0.997 ms` because the old config requested
-`10000 HNS`. That config is migrated to automatic selection. The display uses `unknown` when no observation is available. Raw HNS and full event details remain in the diagnostic window. The local diagnostic session records automatic selection,
+`10000 HNS`. That config is migrated to automatic selection. At startup, the controller always queries the current effective timing, even when True Tick is stopped and Auto-time is off. A successful query is displayed as stopped current timing without claiming Tick ownership. A failed query is displayed as `Stopped (timing unknown)` and recorded as a diagnostic failure. The selected or requested boundary remains separate from the current effective observation.
+
+Power broadcasts refresh timing and recalculate the visible state for both Auto-time settings. With Auto-time off, AC and no owned request show stopped current timing and wait for manual Start. Battery, Battery Saver, and unknown power remain conservative and release owned timing when policy requires it. Returning to AC with Auto-time on attempts acquisition. Returning to AC with Auto-time off shows stopped current timing rather than leaving a stale blocked state.
+
+The display uses `unknown` when no observation is available. Raw HNS and full event details remain in the diagnostic window. The local diagnostic session records automatic selection,
 raw native boundaries, selected HNS, requested HNS, effective HNS, raw status,
 and an `equal`, `finer`, or `unverified` effective relation. The tooltip, status
 summary, and diagnostic header use the latest verified effective observation from

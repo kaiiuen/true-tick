@@ -49,7 +49,11 @@ same window, and refreshes its snapshot. The style contract is source-tested, bu
 actual taskbar appearance and runtime control behavior remain unverified because
 validation does not launch the app. Closing it destroys only the window and
 does not affect timer ownership. Full system reports, config paths, raw HNS values,
-power explanations, and full errors remain excluded from the compact menu and tooltip. The local diagnostic session records automatic selection, raw native boundaries, selected HNS, requested HNS, effective HNS, raw status, and an `equal`, `finer`, or `unverified` effective relation. After a successful request, the controller replaces the preflight current observation with the returned verified effective observation. Release also retains its returned current observation so the UI can show a remaining external effective state without claiming Tick ownership.
+power explanations, and full errors remain excluded from the compact menu and tooltip. The local diagnostic session records automatic selection, raw native boundaries, selected HNS, requested HNS, effective HNS, raw status, and an `equal`, `finer`, or `unverified` effective relation. After a successful request, the controller replaces the preflight current observation with the returned verified effective observation. Release also retains its returned current observation so the UI can show a remaining external effective state without claiming Tick ownership. A released finer effective value is labeled external, while a later query can show the value returning to baseline.
+
+Startup always performs a current timing query after the tray surface is ready, even when the runtime is stopped and Auto-time is off. A successful query produces stopped current timing. A failed query produces stopped timing unknown and a diagnostic error. Selected or requested boundaries remain separate from the current effective observation.
+
+Power broadcasts refresh timing and recalculate status regardless of the Auto-time setting. AC with Auto-time off and no ownership is stopped and waits for manual Start. Restrictive power states release owned timing and report the policy reason. AC with Auto-time on acquires when no request is owned. AC with Auto-time off does not acquire and does not remain blocked after a battery-to-AC transition.
 
 Detailed evidence is recorded in a local bounded in-memory session log. Events have
 monotonic sequence numbers and elapsed process time. The default limit is 512

@@ -7,6 +7,7 @@ pub(crate) enum TrayStatus {
     Running,
     Starting,
     Stopping,
+    #[allow(dead_code)]
     Pending,
     Degraded,
     Unverified,

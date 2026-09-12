@@ -977,6 +977,19 @@ impl App {
             "tray.status.changed",
             format!("status={:?} tooltip={status_text}", self.tray_status),
         );
+        self.record(
+            "ownership.state",
+            format!("state={:?}", self.controller.ownership()),
+        );
+        self.record(
+            "effective.system.state",
+            format!(
+                "effective_hns={}",
+                timing
+                    .effective
+                    .map_or_else(|| "unknown".to_owned(), |value| value.value().to_string())
+            ),
+        );
         if let Some(icon) = self.tray_icon.as_mut() {
             if let Err(raw_error) = update_icon(icon, self.tray_status, timing) {
                 self.record(
