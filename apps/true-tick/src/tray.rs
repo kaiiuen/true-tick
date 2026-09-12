@@ -100,6 +100,7 @@ const LVS_SHOWSELALWAYS: u32 = 0x0008;
 const LVS_EX_GRIDLINES: usize = 0x00000001;
 const LVS_EX_FULLROWSELECT: usize = 0x00000020;
 const ICC_LISTVIEW_CLASSES: u32 = 0x0000_0001;
+// The standard bar-class group includes the native tooltip control.
 const ICC_BAR_CLASSES: u32 = 0x0000_0004;
 const REQUIRED_COMMON_CONTROL_CLASSES: u32 = ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES;
 const LVM_FIRST: u32 = 0x1000;
@@ -621,12 +622,12 @@ pub fn run() {
         match initialize_common_controls() {
             Ok(()) => app.record(
                 "native.InitCommonControlsEx.result",
-                format!("result=success classes={REQUIRED_COMMON_CONTROL_CLASSES:#x}"),
+                format!("result=success classes=list-view+tooltip flags={REQUIRED_COMMON_CONTROL_CLASSES:#x}"),
             ),
             Err(raw_error) => {
                 app.record(
                     "native.InitCommonControlsEx.error",
-                    format!("classes={REQUIRED_COMMON_CONTROL_CLASSES:#x} raw_status={raw_error}"),
+                    format!("classes=list-view+tooltip flags={REQUIRED_COMMON_CONTROL_CLASSES:#x} raw_status={raw_error}"),
                 );
                 app.record(
                     "diagnostic.window.result",
@@ -3565,7 +3566,7 @@ unsafe fn layout_diagnostic_controls(window: *mut c_void, app: &App) {
     }
 }
 
-unsafe fn initialize_diagnostic_list(list: *mut c_void) -> bool {
+unsafe fn initialize_diagnostic_list(list: *mut c_void) -> Result<(), u32> {
     let _ = SendMessageW(
         list,
         LVM_SETEXTENDEDLISTVIEWSTYLE,
@@ -3587,17 +3588,17 @@ unsafe fn initialize_diagnostic_list(list: *mut c_void) -> bool {
             default_width: 0,
             ideal_width: 0,
         };
-        if SendMessageW(
+        let insert_result = SendMessageW(
             list,
             LVM_INSERTCOLUMNW,
             index,
             (&column as *const ListViewColumn).cast::<c_void>() as isize,
-        ) < 0
-        {
-            return false;
+        );
+        if insert_result < 0 {
+            return Err(GetLastError());
         }
     }
-    true
+    Ok(())
 }
 
 unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &App) {
@@ -3646,7 +3647,10 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &App) {
             insert_failures = insert_failures.saturating_add(1);
             app.diagnostics.record(
                 "native.LVM_INSERTITEMW.error",
-                format!("row={row_index} raw_status={}", GetLastError()),
+                format!(
+                    "row={row_index} result={insert_result} raw_status={}",
+                    GetLastError()
+                ),
             );
             break;
         }
@@ -3681,7 +3685,7 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &App) {
                 app.diagnostics.record(
                     "native.LVM_SETITEMTEXTW.error",
                     format!(
-                        "row={row_index} column={column_index} raw_status={}",
+                        "row={row_index} column={column_index} result={set_text_result} raw_status={}",
                         GetLastError()
                     ),
                 );
@@ -3797,11 +3801,11 @@ unsafe extern "system" fn diagnostic_window_proc(
             }
             return 1;
         }
-        if !initialize_diagnostic_list(list) {
+        if let Err(raw_error) = initialize_diagnostic_list(list) {
             if !app_ptr.is_null() {
                 (*(app_ptr as *mut App)).diagnostics.record(
                     "native.ListView.insert_column.error",
-                    format!("raw_status={}", GetLastError()),
+                    format!("raw_status={raw_error}"),
                 );
             }
             DestroyWindow(summary);
@@ -4360,7 +4364,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn common_controls_initialization_uses_list_view_and_toolbar_classes() {
+    fn common_controls_initialization_uses_list_view_and_tooltip_classes() {
         let init = common_controls_initialization_contract();
         assert_eq!(init.size as usize, size_of::<InitCommonControlsEx>());
         assert_eq!(init.classes, ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES);
