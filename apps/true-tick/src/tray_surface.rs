@@ -34,6 +34,7 @@ pub(crate) enum IconColor {
 pub(crate) struct MenuItem {
     pub(crate) label: String,
     pub(crate) enabled: bool,
+    pub(crate) command_id: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -294,6 +295,11 @@ pub(crate) fn tooltip_at(
 
 pub(crate) const LOGS_COMMAND_ID: usize = 1009;
 pub(crate) const GITHUB_COMMAND_ID: usize = 1010;
+pub(crate) const STATUS_STATE_COMMAND_ID: usize = 1030;
+pub(crate) const STATUS_TIMING_COMMAND_ID: usize = 1031;
+pub(crate) const STATUS_RUNNING_FOR_COMMAND_ID: usize = 1032;
+pub(crate) const STATUS_NEXT_ACTION_COMMAND_ID: usize = 1033;
+pub(crate) const STATUS_OWNERSHIP_COMMAND_ID: usize = 1034;
 pub(crate) const START_IN_1_COMMAND_ID: usize = 1011;
 pub(crate) const START_IN_5_COMMAND_ID: usize = 1012;
 pub(crate) const START_IN_15_COMMAND_ID: usize = 1013;
@@ -348,6 +354,7 @@ pub(crate) fn duration_choices(action: DurationAction) -> Vec<MenuItem> {
         .map(|duration| MenuItem {
             label: duration.label().to_owned(),
             enabled: true,
+            command_id: None,
         })
         .collect()
 }
@@ -357,14 +364,17 @@ pub(crate) fn duration_menu_items(scheduled: Option<ScheduledAction>) -> Vec<Men
         MenuItem {
             label: "Start in >".to_owned(),
             enabled: true,
+            command_id: None,
         },
         MenuItem {
             label: "Stop in >".to_owned(),
             enabled: true,
+            command_id: None,
         },
         MenuItem {
             label: "Cancel scheduled action".to_owned(),
             enabled: scheduled.is_some(),
+            command_id: None,
         },
     ]
 }
@@ -383,6 +393,11 @@ pub(crate) const fn menu_description(command_id: usize) -> Option<&'static str> 
         PAUSE_FOR_MENU_COMMAND_ID => Some("Suppress acquisition for a fixed duration"),
         CANCEL_SCHEDULED_COMMAND_ID => Some("Clear the current scheduled action"),
         STATUS_MENU_COMMAND_ID => Some("View read-only lifecycle details"),
+        STATUS_STATE_COMMAND_ID => Some("Current True Tick lifecycle state"),
+        STATUS_TIMING_COMMAND_ID => Some("Latest verified effective timing observation"),
+        STATUS_RUNNING_FOR_COMMAND_ID => Some("Elapsed time since verified running"),
+        STATUS_NEXT_ACTION_COMMAND_ID => Some("Scheduled action and remaining time"),
+        STATUS_OWNERSHIP_COMMAND_ID => Some("True Tick ownership versus external timing"),
         START_IN_1_COMMAND_ID => Some("Start in 1 minute"),
         START_IN_5_COMMAND_ID => Some("Start in 5 minutes"),
         START_IN_15_COMMAND_ID => Some("Start in 15 minutes"),
@@ -651,22 +666,27 @@ pub(crate) fn status_menu_items(
                 state_menu_label(status, timing, scheduled, now)
             ),
             enabled: false,
+            command_id: Some(STATUS_STATE_COMMAND_ID),
         },
         MenuItem {
             label: format!("Timing: {}", effective_timing_label(timing)),
             enabled: false,
+            command_id: Some(STATUS_TIMING_COMMAND_ID),
         },
         MenuItem {
             label: format!("Running for: {}", running_for_label(running_for)),
             enabled: false,
+            command_id: Some(STATUS_RUNNING_FOR_COMMAND_ID),
         },
         MenuItem {
             label: format!("Next action: {}", next_action_label(scheduled, now)),
             enabled: false,
+            command_id: Some(STATUS_NEXT_ACTION_COMMAND_ID),
         },
         MenuItem {
             label: format!("Ownership: {}", ownership_label(ownership, timing)),
             enabled: false,
+            command_id: Some(STATUS_OWNERSHIP_COMMAND_ID),
         },
     ]
 }
@@ -692,14 +712,17 @@ pub(crate) fn menu_items_with_duration(
         MenuItem {
             label: version_header(),
             enabled: true,
+            command_id: None,
         },
         MenuItem {
             label: "Start".to_owned(),
             enabled: !paused && !matches!(status, TrayStatus::Running | TrayStatus::Starting),
+            command_id: None,
         },
         MenuItem {
             label: "Pause >".to_owned(),
             enabled: true,
+            command_id: None,
         },
         MenuItem {
             label: "Stop".to_owned(),
@@ -708,30 +731,37 @@ pub(crate) fn menu_items_with_duration(
                     status,
                     TrayStatus::Stopped | TrayStatus::Pausing | TrayStatus::Stopping
                 ),
+            command_id: None,
         },
         MenuItem {
             label: "Schedule >".to_owned(),
             enabled: true,
+            command_id: None,
         },
         MenuItem {
             label: auto_start_label(startup_enabled).to_owned(),
             enabled: true,
+            command_id: None,
         },
         MenuItem {
             label: automatic_label(automatic).to_owned(),
             enabled: true,
+            command_id: None,
         },
         MenuItem {
             label: "Status >".to_owned(),
             enabled: true,
+            command_id: None,
         },
         MenuItem {
             label: "Logs".to_owned(),
             enabled: true,
+            command_id: None,
         },
         MenuItem {
             label: "Quit".to_owned(),
             enabled: true,
+            command_id: None,
         },
     ]
 }
@@ -981,6 +1011,30 @@ mod tests {
         assert_eq!(status[3].label, "Next action: stop in 4m 12s");
         assert_eq!(status[4].label, "Ownership: Released");
         assert!(status.iter().all(|item| !item.enabled));
+        assert_eq!(
+            status
+                .iter()
+                .map(|item| item.command_id)
+                .collect::<Vec<_>>(),
+            vec![
+                Some(STATUS_STATE_COMMAND_ID),
+                Some(STATUS_TIMING_COMMAND_ID),
+                Some(STATUS_RUNNING_FOR_COMMAND_ID),
+                Some(STATUS_NEXT_ACTION_COMMAND_ID),
+                Some(STATUS_OWNERSHIP_COMMAND_ID),
+            ]
+        );
+        assert!(status.iter().all(|item| {
+            item.command_id.is_some_and(|command| {
+                !menu_command_is_enabled_with_pause(
+                    command,
+                    TrayStatus::Stopped,
+                    false,
+                    false,
+                    false,
+                )
+            })
+        }));
     }
 
     #[test]
@@ -1034,6 +1088,23 @@ mod tests {
                 "Clear the current scheduled action",
             ),
             (STATUS_MENU_COMMAND_ID, "View read-only lifecycle details"),
+            (STATUS_STATE_COMMAND_ID, "Current True Tick lifecycle state"),
+            (
+                STATUS_TIMING_COMMAND_ID,
+                "Latest verified effective timing observation",
+            ),
+            (
+                STATUS_RUNNING_FOR_COMMAND_ID,
+                "Elapsed time since verified running",
+            ),
+            (
+                STATUS_NEXT_ACTION_COMMAND_ID,
+                "Scheduled action and remaining time",
+            ),
+            (
+                STATUS_OWNERSHIP_COMMAND_ID,
+                "True Tick ownership versus external timing",
+            ),
             (1004, "Stop safely and quit"),
         ];
         for (command_id, expected) in descriptions {

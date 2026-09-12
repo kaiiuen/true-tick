@@ -2891,7 +2891,7 @@ unsafe fn refresh_popup_menu(app: &mut App) {
                 status_menu,
                 index,
                 MF_BYPOSITION | MF_STRING | MF_GRAYED,
-                0,
+                item.command_id.unwrap_or(0),
                 wide(&item.label).as_ptr(),
             );
         }
@@ -3034,7 +3034,13 @@ unsafe fn append_status_submenu(app: &mut App, menu: *mut c_void) -> bool {
         } else {
             MF_STRING | MF_GRAYED
         };
-        ok &= append_menu_checked(app, submenu, flags, 0, wide(&item.label).as_ptr());
+        ok &= append_menu_checked(
+            app,
+            submenu,
+            flags,
+            item.command_id.unwrap_or(0),
+            wide(&item.label).as_ptr(),
+        );
         if index == 4 {
             app.record(
                 "status.submenu.render",
