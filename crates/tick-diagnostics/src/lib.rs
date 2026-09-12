@@ -48,8 +48,9 @@ impl fmt::Display for StatusRecord {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "status={:?}, evidence={:?}",
-            self.status, self.evidence
+            "status={}, evidence={}",
+            status_label(self.status),
+            evidence_label(self.evidence)
         )
     }
 }
@@ -143,9 +144,140 @@ pub struct DiagnosticEvent {
     pub details: String,
 }
 
+fn status_label(status: Status) -> &'static str {
+    match status {
+        Status::Released => "Released",
+        Status::Active => "Active",
+        Status::Requested => "Requested",
+        Status::Warning => "Warning",
+        Status::Blocked => "Blocked",
+        Status::Error => "Error",
+        Status::Unknown => "Unknown",
+        Status::Unsupported => "Unsupported",
+    }
+}
+
+fn evidence_label(evidence: Evidence) -> &'static str {
+    match evidence {
+        Evidence::NotCollected => "NotCollected",
+        Evidence::Unsupported => "Unsupported",
+        Evidence::Inconclusive => "Inconclusive",
+    }
+}
+
+macro_rules! stable_labels {
+    ($type:ty, { $($variant:path => $label:literal),+ $(,)? }) => {
+        impl fmt::Display for $type {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                let label = match self {
+                    $($variant => $label,)+
+                };
+                formatter.write_str(label)
+            }
+        }
+    };
+}
+
+stable_labels!(DiagnosticPhase, {
+    DiagnosticPhase::Begin => "Begin",
+    DiagnosticPhase::Observe => "Observe",
+    DiagnosticPhase::Decide => "Decide",
+    DiagnosticPhase::Acquire => "Acquire",
+    DiagnosticPhase::Release => "Release",
+    DiagnosticPhase::Verify => "Verify",
+    DiagnosticPhase::Handoff => "Handoff",
+    DiagnosticPhase::Timer => "Timer",
+    DiagnosticPhase::Render => "Render",
+    DiagnosticPhase::Persist => "Persist",
+    DiagnosticPhase::Shutdown => "Shutdown",
+    DiagnosticPhase::Complete => "Complete",
+});
+
+stable_labels!(DiagnosticSource, {
+    DiagnosticSource::TrayCommand => "TrayCommand",
+    DiagnosticSource::PowerEvent => "PowerEvent",
+    DiagnosticSource::Startup => "Startup",
+    DiagnosticSource::Pause => "Pause",
+    DiagnosticSource::Resume => "Resume",
+    DiagnosticSource::Handoff => "Handoff",
+    DiagnosticSource::Shutdown => "Shutdown",
+    DiagnosticSource::Policy => "Policy",
+    DiagnosticSource::Ownership => "Ownership",
+    DiagnosticSource::Platform => "Platform",
+    DiagnosticSource::Native => "Native",
+    DiagnosticSource::Timer => "Timer",
+    DiagnosticSource::Diagnostic => "Diagnostic",
+    DiagnosticSource::Internal => "Internal",
+});
+
+stable_labels!(DiagnosticOutcome, {
+    DiagnosticOutcome::InProgress => "InProgress",
+    DiagnosticOutcome::Completed => "Completed",
+    DiagnosticOutcome::Failed => "Failed",
+    DiagnosticOutcome::Cancelled => "Cancelled",
+    DiagnosticOutcome::Suppressed => "Suppressed",
+    DiagnosticOutcome::TimedOut => "TimedOut",
+    DiagnosticOutcome::Unverified => "Unverified",
+});
+
+pub const REPORT_COLUMNS: [&str; 10] = [
+    "Sequence",
+    "Elapsed",
+    "Operation",
+    "Parent",
+    "Correlation",
+    "Phase",
+    "Source",
+    "Outcome",
+    "Event",
+    "Details",
+];
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticGridRow {
+    pub cells: Vec<String>,
+}
+
+fn optional_number<T: ToString>(value: Option<T>) -> String {
+    value.map_or_else(|| "none".to_owned(), |value| value.to_string())
+}
+
+fn native_details(native: NativeOutcome) -> String {
+    format!(
+        "ntstatus={} win32_last_error={} requested_hns={} selected_hns={} effective_hns={}",
+        optional_number(native.ntstatus),
+        optional_number(native.win32_last_error),
+        optional_number(native.requested_hns),
+        optional_number(native.selected_hns),
+        optional_number(native.effective_hns),
+    )
+}
+
+pub fn diagnostic_grid_row(event: &DiagnosticEvent) -> DiagnosticGridRow {
+    let details = if event.details.is_empty() {
+        native_details(event.native)
+    } else {
+        format!("{} {}", event.details, native_details(event.native))
+    };
+    DiagnosticGridRow {
+        cells: vec![
+            event.sequence.to_string(),
+            format!("+{}ms", event.elapsed.as_millis()),
+            event.operation_id.to_string(),
+            optional_number(event.parent_operation_id),
+            event.correlation_id.to_string(),
+            event.phase.to_string(),
+            event.source.to_string(),
+            event.outcome.to_string(),
+            event.name.clone(),
+            truncate_utf8(&details, MAX_FIELD_LENGTH),
+        ],
+    }
+}
+
 pub fn format_event(event: &DiagnosticEvent) -> String {
     let rendered = format!(
-        "#{:06} +{:>8}ms op={} parent={} corr={} phase={:?} source={:?} outcome={:?} native_ntstatus={} native_win32={} requested_hns={} selected_hns={} effective_hns={} {}{}",
+        "#{:06} +{:>8}ms op={} parent={} corr={} phase={} source={} outcome={} native_ntstatus={} native_win32={} requested_hns={} selected_hns={} effective_hns={} {}{}",
         event.sequence,
         event.elapsed.as_millis(),
         event.operation_id,
@@ -374,6 +506,70 @@ mod tests {
             format_status(record),
             "status=Unsupported, evidence=Unsupported"
         );
+    }
+
+    #[test]
+    fn report_columns_and_typed_grid_row_preserve_operation_lineage() {
+        assert_eq!(REPORT_COLUMNS.len(), 10);
+        assert_eq!(REPORT_COLUMNS[0], "Sequence");
+        assert_eq!(REPORT_COLUMNS[9], "Details");
+        let event = DiagnosticEvent {
+            sequence: 7,
+            elapsed: Duration::from_millis(42),
+            operation_id: 11,
+            parent_operation_id: Some(3),
+            correlation_id: 2,
+            phase: DiagnosticPhase::Release,
+            source: DiagnosticSource::Handoff,
+            outcome: DiagnosticOutcome::Unverified,
+            native: NativeOutcome {
+                ntstatus: Some(-7),
+                win32_last_error: Some(5),
+                requested_hns: Some(5_000),
+                selected_hns: Some(5_000),
+                effective_hns: Some(9_966),
+            },
+            name: "timer.release".to_owned(),
+            details: "command=stop".to_owned(),
+        };
+        let row = diagnostic_grid_row(&event);
+        assert_eq!(row.cells.len(), REPORT_COLUMNS.len());
+        assert_eq!(row.cells[0], "7");
+        assert_eq!(row.cells[1], "+42ms");
+        assert_eq!(row.cells[2], "11");
+        assert_eq!(row.cells[3], "3");
+        assert_eq!(row.cells[4], "2");
+        assert_eq!(row.cells[5], "Release");
+        assert_eq!(row.cells[6], "Handoff");
+        assert_eq!(row.cells[7], "Unverified");
+        assert!(row.cells[9].contains("ntstatus=-7"));
+        assert!(row.cells[9].contains("win32_last_error=5"));
+        assert!(row.cells[9].contains("requested_hns=5000"));
+    }
+
+    #[test]
+    fn grid_details_remain_bounded_and_native_error_types_stay_distinct() {
+        let event = DiagnosticEvent {
+            sequence: 1,
+            elapsed: Duration::ZERO,
+            operation_id: 1,
+            parent_operation_id: None,
+            correlation_id: 1,
+            phase: DiagnosticPhase::Observe,
+            source: DiagnosticSource::Native,
+            outcome: DiagnosticOutcome::Failed,
+            native: NativeOutcome {
+                ntstatus: Some(-1),
+                win32_last_error: Some(5),
+                ..NativeOutcome::default()
+            },
+            name: "query".to_owned(),
+            details: "x".to_owned(),
+        };
+        let row = diagnostic_grid_row(&event);
+        assert!(row.cells[9].len() <= MAX_FIELD_LENGTH + 3);
+        assert!(row.cells[9].contains("ntstatus=-1"));
+        assert!(row.cells[9].contains("win32_last_error=5"));
     }
 
     #[test]

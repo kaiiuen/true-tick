@@ -10,8 +10,9 @@ use std::sync::Arc;
 
 use tick_core::{DesiredIntent, DesiredIntentQueue};
 use tick_diagnostics::{
-    format_event, truncate_utf8, DiagnosticOutcome, DiagnosticPhase, DiagnosticRecord,
+    diagnostic_grid_row, truncate_utf8, DiagnosticOutcome, DiagnosticPhase, DiagnosticRecord,
     DiagnosticSource, DiagnosticStore, NativeOutcome, OperationContext, DEFAULT_MAX_EVENTS,
+    REPORT_COLUMNS,
 };
 use tick_observation_windows::{ObservationSource, WindowsObservation};
 use tick_ownership::{OwnershipState, TimerController, TimingSnapshot, Verification};
@@ -45,6 +46,7 @@ const WM_DESTROY: u32 = 0x0002;
 const WM_POWERBROADCAST: u32 = 0x0218;
 const WM_TIMER: u32 = 0x0113;
 const WM_MENUSELECT: u32 = 0x011F;
+const WM_DIAGNOSTIC_REFRESH: u32 = WM_APP + 2;
 const PBT_APMPOWERSTATUSCHANGE: usize = 0x000A;
 const HANDOFF_TIMER_ID: usize = 0x5449;
 const DURATION_TIMER_ID_BASE: usize = 0x6000;
@@ -79,14 +81,32 @@ const DIAGNOSTIC_MIN_WIDTH: i32 = 420;
 const DIAGNOSTIC_MIN_HEIGHT: i32 = 260;
 const DIAGNOSTIC_WINDOW_TITLE: &str = "True™ Tick Status and Diagnostics";
 const MAX_STARTUP_STATUS_BYTES: usize = 512;
-const MAX_DIAGNOSTIC_TEXT_BYTES: usize = 64 * 1024;
 const DIAGNOSTIC_WINDOW_PARENT: *mut c_void = std::ptr::null_mut();
+const DIAGNOSTIC_SUMMARY_HEIGHT: i32 = 148;
+const DIAGNOSTIC_COLUMN_WIDTHS: [i32; 10] = [70, 78, 78, 70, 86, 82, 90, 86, 160, 240];
 const WS_CHILD: u32 = 0x40000000;
 const WS_VSCROLL: u32 = 0x00200000;
+
 const ES_MULTILINE: u32 = 0x0004;
 const ES_READONLY: u32 = 0x0800;
 const ES_AUTOVSCROLL: u32 = 0x0040;
-const ES_AUTOHSCROLL: u32 = 0x0080;
+
+const LVS_REPORT: u32 = 0x0001;
+const LVS_SINGLESEL: u32 = 0x0004;
+const LVS_SHOWSELALWAYS: u32 = 0x0008;
+const LVS_EX_GRIDLINES: usize = 0x00000001;
+const LVS_EX_FULLROWSELECT: usize = 0x00000020;
+const LVM_FIRST: u32 = 0x1000;
+const LVM_DELETEALLITEMS: u32 = LVM_FIRST + 9;
+const LVM_INSERTITEMW: u32 = LVM_FIRST + 77;
+const LVM_SETITEMTEXTW: u32 = LVM_FIRST + 74;
+const LVM_INSERTCOLUMNW: u32 = LVM_FIRST + 97;
+const LVM_SETEXTENDEDLISTVIEWSTYLE: u32 = LVM_FIRST + 54;
+const LVM_SETCOLUMNWIDTH: u32 = LVM_FIRST + 30;
+const LVIF_TEXT: u32 = 0x0001;
+const LVCF_WIDTH: u32 = 0x0002;
+const LVCF_TEXT: u32 = 0x0004;
+const LVCFMT_LEFT: i32 = 0x0000;
 const TPM_RIGHTBUTTON: u32 = 0x0002;
 const TPM_RETURNCMD: u32 = 0x0100;
 const MF_STRING: u32 = 0x0000;
@@ -102,7 +122,7 @@ const NIM_ADD: u32 = 0x0000;
 const NIM_DELETE: u32 = 0x0002;
 const NIM_MODIFY: u32 = 0x0001;
 const GWLP_USERDATA: i32 = -21;
-const GW_CHILD: u32 = 5;
+
 const IDI_APPLICATION: usize = 32512;
 const MB_ICONWARNING: u32 = 0x0000_0030;
 const MB_YESNO: u32 = 0x0000_0004;
@@ -244,6 +264,35 @@ struct Rect {
 }
 
 #[repr(C)]
+struct ListViewColumn {
+    mask: u32,
+    format: i32,
+    width: i32,
+    text: *mut u16,
+    text_maximum: i32,
+    subitem: i32,
+    image: i32,
+    order: i32,
+}
+
+#[repr(C)]
+struct ListViewItem {
+    mask: u32,
+    item: i32,
+    subitem: i32,
+    state: u32,
+    state_mask: u32,
+    text: *mut u16,
+    text_maximum: i32,
+    image: i32,
+    parameter: isize,
+    indent: i32,
+    group_id: i32,
+    columns: u32,
+    placeholder: *mut c_void,
+}
+
+#[repr(C)]
 struct ToolInfo {
     cb_size: u32,
     flags: u32,
@@ -373,6 +422,9 @@ struct App {
     desired_intent: DesiredIntentQueue,
     diagnostics: Arc<DiagnosticStore>,
     diagnostic_window: Option<*mut c_void>,
+    diagnostic_summary: Option<*mut c_void>,
+    diagnostic_list: Option<*mut c_void>,
+    diagnostic_refresh_pending: bool,
     menu_active: bool,
     popup_menus: Option<PopupMenuHandles>,
     popup_refresh_timer_active: bool,
@@ -538,6 +590,9 @@ pub fn run() {
             desired_intent: DesiredIntentQueue::new(),
             diagnostics,
             diagnostic_window: None,
+            diagnostic_summary: None,
+            diagnostic_list: None,
+            diagnostic_refresh_pending: false,
             menu_active: false,
             popup_menus: None,
             popup_refresh_timer_active: false,
@@ -1870,9 +1925,7 @@ impl App {
             format!("outcome={outcome:?}"),
         );
         self.controller.set_operation_context(None);
-        if let Some(window) = self.diagnostic_window {
-            unsafe { refresh_diagnostic_window(window, self) };
-        }
+        request_diagnostic_refresh(self);
     }
 
     fn record(&mut self, name: &str, details: impl AsRef<str>) {
@@ -1901,9 +1954,7 @@ impl App {
             name,
             details,
         );
-        if let Some(window) = self.diagnostic_window {
-            unsafe { refresh_diagnostic_window(window, self) };
-        }
+        request_diagnostic_refresh(self);
     }
 
     fn publish(&mut self) {
@@ -3318,44 +3369,193 @@ unsafe fn open_diagnostic_window(app: &mut App) {
     }
 }
 
-unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &App) {
-    let edit = GetWindow(window, GW_CHILD);
-    if edit.is_null() {
+fn power_state_label(power: PowerState) -> &'static str {
+    match power {
+        PowerState::Ac => "AC",
+        PowerState::Battery => "Battery",
+        PowerState::BatterySaver => "Battery Saver",
+        PowerState::Unknown => "Unknown",
+    }
+}
+
+fn diagnostic_summary_text(app: &App) -> String {
+    let status = status_menu_items(
+        app.lifecycle_status(),
+        app.timing_values(),
+        app.controller.ownership(),
+        app.pause.current(),
+        app.running_duration(),
+        std::time::Instant::now(),
+    );
+    let retained = app.diagnostics.snapshot().len();
+    format!(
+        "{}\r\n{}\r\n{}\r\n{}\r\nPower: {}\r\nStartup: {}\r\nRetained events: {}/{}\r\nDiagnostics are session-local. Newest retained events are shown after the {}-event cap. Timing is current only when the latest observation is valid, otherwise it is Unknown.\r\n",
+        status[0].label,
+        status[1].label,
+        status[2].label,
+        status[3].label,
+        power_state_label(app.observation.power().state),
+        app.startup_status,
+        retained,
+        app.diagnostics.maximum_events(),
+        app.diagnostics.maximum_events(),
+    )
+}
+
+fn scale_logical(value: i32, dpi: u32) -> i32 {
+    value.saturating_mul(dpi as i32).saturating_add(95) / 96
+}
+
+unsafe fn layout_diagnostic_controls(window: *mut c_void, app: &App) {
+    let mut client = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    if GetClientRect(window, &mut client) == 0 {
         return;
     }
-    let timing_details = match app.timing_snapshot.effective {
-        Some(effective) => format!(
-            "Timing observation: {} requested_hns={} selected_hns={} effective_hns={} minimum_hns={} maximum_hns={} raw_status={} effective_relation={}\r\n",
-            tooltip(app.lifecycle_status(), app.timing_values()),
-            app.timing_snapshot.requested.map_or_else(|| "unknown".to_owned(), |value| value.value().to_string()),
-            app.timing_snapshot.selected.map_or_else(|| "unknown".to_owned(), |value| value.value().to_string()),
-            effective.value(),
-            app.timing_snapshot.minimum_interval.map_or_else(|| "unknown".to_owned(), |value| value.value().to_string()),
-            app.timing_snapshot.maximum_interval.map_or_else(|| "unknown".to_owned(), |value| value.value().to_string()),
-            app.timing_snapshot.raw_status.map_or_else(|| "unknown".to_owned(), |value| value.to_string()),
-            app.timing_snapshot.effective_relation().unwrap_or("unknown")
-        ),
-        None => "Timing observation: unknown\r\n".to_owned(),
-    };
-    let mut text = format!(
-        "Current status: {}\r\n{}Power observation: {:?}\r\nStartup: {}\r\nSession log is local to this process. Maximum events: {}\r\n\r\n",
-        tooltip(app.tray_status, app.timing_values()),
-        timing_details,
-        app.observation.power().state,
-        app.startup_status,
-        app.diagnostics.maximum_events()
-    );
-    for event in app.diagnostics.snapshot() {
-        text.push_str(&format_event(&event));
-        text.push_str("\r\n");
+    let width = (client.right - client.left).max(0);
+    let height = (client.bottom - client.top).max(0);
+    let dpi = GetDpiForWindow(window).max(96);
+    let summary_height = scale_logical(DIAGNOSTIC_SUMMARY_HEIGHT, dpi)
+        .min(height.saturating_sub(scale_logical(100, dpi)).max(0));
+    if let Some(summary) = app.diagnostic_summary {
+        let _ = MoveWindow(summary, 0, 0, width, summary_height, 1);
     }
-    let text = truncate_utf8(&text, MAX_DIAGNOSTIC_TEXT_BYTES);
-    let text = wide(&text);
-    if SetWindowTextW(edit, text.as_ptr()) == 0 {
-        app.diagnostics.record(
-            "native.SetWindowTextW.edit.error",
-            format!("raw_status={}", GetLastError()),
+    if let Some(list) = app.diagnostic_list {
+        let _ = MoveWindow(
+            list,
+            0,
+            summary_height,
+            width,
+            height.saturating_sub(summary_height),
+            1,
         );
+        let fixed_width: i32 = DIAGNOSTIC_COLUMN_WIDTHS[..9]
+            .iter()
+            .map(|value| scale_logical(*value, dpi))
+            .sum();
+        for (index, logical_width) in DIAGNOSTIC_COLUMN_WIDTHS.iter().enumerate() {
+            let column_width = if index == 9 {
+                scale_logical(240, dpi).max(width.saturating_sub(fixed_width))
+            } else {
+                scale_logical(*logical_width, dpi)
+            };
+            let _ = SendMessageW(list, LVM_SETCOLUMNWIDTH, index, column_width as isize);
+        }
+    }
+}
+
+unsafe fn initialize_diagnostic_list(list: *mut c_void) -> bool {
+    let _ = SendMessageW(
+        list,
+        LVM_SETEXTENDEDLISTVIEWSTYLE,
+        LVS_EX_GRIDLINES | LVS_EX_FULLROWSELECT,
+        (LVS_EX_GRIDLINES | LVS_EX_FULLROWSELECT) as isize,
+    );
+    for (index, label) in REPORT_COLUMNS.iter().enumerate() {
+        let mut text = wide(label);
+        let column = ListViewColumn {
+            mask: LVCF_TEXT | LVCF_WIDTH,
+            format: LVCFMT_LEFT,
+            width: DIAGNOSTIC_COLUMN_WIDTHS[index],
+            text: text.as_mut_ptr(),
+            text_maximum: text.len() as i32,
+            subitem: index as i32,
+            image: 0,
+            order: index as i32,
+        };
+        if SendMessageW(
+            list,
+            LVM_INSERTCOLUMNW,
+            index,
+            (&column as *const ListViewColumn).cast::<c_void>() as isize,
+        ) < 0
+        {
+            return false;
+        }
+    }
+    true
+}
+
+unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &App) {
+    if let Some(summary) = app.diagnostic_summary {
+        let text = wide(&diagnostic_summary_text(app));
+        let _ = SetWindowTextW(summary, text.as_ptr());
+    }
+    let Some(list) = app.diagnostic_list else {
+        return;
+    };
+    let _ = SendMessageW(list, LVM_DELETEALLITEMS, 0, 0);
+    for (row_index, event) in app.diagnostics.snapshot().iter().enumerate() {
+        let row = diagnostic_grid_row(event);
+        let mut first = wide(&row.cells[0]);
+        let item = ListViewItem {
+            mask: LVIF_TEXT,
+            item: row_index as i32,
+            subitem: 0,
+            state: 0,
+            state_mask: 0,
+            text: first.as_mut_ptr(),
+            text_maximum: first.len() as i32,
+            image: 0,
+            parameter: 0,
+            indent: 0,
+            group_id: 0,
+            columns: 0,
+            placeholder: std::ptr::null_mut(),
+        };
+        if SendMessageW(
+            list,
+            LVM_INSERTITEMW,
+            0,
+            (&item as *const ListViewItem).cast::<c_void>() as isize,
+        ) < 0
+        {
+            break;
+        }
+        for (column_index, value) in row.cells.iter().enumerate().skip(1) {
+            let mut text = wide(value);
+            let mut cell = ListViewItem {
+                mask: LVIF_TEXT,
+                item: row_index as i32,
+                subitem: column_index as i32,
+                state: 0,
+                state_mask: 0,
+                text: text.as_mut_ptr(),
+                text_maximum: text.len() as i32,
+                image: 0,
+                parameter: 0,
+                indent: 0,
+                group_id: 0,
+                columns: 0,
+                placeholder: std::ptr::null_mut(),
+            };
+            let _ = SendMessageW(
+                list,
+                LVM_SETITEMTEXTW,
+                row_index,
+                (&mut cell as *mut ListViewItem).cast::<c_void>() as isize,
+            );
+        }
+    }
+    layout_diagnostic_controls(window, app);
+}
+
+fn request_diagnostic_refresh(app: &mut App) {
+    let Some(window) = app.diagnostic_window else {
+        return;
+    };
+    if app.diagnostic_refresh_pending {
+        return;
+    }
+    app.diagnostic_refresh_pending = true;
+    unsafe {
+        if PostMessageW(window, WM_DIAGNOSTIC_REFRESH, 0, 0) == 0 {
+            app.diagnostic_refresh_pending = false;
+        }
     }
 }
 
@@ -3369,9 +3569,10 @@ unsafe extern "system" fn diagnostic_window_proc(
     if message == WM_CREATE {
         let create = l_param as *const CreateStruct;
         let app_ptr = app_create_params(create);
+        let app = app_ptr as *mut App;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, app_ptr as isize);
         let edit_class = wide("EDIT");
-        let edit = CreateWindowExW(
+        let summary = CreateWindowExW(
             0,
             edit_class.as_ptr(),
             std::ptr::null(),
@@ -3382,47 +3583,83 @@ unsafe extern "system" fn diagnostic_window_proc(
                 | ES_MULTILINE
                 | ES_READONLY
                 | WS_BORDER
-                | ES_AUTOVSCROLL
-                | ES_AUTOHSCROLL,
+                | ES_AUTOVSCROLL,
             0,
             0,
             800,
-            500,
+            DIAGNOSTIC_SUMMARY_HEIGHT,
             hwnd,
             std::ptr::null_mut(),
             GetModuleHandleW(std::ptr::null()),
             std::ptr::null_mut(),
         );
-        if edit.is_null() {
+        let list_class = wide("SysListView32");
+        let list = CreateWindowExW(
+            0,
+            list_class.as_ptr(),
+            std::ptr::null(),
+            WS_CHILD
+                | WS_VISIBLE
+                | WS_CLIPCHILDREN
+                | WS_BORDER
+                | LVS_REPORT
+                | LVS_SINGLESEL
+                | LVS_SHOWSELALWAYS,
+            0,
+            DIAGNOSTIC_SUMMARY_HEIGHT,
+            800,
+            400,
+            hwnd,
+            std::ptr::null_mut(),
+            GetModuleHandleW(std::ptr::null()),
+            std::ptr::null_mut(),
+        );
+        if summary.is_null() || list.is_null() {
             if !app_ptr.is_null() {
                 (*(app_ptr as *mut App)).diagnostics.record(
-                    "native.CreateWindowExW.diagnostic_edit.error",
-                    format!("raw_status={}", GetLastError()),
+                    "native.CreateWindowExW.diagnostic_control.error",
+                    format!(
+                        "summary_null={} list_null={} raw_status={}",
+                        summary.is_null(),
+                        list.is_null(),
+                        GetLastError()
+                    ),
                 );
+            }
+            if !summary.is_null() {
+                DestroyWindow(summary);
+            }
+            if !list.is_null() {
+                DestroyWindow(list);
             }
             return 1;
         }
+        if !initialize_diagnostic_list(list) {
+            if !app_ptr.is_null() {
+                (*(app_ptr as *mut App)).diagnostics.record(
+                    "native.ListView.insert_column.error",
+                    format!("raw_status={}", GetLastError()),
+                );
+            }
+            DestroyWindow(summary);
+            DestroyWindow(list);
+            return 1;
+        }
         if !app_ptr.is_null() {
-            refresh_diagnostic_window(hwnd, &*(app_ptr as *mut App));
+            (*app).diagnostic_summary = Some(summary);
+            (*app).diagnostic_list = Some(list);
+            layout_diagnostic_controls(hwnd, &*app);
+            refresh_diagnostic_window(hwnd, &*app);
         }
         return 0;
     }
     if !app.is_null() {
-        if message == WM_SIZE {
-            let width = (l_param as u32 & 0xffff) as i32;
-            let height = ((l_param as u32 >> 16) & 0xffff) as i32;
-            let edit = GetWindow(hwnd, GW_CHILD);
-            if edit.is_null() {
-                (*app).diagnostics.record(
-                    "native.GetWindow.edit.error",
-                    format!("raw_status={}", GetLastError()),
-                );
-            } else if MoveWindow(edit, 0, 0, width, height, 1) == 0 {
-                (*app).diagnostics.record(
-                    "native.MoveWindow.error",
-                    format!("raw_status={}", GetLastError()),
-                );
-            }
+        if message == WM_DIAGNOSTIC_REFRESH {
+            (*app).diagnostic_refresh_pending = false;
+            refresh_diagnostic_window(hwnd, &*app);
+            return 0;
+        } else if message == WM_SIZE {
+            layout_diagnostic_controls(hwnd, &*app);
         } else if message == WM_GETMINMAXINFO {
             let limits = l_param as *mut MinMaxInfo;
             if !limits.is_null() {
@@ -3434,11 +3671,12 @@ unsafe extern "system" fn diagnostic_window_proc(
             DestroyWindow(hwnd);
             return 0;
         } else if message == WM_SETFOCUS {
-            if !app.is_null() {
-                refresh_diagnostic_window(hwnd, &*app);
-            }
+            request_diagnostic_refresh(&mut *app);
         } else if message == WM_NCDESTROY {
             (*app).diagnostic_window = None;
+            (*app).diagnostic_summary = None;
+            (*app).diagnostic_list = None;
+            (*app).diagnostic_refresh_pending = false;
         }
     }
     DefWindowProcW(hwnd, message, w_param, l_param)
@@ -3887,6 +4125,7 @@ extern "system" {
     fn IsWindow(window: *mut c_void) -> i32;
     fn IsIconic(window: *mut c_void) -> i32;
     fn PostQuitMessage(code: i32);
+    fn PostMessageW(hwnd: *mut c_void, message: u32, w: usize, l: isize) -> i32;
     fn SetTimer(
         hwnd: *mut c_void,
         event_id: usize,
@@ -3926,8 +4165,9 @@ extern "system" {
     fn DestroyWindow(window: *mut c_void) -> i32;
     fn ShowWindow(window: *mut c_void, command: i32) -> i32;
     fn UpdateWindow(window: *mut c_void) -> i32;
-    fn GetWindow(window: *mut c_void, command: u32) -> *mut c_void;
+
     fn SetWindowTextW(window: *mut c_void, text: *const u16) -> i32;
+    fn GetClientRect(window: *mut c_void, rect: *mut Rect) -> i32;
     fn SendMessageW(hwnd: *mut c_void, message: u32, w: usize, l: isize) -> isize;
     fn MoveWindow(
         window: *mut c_void,
