@@ -89,6 +89,37 @@ const TASKDIALOG_BUTTON_CANCEL: i32 = 2001;
 const TASKDIALOG_BUTTON_STOP_AND_QUIT: i32 = 2002;
 const TASKDIALOG_ICON_WARNING: *const u16 = (-1isize) as *const u16;
 const TDF_ALLOW_DIALOG_CANCELLATION: u32 = 0x0008;
+const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeResult {
+    Succeeded,
+    Failed { raw_error: u32 },
+}
+
+fn native_bool_result(result: i32, raw_error: u32) -> NativeResult {
+    if result == 0 {
+        NativeResult::Failed { raw_error }
+    } else {
+        NativeResult::Succeeded
+    }
+}
+
+fn native_handle_result(is_null: bool, raw_error: u32) -> NativeResult {
+    if is_null {
+        NativeResult::Failed { raw_error }
+    } else {
+        NativeResult::Succeeded
+    }
+}
+
+fn class_registration_result(atom: u16, raw_error: u32) -> NativeResult {
+    if atom != 0 || raw_error == ERROR_CLASS_ALREADY_EXISTS {
+        NativeResult::Succeeded
+    } else {
+        NativeResult::Failed { raw_error }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum QuitDecision {
@@ -420,19 +451,58 @@ pub fn run() {
         let app_ptr = Box::into_raw(app);
         let app = &mut *app_ptr;
         let class_name = wide("TrueTickTrayClass");
+        let instance = GetModuleHandleW(std::ptr::null());
+        if instance.is_null() {
+            app.record(
+                "native.GetModuleHandleW.error",
+                format!("raw_status={}", GetLastError()),
+            );
+            abort_startup(
+                app_ptr,
+                "True Tick could not obtain its native module handle.",
+            );
+            return;
+        }
         let wnd_class = WndClass {
             style: 0,
             wnd_proc: Some(window_proc),
             cls_extra: 0,
             wnd_extra: 0,
-            instance: GetModuleHandleW(std::ptr::null()),
+            instance,
             icon: LoadIconW(std::ptr::null_mut(), IDI_APPLICATION as *const u16),
             cursor: std::ptr::null_mut(),
             background: std::ptr::null_mut(),
             menu_name: std::ptr::null(),
             class_name: class_name.as_ptr(),
         };
-        RegisterClassW(&wnd_class);
+        let tray_class_atom = RegisterClassW(&wnd_class);
+        let tray_class_error = if tray_class_atom == 0 {
+            GetLastError()
+        } else {
+            0
+        };
+        if !matches!(
+            class_registration_result(tray_class_atom, tray_class_error),
+            NativeResult::Succeeded
+        ) {
+            app.record(
+                "native.RegisterClassW.tray.error",
+                format!("raw_status={tray_class_error}"),
+            );
+            abort_startup(app_ptr, "True Tick could not create its tray window class.");
+            return;
+        }
+        if wnd_class.icon.is_null() {
+            app.record(
+                "native.LoadIconW.error",
+                format!("raw_status={}", GetLastError()),
+            );
+            abort_startup(
+                app_ptr,
+                "True Tick could not create its tray icon resource.",
+            );
+            return;
+        }
         let diagnostic_class_name = wide("TrueTickDiagnosticClass");
         let diagnostic_class = WndClass {
             style: 0,
@@ -446,7 +516,26 @@ pub fn run() {
             menu_name: std::ptr::null(),
             class_name: diagnostic_class_name.as_ptr(),
         };
-        RegisterClassW(&diagnostic_class);
+        let diagnostic_class_atom = RegisterClassW(&diagnostic_class);
+        let diagnostic_class_error = if diagnostic_class_atom == 0 {
+            GetLastError()
+        } else {
+            0
+        };
+        if !matches!(
+            class_registration_result(diagnostic_class_atom, diagnostic_class_error),
+            NativeResult::Succeeded
+        ) {
+            app.record(
+                "native.RegisterClassW.diagnostic.error",
+                format!("raw_status={diagnostic_class_error}"),
+            );
+            abort_startup(
+                app_ptr,
+                "True Tick could not create its diagnostic window class.",
+            );
+            return;
+        }
         let hwnd = CreateWindowExW(
             0,
             class_name.as_ptr(),
@@ -461,8 +550,43 @@ pub fn run() {
             wnd_class.instance,
             app_ptr as *mut c_void,
         );
-        let mut icon = NotifyIconData::new(hwnd, app.tray_status, app.timing_values());
-        Shell_NotifyIconW(NIM_ADD, &mut icon);
+        let hwnd_error = if hwnd.is_null() { GetLastError() } else { 0 };
+        if !matches!(
+            native_handle_result(hwnd.is_null(), hwnd_error),
+            NativeResult::Succeeded
+        ) {
+            app.record(
+                "native.CreateWindowExW.tray.error",
+                format!("raw_status={hwnd_error}"),
+            );
+            abort_startup(app_ptr, "True Tick could not create its tray window.");
+            return;
+        }
+        let mut icon = match NotifyIconData::new(hwnd, app.tray_status, app.timing_values()) {
+            Ok(icon) => icon,
+            Err(raw_error) => {
+                app.record(
+                    "native.tray_icon.create.error",
+                    format!("raw_status={raw_error}"),
+                );
+                abort_after_window(app_ptr, hwnd, "True Tick could not create its tray icon.");
+                return;
+            }
+        };
+        let add_result = Shell_NotifyIconW(NIM_ADD, &mut icon);
+        let add_error = if add_result == 0 { GetLastError() } else { 0 };
+        if matches!(
+            native_bool_result(add_result, add_error),
+            NativeResult::Failed { .. }
+        ) {
+            app.record(
+                "native.Shell_NotifyIconW.add.error",
+                format!("raw_status={add_error}"),
+            );
+            drop(icon);
+            abort_after_window(app_ptr, hwnd, "True Tick could not add its tray icon.");
+            return;
+        }
         app.tray_icon = Some(icon);
         if app.config.automatic {
             app.record("policy.startup_automatic", "enabled=true");
@@ -549,6 +673,24 @@ pub fn run() {
         );
         drop(Box::from_raw(app_ptr));
     }
+}
+
+unsafe fn abort_startup(app_ptr: *mut App, message: &str) {
+    let app = Box::from_raw(app_ptr);
+    app.diagnostics.record("lifecycle.startup.abort", message);
+    drop(app);
+    show_shutdown_warning(std::ptr::null_mut(), message);
+}
+
+unsafe fn abort_after_window(app_ptr: *mut App, hwnd: *mut c_void, message: &str) {
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+    if IsWindow(hwnd) != 0 {
+        DestroyWindow(hwnd);
+    }
+    let app = Box::from_raw(app_ptr);
+    app.diagnostics.record("lifecycle.startup.abort", message);
+    drop(app);
+    show_shutdown_warning(std::ptr::null_mut(), message);
 }
 
 unsafe fn run_message_loop() -> MessageLoopExit {
@@ -808,7 +950,12 @@ impl App {
             format!("status={:?} tooltip={status_text}", self.tray_status),
         );
         if let Some(icon) = self.tray_icon.as_mut() {
-            update_icon(icon, self.tray_status, timing);
+            if let Err(raw_error) = update_icon(icon, self.tray_status, timing) {
+                self.record(
+                    "native.Shell_NotifyIconW.modify.error",
+                    format!("raw_status={raw_error}"),
+                );
+            }
         }
     }
 }
@@ -832,12 +979,14 @@ fn refresh_timing_observation(app: &mut App) {
     }
 }
 
-fn update_icon(icon: &mut NotifyIconData, status: TrayStatus, timing: TimingValues) {
-    let replacement = unsafe { status_icon(status, dpi_for_window(icon.h_wnd)) };
-    if replacement.is_null() {
-        return;
-    }
+fn update_icon(
+    icon: &mut NotifyIconData,
+    status: TrayStatus,
+    timing: TimingValues,
+) -> Result<(), u32> {
+    let replacement = unsafe { status_icon(status, dpi_for_window(icon.h_wnd)) }?;
     let old_icon = icon.h_icon;
+    let old_tip = icon.sz_tip;
     icon.h_icon = replacement;
     icon.sz_tip = [0; 128];
     for (target, source) in icon
@@ -847,20 +996,42 @@ fn update_icon(icon: &mut NotifyIconData, status: TrayStatus, timing: TimingValu
     {
         *target = source;
     }
-    unsafe {
-        Shell_NotifyIconW(NIM_MODIFY, icon);
-        destroy_icon(old_icon);
+    let result = unsafe { Shell_NotifyIconW(NIM_MODIFY, icon) };
+    let raw_error = if result == 0 {
+        unsafe { GetLastError() }
+    } else {
+        0
+    };
+    if matches!(
+        native_bool_result(result, raw_error),
+        NativeResult::Failed { .. }
+    ) {
+        icon.h_icon = old_icon;
+        icon.sz_tip = old_tip;
+        unsafe { destroy_icon(replacement) };
+        Err(raw_error)
+    } else {
+        unsafe { destroy_icon(old_icon) };
+        Ok(())
     }
 }
 
-unsafe fn status_icon(status: TrayStatus, dpi: u32) -> *mut c_void {
+unsafe fn status_icon(status: TrayStatus, dpi: u32) -> Result<*mut c_void, u32> {
     let color = icon_pixel_color(status);
     let canvas = dpi_to_icon_canvas(dpi);
     let pixel_count = (canvas * canvas) as usize;
     let pixels = vec![color; pixel_count];
     let mask = vec![0u8; pixel_count / 8];
     let bitmap = CreateBitmap(canvas, canvas, 1, 32, pixels.as_ptr() as *const c_void);
+    if bitmap.is_null() {
+        return Err(GetLastError());
+    }
     let mask_bitmap = CreateBitmap(canvas, canvas, 1, 1, mask.as_ptr() as *const c_void);
+    if mask_bitmap.is_null() {
+        let raw_error = GetLastError();
+        DeleteObject(bitmap);
+        return Err(raw_error);
+    }
     let info = IconInfo {
         f_icon: 1,
         x_hotspot: 0,
@@ -869,9 +1040,15 @@ unsafe fn status_icon(status: TrayStatus, dpi: u32) -> *mut c_void {
         h_bm_color: bitmap,
     };
     let icon = CreateIconIndirect(&info);
+    if icon.is_null() {
+        let raw_error = GetLastError();
+        DeleteObject(bitmap);
+        DeleteObject(mask_bitmap);
+        return Err(raw_error);
+    }
     DeleteObject(bitmap);
     DeleteObject(mask_bitmap);
-    icon
+    Ok(icon)
 }
 
 fn dpi_for_window(window: *mut c_void) -> u32 {
@@ -950,9 +1127,23 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
     }
     app.menu_active = true;
     let mut anchor = Point { x: 0, y: 0 };
-    GetCursorPos(&mut anchor);
+    if GetCursorPos(&mut anchor) == 0 {
+        app.record(
+            "native.GetCursorPos.error",
+            format!("raw_status={}", GetLastError()),
+        );
+        app.menu_active = false;
+        return;
+    }
     loop {
         let menu = CreatePopupMenu();
+        if menu.is_null() {
+            app.record(
+                "native.CreatePopupMenu.error",
+                format!("raw_status={}", GetLastError()),
+            );
+            break;
+        }
         let items = menu_items(
             app.tray_status,
             app.config.startup_enabled,
@@ -978,25 +1169,62 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
         } else {
             ID_AUTOMATIC_ON
         };
-        AppendMenuW(menu, start_flags, ID_START, wide(items[0].label).as_ptr());
-        AppendMenuW(menu, stop_flags, ID_STOP, wide(items[1].label).as_ptr());
-        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-        AppendMenuW(menu, MF_STRING, startup_id, wide(items[2].label).as_ptr());
-        AppendMenuW(menu, MF_STRING, automatic_id, wide(items[3].label).as_ptr());
-        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-        AppendMenuW(
+        let menu_ok = append_menu_checked(
+            app,
             menu,
-            MF_STRING,
-            STATUS_COMMAND_ID,
-            wide(&format!(
-                "Status: {}",
-                tooltip(app.tray_status, app.timing_values())
-            ))
-            .as_ptr(),
-        );
-        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-        AppendMenuW(menu, MF_STRING, ID_QUIT, wide(items[5].label).as_ptr());
-        SetForegroundWindow(hwnd);
+            start_flags,
+            ID_START,
+            wide(items[0].label).as_ptr(),
+        ) && append_menu_checked(
+            app,
+            menu,
+            stop_flags,
+            ID_STOP,
+            wide(items[1].label).as_ptr(),
+        ) && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
+            && append_menu_checked(
+                app,
+                menu,
+                MF_STRING,
+                startup_id,
+                wide(items[2].label).as_ptr(),
+            )
+            && append_menu_checked(
+                app,
+                menu,
+                MF_STRING,
+                automatic_id,
+                wide(items[3].label).as_ptr(),
+            )
+            && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
+            && append_menu_checked(
+                app,
+                menu,
+                MF_STRING,
+                STATUS_COMMAND_ID,
+                wide(&format!(
+                    "Status: {}",
+                    tooltip(app.tray_status, app.timing_values())
+                ))
+                .as_ptr(),
+            )
+            && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
+            && append_menu_checked(app, menu, MF_STRING, ID_QUIT, wide(items[5].label).as_ptr());
+        if !menu_ok {
+            if DestroyMenu(menu) == 0 {
+                app.record(
+                    "native.DestroyMenu.error",
+                    format!("raw_status={}", GetLastError()),
+                );
+            }
+            break;
+        }
+        if SetForegroundWindow(hwnd) == 0 {
+            app.record(
+                "native.SetForegroundWindow.error",
+                format!("raw_status={}", GetLastError()),
+            );
+        }
         let command = TrackPopupMenu(
             menu,
             TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_RETURNCMD,
@@ -1006,7 +1234,18 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
             hwnd,
             std::ptr::null(),
         );
-        DestroyMenu(menu);
+        if DestroyMenu(menu) == 0 {
+            app.record(
+                "native.DestroyMenu.error",
+                format!("raw_status={}", GetLastError()),
+            );
+        }
+        if command == 0 {
+            app.record(
+                "native.TrackPopupMenu.result",
+                format!("result=empty raw_status={}", GetLastError()),
+            );
+        }
         let Some(command) = returned_menu_command(command) else {
             break;
         };
@@ -1021,6 +1260,29 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
         }
     }
     app.menu_active = false;
+}
+
+unsafe fn append_menu_checked(
+    app: &mut App,
+    menu: *mut c_void,
+    flags: u32,
+    command: usize,
+    text: *const u16,
+) -> bool {
+    let result = AppendMenuW(menu, flags, command, text);
+    let raw_error = if result == 0 { GetLastError() } else { 0 };
+    if matches!(
+        native_bool_result(result, raw_error),
+        NativeResult::Succeeded
+    ) {
+        true
+    } else {
+        app.record(
+            "native.AppendMenuW.error",
+            format!("command={command} raw_status={raw_error}"),
+        );
+        false
+    }
 }
 
 unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) -> bool {
@@ -1192,9 +1454,19 @@ unsafe fn open_diagnostic_window(app: &mut App) {
         app as *mut App as *mut c_void,
     );
     if window.is_null() {
-        app.record("diagnostic.window.result", "result=create_failed");
+        app.record(
+            "diagnostic.window.result",
+            format!("result=create_failed raw_status={}", GetLastError()),
+        );
     } else {
-        SetWindowTextW(window, title.as_ptr());
+        if SetWindowTextW(window, title.as_ptr()) == 0 {
+            app.record(
+                "native.SetWindowTextW.diagnostic.error",
+                format!("raw_status={}", GetLastError()),
+            );
+            DestroyWindow(window);
+            return;
+        }
         ShowWindow(window, SW_SHOWNORMAL);
         UpdateWindow(window);
         SetForegroundWindow(window);
@@ -1245,7 +1517,12 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &App) {
     }
     let text = truncate_utf8(&text, MAX_DIAGNOSTIC_TEXT_BYTES);
     let text = wide(&text);
-    SetWindowTextW(edit, text.as_ptr());
+    if SetWindowTextW(edit, text.as_ptr()) == 0 {
+        app.diagnostics.record(
+            "native.SetWindowTextW.edit.error",
+            format!("raw_status={}", GetLastError()),
+        );
+    }
 }
 
 unsafe extern "system" fn diagnostic_window_proc(
@@ -1282,17 +1559,36 @@ unsafe extern "system" fn diagnostic_window_proc(
             GetModuleHandleW(std::ptr::null()),
             std::ptr::null_mut(),
         );
+        if edit.is_null() {
+            if !app_ptr.is_null() {
+                (*(app_ptr as *mut App)).diagnostics.record(
+                    "native.CreateWindowExW.diagnostic_edit.error",
+                    format!("raw_status={}", GetLastError()),
+                );
+            }
+            return 1;
+        }
         if !app_ptr.is_null() {
             refresh_diagnostic_window(hwnd, &*(app_ptr as *mut App));
         }
-        return if edit.is_null() { 1 } else { 0 };
+        return 0;
     }
     if !app.is_null() {
         if message == WM_SIZE {
             let width = (l_param as u32 & 0xffff) as i32;
             let height = ((l_param as u32 >> 16) & 0xffff) as i32;
             let edit = GetWindow(hwnd, GW_CHILD);
-            MoveWindow(edit, 0, 0, width, height, 1);
+            if edit.is_null() {
+                (*app).diagnostics.record(
+                    "native.GetWindow.edit.error",
+                    format!("raw_status={}", GetLastError()),
+                );
+            } else if MoveWindow(edit, 0, 0, width, height, 1) == 0 {
+                (*app).diagnostics.record(
+                    "native.MoveWindow.error",
+                    format!("raw_status={}", GetLastError()),
+                );
+            }
         } else if message == WM_GETMINMAXINFO {
             let limits = l_param as *mut MinMaxInfo;
             if !limits.is_null() {
@@ -1668,14 +1964,14 @@ impl Drop for NotifyIconData {
 }
 
 impl NotifyIconData {
-    fn new(hwnd: *mut c_void, status: TrayStatus, timing: TimingValues) -> Self {
+    fn new(hwnd: *mut c_void, status: TrayStatus, timing: TimingValues) -> Result<Self, u32> {
         let mut value = Self {
             cb_size: size_of::<Self>() as u32,
             h_wnd: hwnd,
             u_id: 1,
             u_flags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
             u_callback_message: WM_TRAY,
-            h_icon: unsafe { status_icon(status, dpi_for_window(hwnd)) },
+            h_icon: unsafe { status_icon(status, dpi_for_window(hwnd)) }?,
             sz_tip: [0; 128],
             dw_state: 0,
             dw_state_mask: 0,
@@ -1693,7 +1989,7 @@ impl NotifyIconData {
         {
             *target = source;
         }
-        value
+        Ok(value)
     }
 }
 
@@ -1839,6 +2135,33 @@ extern "system" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_result_mapping_preserves_success_and_raw_failure_codes() {
+        assert_eq!(native_bool_result(1, 0), NativeResult::Succeeded);
+        assert_eq!(
+            native_bool_result(0, 5),
+            NativeResult::Failed { raw_error: 5 }
+        );
+        assert_eq!(native_handle_result(false, 0), NativeResult::Succeeded);
+        assert_eq!(
+            native_handle_result(true, 6),
+            NativeResult::Failed { raw_error: 6 }
+        );
+    }
+
+    #[test]
+    fn class_registration_accepts_existing_class_and_rejects_other_failures() {
+        assert_eq!(class_registration_result(1, 0), NativeResult::Succeeded);
+        assert_eq!(
+            class_registration_result(0, ERROR_CLASS_ALREADY_EXISTS),
+            NativeResult::Succeeded
+        );
+        assert_eq!(
+            class_registration_result(0, 5),
+            NativeResult::Failed { raw_error: 5 }
+        );
+    }
 
     #[test]
     fn returned_popup_command_is_dispatched_once_as_an_optional_id() {
