@@ -11,11 +11,12 @@ use std::sync::Arc;
 use tick_core::{DesiredIntent, DesiredIntentQueue};
 use tick_diagnostics::{
     diagnostic_grid_rows, diagnostic_grid_rows_for_sequences, format_tsv, latest_row_selection,
-    parse_display_limit, parse_row_selection, row_selection_for_sequences,
+    parse_display_limit, parse_row_selection, retention_summary, row_selection_for_sequences,
     selected_event_sequences, selected_event_sequences_for_positions,
-    selected_event_sequences_for_sequences, truncate_utf8, visible_positions_for_sequences,
-    DiagnosticOutcome, DiagnosticPhase, DiagnosticRecord, DiagnosticSource, DiagnosticStore,
-    NativeOutcome, OperationContext, RowSelection, DEFAULT_MAX_EVENTS, REPORT_COLUMNS,
+    selected_event_sequences_for_sequences, snapshot_is_truncated, truncate_utf8,
+    visible_positions_for_sequences, DiagnosticOutcome, DiagnosticPhase, DiagnosticRecord,
+    DiagnosticSource, DiagnosticStore, NativeOutcome, OperationContext, RowSelection,
+    DEFAULT_MAX_EVENTS, REPORT_COLUMNS,
 };
 use tick_observation_windows::{ObservationSource, WindowsObservation};
 use tick_ownership::{OwnershipState, TimerController, TimingSnapshot, Verification};
@@ -2175,10 +2176,17 @@ impl App {
             context.parent_operation_id,
             context.correlation_id,
         )));
-        self.record(
+        self.diagnostics.record_with_context(
+            DiagnosticRecord {
+                context,
+                phase: DiagnosticPhase::Begin,
+                source,
+                outcome: DiagnosticOutcome::InProgress,
+                native: NativeOutcome::default(),
+            },
             "operation.begin",
             format!(
-                "source={source:?} parent_operation_id={:?}",
+                "source={source:?} phase=begin outcome=in_progress parent_operation_id={:?}",
                 context.parent_operation_id
             ),
         );
@@ -2305,7 +2313,17 @@ impl App {
             context.parent_operation_id,
             context.correlation_id,
         )));
-        self.record("operation.begin", format!("source={source:?}"));
+        self.diagnostics.record_with_context(
+            DiagnosticRecord {
+                context,
+                phase: DiagnosticPhase::Begin,
+                source,
+                outcome: DiagnosticOutcome::InProgress,
+                native: NativeOutcome::default(),
+            },
+            "operation.begin",
+            format!("source={source:?} phase=begin outcome=in_progress"),
+        );
         context
     }
 
@@ -3578,12 +3596,13 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
     }
     app.begin_operation(DiagnosticSource::TrayCommand);
     app.record("tray.command.id", format!("id={command}"));
+    let mut operation_outcome = DiagnosticOutcome::Completed;
     match command {
         ID_START => manual_start(app),
         ID_STOP => manual_stop(app),
         LOGS_COMMAND_ID => {
             app.record("tray.command", "command=logs");
-            open_diagnostic_window(app);
+            operation_outcome = diagnostic_open_operation_outcome(open_diagnostic_window(app));
         }
         GITHUB_COMMAND_ID => open_github_page(hwnd, app),
         CANCEL_SCHEDULED_COMMAND_ID | CANCEL_PAUSE_COMMAND_ID => cancel_scheduled_action(app),
@@ -3717,7 +3736,7 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
     }
     let keeps_open = menu_action_keeps_open(command);
     if command != ID_QUIT {
-        app.finish_operation(DiagnosticOutcome::Completed);
+        app.finish_operation(operation_outcome);
     }
     keeps_open
 }
@@ -3746,18 +3765,24 @@ unsafe fn open_github_page(hwnd: *mut c_void, app: &mut App) {
     }
 }
 
-unsafe fn open_diagnostic_window(app: &mut App) {
+unsafe fn open_diagnostic_window(app: &mut App) -> bool {
     if let Some(window) = app.diagnostic_window {
         if IsWindow(window) == 0 {
-            app.diagnostics.record(
+            record_diagnostic_event_with_context(
+                app,
                 "diagnostic.window.invalid",
                 "result=cleared reason=parent_not_a_window",
+                DiagnosticPhase::Render,
+                DiagnosticOutcome::Failed,
             );
             clear_diagnostic_state(app);
         } else if !diagnostic_children_ready(app) {
-            app.diagnostics.record(
+            record_diagnostic_event_with_context(
+                app,
                 "diagnostic.window.invalid",
                 "result=destroyed reason=required_child_missing",
+                DiagnosticPhase::Render,
+                DiagnosticOutcome::Failed,
             );
             let _ = DestroyWindow(window);
             clear_diagnostic_state(app);
@@ -3770,7 +3795,7 @@ unsafe fn open_diagnostic_window(app: &mut App) {
             UpdateWindow(window);
             SetForegroundWindow(window);
             request_diagnostic_refresh(app);
-            return;
+            return true;
         }
     }
     let class_name = wide("TrueTickDiagnosticClass");
@@ -3794,6 +3819,7 @@ unsafe fn open_diagnostic_window(app: &mut App) {
             "diagnostic.window.result",
             format!("result=create_failed raw_status={}", GetLastError()),
         );
+        false
     } else {
         if SetWindowTextW(window, title.as_ptr()) == 0 {
             app.record(
@@ -3801,26 +3827,32 @@ unsafe fn open_diagnostic_window(app: &mut App) {
                 format!("raw_status={}", GetLastError()),
             );
             DestroyWindow(window);
-            return;
+            return false;
         }
         app.diagnostic_window = Some(window);
         if !diagnostic_children_ready(app) {
-            app.diagnostics.record(
+            record_diagnostic_event_with_context(
+                app,
                 "diagnostic.window.invalid",
                 "result=destroyed reason=create_returned_without_required_children",
+                DiagnosticPhase::Render,
+                DiagnosticOutcome::Failed,
             );
             let _ = DestroyWindow(window);
             clear_diagnostic_state(app);
-            return;
+            return false;
         }
         if !layout_diagnostic_controls(window, app) {
-            app.diagnostics.record(
+            record_diagnostic_event_with_context(
+                app,
                 "diagnostic.window.invalid",
                 "result=destroyed reason=initial_layout_failed",
+                DiagnosticPhase::Render,
+                DiagnosticOutcome::Failed,
             );
             let _ = DestroyWindow(window);
             clear_diagnostic_state(app);
-            return;
+            return false;
         }
         ShowWindow(window, SW_SHOWNORMAL);
         UpdateWindow(window);
@@ -3838,6 +3870,7 @@ unsafe fn open_diagnostic_window(app: &mut App) {
         );
         app.record("diagnostic.window.result", "result=opened");
         request_diagnostic_refresh(app);
+        true
     }
 }
 
@@ -3868,17 +3901,11 @@ fn diagnostic_summary_text(app: &App, retained: usize) -> String {
         std::time::Instant::now(),
     );
     let visible = diagnostic_visible_selection(app, retained).row_count();
-    let history = if retained > 0
-        && app
-            .diagnostics
-            .snapshot()
-            .first()
-            .is_some_and(|event| event.name == "diagnostic.log_truncated")
-    {
-        format!("{retained} retained, history truncated")
-    } else {
-        format!("{retained} retained, history complete")
-    };
+    let history = retention_summary(
+        retained,
+        app.diagnostics.maximum_events(),
+        snapshot_is_truncated(&app.diagnostics.snapshot()),
+    );
     format!(
         "Effective timing: {}\r\nOwnership: {}\r\nPower: {}\r\nStartup: {}\r\nRunning duration: {}\r\nNext action: {}\r\nHistory: {history}\r\nShowing {visible} of {retained} retained rows\r\n",
         status[1].label.strip_prefix("Timing: ").unwrap_or(&status[1].label),
@@ -3888,6 +3915,14 @@ fn diagnostic_summary_text(app: &App, retained: usize) -> String {
         status[2].label.strip_prefix("Running for: ").unwrap_or(&status[2].label),
         status[3].label.strip_prefix("Next action: ").unwrap_or(&status[3].label),
     )
+}
+
+fn diagnostic_open_operation_outcome(opened: bool) -> DiagnosticOutcome {
+    if opened {
+        DiagnosticOutcome::Completed
+    } else {
+        DiagnosticOutcome::Failed
+    }
 }
 
 fn diagnostic_state_text(app: &App) -> String {
@@ -4172,11 +4207,42 @@ unsafe fn diagnostic_range_text(app: &App) -> String {
     String::from_utf16_lossy(&buffer[..copied as usize])
 }
 
+fn record_diagnostic_event_with_context(
+    app: &App,
+    name: &str,
+    details: impl AsRef<str>,
+    phase: DiagnosticPhase,
+    outcome: DiagnosticOutcome,
+) {
+    let source = DiagnosticSource::Diagnostic;
+    let context = app
+        .operation
+        .unwrap_or_else(|| app.diagnostics.begin_operation(source));
+    app.diagnostics.record_with_context(
+        DiagnosticRecord {
+            context,
+            phase,
+            source,
+            outcome,
+            native: native_outcome(name, details.as_ref()),
+        },
+        name,
+        details,
+    );
+}
+
 fn record_diagnostic_refresh_event(app: &mut App, name: &str, details: impl AsRef<str>) {
     if app.diagnostic_refreshing {
         app.diagnostic_refresh_direct_recorded = true;
     }
-    app.diagnostics.record(name, details);
+    let details = details.as_ref();
+    record_diagnostic_event_with_context(
+        app,
+        name,
+        details,
+        diagnostic_phase(name),
+        diagnostic_outcome(name, details),
+    );
 }
 
 unsafe fn set_diagnostic_message(app: &mut App, message: impl Into<String>) {
@@ -4431,12 +4497,15 @@ unsafe fn record_diagnostic_layout_failure(
     index: Option<usize>,
     raw_status: u32,
 ) {
-    app.diagnostics.record(
+    record_diagnostic_event_with_context(
+        app,
         "diagnostic.layout.error",
         format!(
             "stage={stage} control_index={} raw_status={raw_status}",
             index.map_or_else(|| "none".to_owned(), |value| value.to_string())
         ),
+        DiagnosticPhase::Render,
+        DiagnosticOutcome::Failed,
     );
 }
 
@@ -5263,7 +5332,15 @@ fn diagnostic_toolbar_action(app: &mut App, action: &str) {
         )
     };
     let selected_row_count = rows.len();
-    let details = diagnostic_transfer_details(source, selected_row_count, retained_rows, range);
+    let details = format!(
+        "{} {}",
+        diagnostic_transfer_details(source, selected_row_count, retained_rows, range),
+        retention_summary(
+            retained_rows,
+            app.diagnostics.maximum_events(),
+            snapshot_is_truncated(&events),
+        )
+    );
     let tsv = format_tsv(&rows);
     app.record(
         "diagnostic.transfer.selection",
@@ -6878,6 +6955,21 @@ mod tests {
         ] {
             assert!(!name.is_empty());
         }
+    }
+
+    #[test]
+    fn logs_opening_maps_native_open_failure_to_a_terminal_failed_outcome() {
+        assert_eq!(
+            diagnostic_open_operation_outcome(true),
+            DiagnosticOutcome::Completed
+        );
+        assert_eq!(
+            diagnostic_open_operation_outcome(false),
+            DiagnosticOutcome::Failed
+        );
+        assert_eq!(DiagnosticPhase::Begin.to_string(), "Begin");
+        assert_eq!(DiagnosticOutcome::InProgress.to_string(), "InProgress");
+        assert_eq!(DiagnosticPhase::Complete.to_string(), "Complete");
     }
 
     #[test]

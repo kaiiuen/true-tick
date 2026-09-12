@@ -97,6 +97,7 @@ pub enum DiagnosticSource {
 pub enum DiagnosticOutcome {
     InProgress,
     Completed,
+    Degraded,
     Failed,
     Cancelled,
     Suppressed,
@@ -213,6 +214,7 @@ stable_labels!(DiagnosticSource, {
 stable_labels!(DiagnosticOutcome, {
     DiagnosticOutcome::InProgress => "InProgress",
     DiagnosticOutcome::Completed => "Completed",
+    DiagnosticOutcome::Degraded => "Degraded",
     DiagnosticOutcome::Failed => "Failed",
     DiagnosticOutcome::Cancelled => "Cancelled",
     DiagnosticOutcome::Suppressed => "Suppressed",
@@ -237,6 +239,16 @@ pub const REPORT_COLUMNS: [&str; 11] = [
 pub const MAX_TSV_ROWS: usize = HARD_MAX_EVENTS;
 pub const MAX_TSV_BYTES: usize =
     REPORT_COLUMNS.len() * (MAX_FIELD_LENGTH + 3) * MAX_TSV_ROWS + MAX_TSV_ROWS * 2 + 256;
+
+pub fn snapshot_is_truncated(events: &[DiagnosticEvent]) -> bool {
+    events
+        .first()
+        .is_some_and(|event| event.name == "diagnostic.log_truncated")
+}
+
+pub fn retention_summary(retained_rows: usize, retention_cap: usize, truncated: bool) -> String {
+    format!("retained_events={retained_rows} retention_cap={retention_cap} truncated={truncated}")
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DisplayLimitError {
@@ -725,12 +737,39 @@ impl DiagnosticStore {
 
     pub fn record(&self, name: &str, details: impl AsRef<str>) {
         let context = self.begin_operation(DiagnosticSource::Internal);
+        let value = format!("{name} {}", details.as_ref()).to_ascii_lowercase();
+        let outcome = if value.contains("timedout") || value.contains("timeout") {
+            DiagnosticOutcome::TimedOut
+        } else if value.contains("suppressed") {
+            DiagnosticOutcome::Suppressed
+        } else if value.contains("cancel") {
+            DiagnosticOutcome::Cancelled
+        } else if value.contains("unverified") || value.contains("uncertain") {
+            DiagnosticOutcome::Unverified
+        } else if value.contains("degraded") {
+            DiagnosticOutcome::Degraded
+        } else if value.contains("error") || value.contains("failed") {
+            DiagnosticOutcome::Failed
+        } else if value.contains("started") || value.contains("pending") {
+            DiagnosticOutcome::InProgress
+        } else {
+            DiagnosticOutcome::Completed
+        };
+        let phase = if value.contains("window")
+            || value.contains("layout")
+            || value.contains("render")
+            || value.contains("dpi")
+        {
+            DiagnosticPhase::Render
+        } else {
+            DiagnosticPhase::Complete
+        };
         self.record_with_context(
             DiagnosticRecord {
                 context,
-                phase: DiagnosticPhase::Complete,
+                phase,
                 source: DiagnosticSource::Internal,
-                outcome: DiagnosticOutcome::Completed,
+                outcome,
                 native: NativeOutcome::default(),
             },
             name,
@@ -749,6 +788,13 @@ impl DiagnosticStore {
             .state
             .lock()
             .expect("diagnostic store mutex poisoned");
+        let name = sanitize(name);
+        let details = sanitize(details.as_ref());
+        if name == "diagnostic.layout.error"
+            && coalesce_repeated_layout_event(&mut state, &name, &details)
+        {
+            return;
+        }
         if state.events.len() >= self.inner.maximum_events {
             let oldest_event = if state.truncation_recorded { 1 } else { 0 };
             state.events.remove(oldest_event);
@@ -792,8 +838,8 @@ impl DiagnosticStore {
             source: record.source,
             outcome: record.outcome,
             native: record.native,
-            name: sanitize(name),
-            details: sanitize(details.as_ref()),
+            name,
+            details,
         };
         state.next_sequence = state.next_sequence.saturating_add(1);
         state.events.push(event);
@@ -817,6 +863,30 @@ impl Default for DiagnosticStore {
     fn default() -> Self {
         Self::new(DEFAULT_MAX_EVENTS)
     }
+}
+
+fn coalesce_repeated_layout_event(state: &mut StoreState, name: &str, details: &str) -> bool {
+    let Some(event) = state.events.last_mut() else {
+        return false;
+    };
+    if event.name != name {
+        return false;
+    }
+    let (base, count) = event
+        .details
+        .rsplit_once(" repeat_count=")
+        .map_or((event.details.as_str(), 1), |(base, count)| {
+            (base, count.parse::<u32>().unwrap_or(1))
+        });
+    if base != details {
+        return false;
+    }
+    let next_count = count.saturating_add(1).min(999_999);
+    event.details = truncate_utf8(
+        &format!("{base} repeat_count={next_count}"),
+        MAX_FIELD_LENGTH,
+    );
+    true
 }
 
 pub fn sanitize(value: &str) -> String {
@@ -1178,6 +1248,49 @@ mod tests {
             row.cells[10],
             "command=stop ntstatus=-7 win32_last_error=5 requested_hns=5000 selected_hns=5000 effective_hns=9966"
         );
+    }
+
+    #[test]
+    fn retention_summary_reports_actual_rows_and_truncation() {
+        assert_eq!(
+            retention_summary(12, 512, true),
+            "retained_events=12 retention_cap=512 truncated=true"
+        );
+        let events = vec![DiagnosticEvent {
+            name: "diagnostic.log_truncated".to_owned(),
+            ..test_event(1)
+        }];
+        assert!(snapshot_is_truncated(&events));
+        assert!(!snapshot_is_truncated(&[test_event(1)]));
+    }
+
+    #[test]
+    fn repeated_layout_errors_are_coalesced_with_a_bounded_count() {
+        let store = DiagnosticStore::new(8);
+        let context = store.begin_operation(DiagnosticSource::Diagnostic);
+        for _ in 0..3 {
+            store.record_with_context(
+                DiagnosticRecord {
+                    context,
+                    phase: DiagnosticPhase::Render,
+                    source: DiagnosticSource::Diagnostic,
+                    outcome: DiagnosticOutcome::Failed,
+                    native: NativeOutcome::default(),
+                },
+                "diagnostic.layout.error",
+                "stage=SetWindowPos control_index=3 raw_status=5",
+            );
+        }
+        let events = store.snapshot();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].outcome, DiagnosticOutcome::Failed);
+        assert!(events[0].details.ends_with("repeat_count=3"));
+    }
+
+    #[test]
+    fn degraded_remains_distinct_from_completed_for_evidence_rows() {
+        assert_ne!(DiagnosticOutcome::Degraded, DiagnosticOutcome::Completed);
+        assert_eq!(DiagnosticOutcome::Degraded.to_string(), "Degraded");
     }
 
     #[test]
