@@ -99,8 +99,12 @@ const LVS_SINGLESEL: u32 = 0x0004;
 const LVS_SHOWSELALWAYS: u32 = 0x0008;
 const LVS_EX_GRIDLINES: usize = 0x00000001;
 const LVS_EX_FULLROWSELECT: usize = 0x00000020;
+const ICC_LISTVIEW_CLASSES: u32 = 0x0000_0001;
+const ICC_BAR_CLASSES: u32 = 0x0000_0004;
+const REQUIRED_COMMON_CONTROL_CLASSES: u32 = ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES;
 const LVM_FIRST: u32 = 0x1000;
 const LVM_DELETEALLITEMS: u32 = LVM_FIRST + 9;
+const LVM_GETITEMCOUNT: u32 = LVM_FIRST + 4;
 const LVM_INSERTITEMW: u32 = LVM_FIRST + 77;
 const LVM_SETITEMTEXTW: u32 = LVM_FIRST + 74;
 const LVM_INSERTCOLUMNW: u32 = LVM_FIRST + 97;
@@ -227,6 +231,20 @@ struct Rect {
     top: i32,
     right: i32,
     bottom: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InitCommonControlsEx {
+    size: u32,
+    classes: u32,
+}
+
+fn common_controls_initialization_contract() -> InitCommonControlsEx {
+    InitCommonControlsEx {
+        size: size_of::<InitCommonControlsEx>() as u32,
+        classes: REQUIRED_COMMON_CONTROL_CLASSES,
+    }
 }
 
 #[repr(C)]
@@ -599,6 +617,29 @@ pub fn run() {
                 "True™ Tick could not obtain its native module handle.",
             );
             return;
+        }
+        match initialize_common_controls() {
+            Ok(()) => app.record(
+                "native.InitCommonControlsEx.result",
+                format!("result=success classes={REQUIRED_COMMON_CONTROL_CLASSES:#x}"),
+            ),
+            Err(raw_error) => {
+                app.record(
+                    "native.InitCommonControlsEx.error",
+                    format!("classes={REQUIRED_COMMON_CONTROL_CLASSES:#x} raw_status={raw_error}"),
+                );
+                app.record(
+                    "diagnostic.window.result",
+                    format!("result=common_controls_initialization_failed raw_status={raw_error}"),
+                );
+                abort_startup(
+                    app_ptr,
+                    &format!(
+                        "True™ Tick could not initialize Windows Common Controls for the diagnostic window. Native error code: {raw_error}."
+                    ),
+                );
+                return;
+            }
         }
         let wnd_class = WndClass {
             style: 0,
@@ -3565,10 +3606,17 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &App) {
         let _ = SetWindowTextW(summary, text.as_ptr());
     }
     let Some(list) = app.diagnostic_list else {
+        app.diagnostics
+            .record("diagnostic.grid.refresh.error", "list_handle_null");
         return;
     };
+    let events = app.diagnostics.snapshot();
+    let snapshot_rows = events.len();
     let _ = SendMessageW(list, LVM_DELETEALLITEMS, 0, 0);
-    for (row_index, event) in app.diagnostics.snapshot().iter().enumerate() {
+    let mut inserted_rows = 0usize;
+    let mut insert_failures = 0usize;
+    let mut set_text_failures = 0usize;
+    for (row_index, event) in events.iter().enumerate() {
         let row = diagnostic_grid_row(event);
         let mut first = wide(&row.cells[0]);
         let item = ListViewItem {
@@ -3588,15 +3636,21 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &App) {
             column_formats: std::ptr::null_mut(),
             group: 0,
         };
-        if SendMessageW(
+        let insert_result = SendMessageW(
             list,
             LVM_INSERTITEMW,
             0,
             (&item as *const ListViewItem).cast::<c_void>() as isize,
-        ) < 0
-        {
+        );
+        if insert_result < 0 {
+            insert_failures = insert_failures.saturating_add(1);
+            app.diagnostics.record(
+                "native.LVM_INSERTITEMW.error",
+                format!("row={row_index} raw_status={}", GetLastError()),
+            );
             break;
         }
+        inserted_rows = inserted_rows.saturating_add(1);
         for (column_index, value) in row.cells.iter().enumerate().skip(1) {
             let mut text = wide(value);
             let mut cell = ListViewItem {
@@ -3616,14 +3670,31 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &App) {
                 column_formats: std::ptr::null_mut(),
                 group: 0,
             };
-            let _ = SendMessageW(
+            let set_text_result = SendMessageW(
                 list,
                 LVM_SETITEMTEXTW,
                 row_index,
                 (&mut cell as *mut ListViewItem).cast::<c_void>() as isize,
             );
+            if set_text_result == 0 {
+                set_text_failures = set_text_failures.saturating_add(1);
+                app.diagnostics.record(
+                    "native.LVM_SETITEMTEXTW.error",
+                    format!(
+                        "row={row_index} column={column_index} raw_status={}",
+                        GetLastError()
+                    ),
+                );
+            }
         }
     }
+    let item_count = SendMessageW(list, LVM_GETITEMCOUNT, 0, 0);
+    app.diagnostics.record(
+        "diagnostic.grid.refresh",
+        format!(
+            "snapshot_rows={snapshot_rows} inserted_rows={inserted_rows} item_count={item_count} insert_failures={insert_failures} set_text_failures={set_text_failures}"
+        ),
+    );
     layout_diagnostic_controls(window, app);
 }
 
@@ -3676,6 +3747,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             GetModuleHandleW(std::ptr::null()),
             std::ptr::null_mut(),
         );
+        let summary_error = if summary.is_null() { GetLastError() } else { 0 };
         let list_class = wide("SysListView32");
         let list = CreateWindowExW(
             0,
@@ -3697,17 +3769,25 @@ unsafe extern "system" fn diagnostic_window_proc(
             GetModuleHandleW(std::ptr::null()),
             std::ptr::null_mut(),
         );
+        let list_error = if list.is_null() { GetLastError() } else { 0 };
         if summary.is_null() || list.is_null() {
             if !app_ptr.is_null() {
                 (*(app_ptr as *mut App)).diagnostics.record(
                     "native.CreateWindowExW.diagnostic_control.error",
                     format!(
-                        "summary_null={} list_null={} raw_status={}",
+                        "summary_null={} summary_raw_status={} list_null={} list_raw_status={}",
                         summary.is_null(),
+                        summary_error,
                         list.is_null(),
-                        GetLastError()
+                        list_error
                     ),
                 );
+                if list.is_null() {
+                    (*(app_ptr as *mut App)).diagnostics.record(
+                        "native.CreateWindowExW.diagnostic_list.error",
+                        format!("raw_status={list_error}"),
+                    );
+                }
             }
             if !summary.is_null() {
                 DestroyWindow(summary);
@@ -4211,6 +4291,11 @@ extern "system" {
     fn DestroyIcon(icon: *mut c_void) -> i32;
 }
 
+#[link(name = "comctl32")]
+extern "system" {
+    fn InitCommonControlsEx(init: *const InitCommonControlsEx) -> i32;
+}
+
 #[link(name = "shell32")]
 extern "system" {
     fn Shell_NotifyIconW(message: u32, data: *mut NotifyIconData) -> i32;
@@ -4261,9 +4346,27 @@ extern "system" {
     fn GetLastError() -> u32;
 }
 
+unsafe fn initialize_common_controls() -> Result<(), u32> {
+    let init = common_controls_initialization_contract();
+    if InitCommonControlsEx(&init) == 0 {
+        Err(GetLastError())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn common_controls_initialization_uses_list_view_and_toolbar_classes() {
+        let init = common_controls_initialization_contract();
+        assert_eq!(init.size as usize, size_of::<InitCommonControlsEx>());
+        assert_eq!(init.classes, ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES);
+        assert_ne!(init.classes & ICC_LISTVIEW_CLASSES, 0);
+        assert_ne!(init.classes & ICC_BAR_CLASSES, 0);
+    }
 
     #[test]
     fn native_result_mapping_preserves_success_and_raw_failure_codes() {

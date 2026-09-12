@@ -230,8 +230,13 @@ MSVC Windows builds. The manifest requests Common Controls version 6, declares
 Windows 10 and later compatibility through the Windows 10 supported-OS
 identifier, and requests normal user execution with `asInvoker`. It makes no
 administrator, UI access, legacy Windows, performance, or runtime success
-claim. The Launcher does not import `TaskDialogIndirect` or use common
-controls version 6 APIs, so it does not need this target-specific manifest.
+claim. Before any diagnostic or tooltip control is created, the tray calls
+`InitCommonControlsEx` from `comctl32.dll` once with `ICC_LISTVIEW_CLASSES` and
+`ICC_BAR_CLASSES`. A failure records the raw Win32 error and aborts startup with
+a clear diagnostic window failure. The embedded v6 manifest remains required
+for this runtime initialization and the `SysListView32` Logs grid. The Launcher
+does not import `TaskDialogIndirect` or use common controls version 6 APIs, so it
+does not need this target-specific manifest.
 
 The Windows timer adapter links `NtQueryTimerResolution` and
 `NtSetTimerResolution` explicitly from `ntdll`. Its `NtSetTimerResolution`
@@ -269,4 +274,4 @@ The current True™ Tick menu order is `True™ Tick v<version>`, `Start`, `Paus
 
 While the popup is open, True™ Tick retains its root, Schedule, Pause, and Status menu handles and runs a popup-only 500 ms UI refresh timer. The timer updates dynamic Status rows, ownership, enabled states, and cancellation state. A separate one-second UI timer runs only while a schedule or pause is active. Its publication key includes the action generation and the rounded remaining-second bucket, so `Shell_NotifyIconW(NIM_MODIFY)` publishes each displayed countdown change without a high-frequency loop. Positive fractional remaining seconds round upward, so a new five-minute pause initially displays `5m 0s`. Elapsed durations remain floored.
 
-Logs opens a normal taskbar window with a concise summary above a read-only native `SysListView32` report. Columns are `Sequence`, `Elapsed`, `Operation`, `Parent`, `Correlation`, `Phase`, `Source`, `Outcome`, `Event`, and `Details`. Each snapshot row is converted from typed diagnostic fields, inserted with `LVM_INSERTITEMW` on the list HWND, then filled with `LVM_SETITEMTEXTW` for each remaining column. The native control copies the bounded UTF-16 text during each synchronous message. Refresh is posted and coalesced on the diagnostic window UI thread. The session is local and bounded to 512 retained events with a truncation marker. It is not persisted or public telemetry. Invalid current timing is shown as `Unknown`, never as an old current value.
+Logs opens a normal taskbar window with a concise summary above a read-only native `SysListView32` report. The list and tooltip classes require one explicit `InitCommonControlsEx` call before controls are created, together with the embedded Common Controls v6 manifest. Columns are `Sequence`, `Elapsed`, `Operation`, `Parent`, `Correlation`, `Phase`, `Source`, `Outcome`, `Event`, and `Details`. Each existing `DiagnosticStore` snapshot row is converted from typed `DiagnosticEvent` fields, inserted with `LVM_INSERTITEMW` on the list HWND, then filled with `LVM_SETITEMTEXTW` for each remaining column. List creation failure, negative row insertion, failed cell text updates, and a bounded refresh row count are recorded with raw Win32 status values. The native control copies the bounded UTF-16 text during each synchronous message. Refresh is posted and coalesced on the diagnostic window UI thread. The session is local and bounded to 512 retained events with a truncation marker. It is not persisted or public telemetry. Invalid current timing is shown as `Unknown`, never as an old current value.

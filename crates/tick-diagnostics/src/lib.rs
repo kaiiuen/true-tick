@@ -550,6 +550,34 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_store_snapshot_converts_to_typed_grid_row() {
+        let store = DiagnosticStore::new(8);
+        let context = store.begin_operation(DiagnosticSource::TrayCommand);
+        store.record_with_context(
+            DiagnosticRecord {
+                context,
+                phase: DiagnosticPhase::Render,
+                source: DiagnosticSource::Diagnostic,
+                outcome: DiagnosticOutcome::Completed,
+                native: NativeOutcome {
+                    win32_last_error: Some(5),
+                    ..NativeOutcome::default()
+                },
+            },
+            "diagnostic.refresh",
+            "rows=1",
+        );
+        let event = store.snapshot().into_iter().next().expect("snapshot row");
+        let row = diagnostic_grid_row(&event);
+        assert_eq!(row.cells.len(), REPORT_COLUMNS.len());
+        assert_eq!(row.cells[2], context.operation_id.to_string());
+        assert_eq!(row.cells[5], "Render");
+        assert_eq!(row.cells[8], "diagnostic.refresh");
+        assert!(row.cells[9].contains("rows=1"));
+        assert!(row.cells[9].contains("win32_last_error=5"));
+    }
+
+    #[test]
     fn grid_details_remain_bounded_and_native_error_types_stay_distinct() {
         let event = DiagnosticEvent {
             sequence: 1,
