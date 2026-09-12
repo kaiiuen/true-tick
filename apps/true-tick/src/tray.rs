@@ -6220,6 +6220,8 @@ unsafe extern "system" fn diagnostic_window_proc(
         {
             (*app).diagnostic_hud_state = Some(hud_state);
             (*app).diagnostic_summary = Some(summary);
+            (*app).diagnostic_hud_separator = Some(hud_separator);
+            (*app).diagnostic_toolbar_separator = Some(toolbar_separator);
             (*app).diagnostic_display_label = Some(display_label);
             (*app).diagnostic_display_input = Some(display_input);
             (*app).diagnostic_show_all_button = Some(show_all_button);
@@ -7428,6 +7430,73 @@ mod tests {
         assert!(diagnostic_loading_summary_is_nonblank());
         assert_eq!(diagnostic_window_style() & WS_VISIBLE, 0);
         assert_eq!(WM_DIAGNOSTIC_REFRESH, WM_APP + 2);
+    }
+
+    #[test]
+    fn diagnostic_child_handles_are_assigned_before_parent_is_shown() {
+        let source = include_str!("tray.rs");
+        let create_start = source
+            .find("unsafe extern \"system\" fn diagnostic_window_proc(")
+            .expect("diagnostic window procedure must exist");
+        let create_source = &source[create_start..];
+        let assignments_start = create_source
+            .find("(*app).diagnostic_hud_state = Some(hud_state);")
+            .expect("diagnostic child assignment block must exist");
+        let render_start = create_source[assignments_start..]
+            .find("refresh_diagnostic_presentation(hwnd, &mut *app);")
+            .map(|offset| assignments_start + offset)
+            .expect("diagnostic presentation must follow child assignment");
+        for assignment in [
+            "(*app).diagnostic_hud_state = Some(hud_state);",
+            "(*app).diagnostic_summary = Some(summary);",
+            "(*app).diagnostic_hud_separator = Some(hud_separator);",
+            "(*app).diagnostic_toolbar_separator = Some(toolbar_separator);",
+            "(*app).diagnostic_display_label = Some(display_label);",
+            "(*app).diagnostic_display_input = Some(display_input);",
+            "(*app).diagnostic_show_all_button = Some(show_all_button);",
+            "(*app).diagnostic_toolbar_label = Some(label);",
+            "(*app).diagnostic_selection_summary = Some(selection_summary);",
+            "(*app).diagnostic_range_input = Some(range_input);",
+            "(*app).diagnostic_copy_button = Some(copy_button);",
+            "(*app).diagnostic_export_button = Some(export_button);",
+            "(*app).diagnostic_message = Some(message);",
+            "(*app).diagnostic_list = Some(list);",
+        ] {
+            let assignment_position = create_source
+                .find(assignment)
+                .expect("required diagnostic child assignment must exist");
+            assert!(
+                (assignments_start..render_start).contains(&assignment_position),
+                "required diagnostic child assignment must precede presentation: {assignment}"
+            );
+        }
+
+        let open_start = source
+            .find("unsafe fn open_diagnostic_window(app: &mut App)")
+            .expect("diagnostic open function must exist");
+        let open_source = &source[open_start..];
+        let parent_assignment = open_source
+            .find("app.diagnostic_window = Some(window);")
+            .expect("diagnostic parent assignment must exist");
+        let shown = open_source[parent_assignment..]
+            .find("ShowWindow(window, SW_SHOWNORMAL);")
+            .map(|offset| parent_assignment + offset)
+            .expect("new diagnostic window must be shown");
+        let ready_check = open_source[parent_assignment..shown]
+            .find("if !diagnostic_children_ready(app)")
+            .expect("required diagnostic children must be checked before showing");
+        assert!(ready_check < shown - parent_assignment);
+
+        let clear_start = source
+            .find("fn clear_diagnostic_state(app: &mut App)")
+            .expect("diagnostic cleanup function must exist");
+        let clear_source = &source[clear_start..];
+        for handle in ["diagnostic_hud_separator", "diagnostic_toolbar_separator"] {
+            assert!(
+                clear_source.contains(&format!("app.{handle} = None;")),
+                "diagnostic cleanup must clear {handle}"
+            );
+        }
     }
 
     #[test]
