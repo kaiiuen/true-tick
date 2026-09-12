@@ -75,6 +75,30 @@ registry tuning beyond the explicit current-user startup boundary, driver,
 hardware clock control, process detection, network services, installer, secure
 updater, or release machinery.
 
+The native tray boundary has a non-reentrant menu-active guard. Reentrant tray,
+command, and power messages are ignored while `TrackPopupMenu` owns the popup.
+The returned command ID is the only popup dispatch source and is validated against
+current enabled state before handling. Quit and cleanup remain serialized through
+the same command path.
+
+Shutdown models normal `WM_QUIT` separately from `GetMessageW` failure. A guarded
+cleanup gate attempts owned-request release once per successful shutdown path,
+allows retry after an unresolved release while the message loop is usable, and
+records a built-in warning before an irrecoverable exit. Tray icon deletion,
+diagnostic window destruction, callback detachment, and main window destruction
+occur before `App` is dropped.
+
+Power query errors clear the current snapshot to `Unknown`, retain the structured
+failure, block acquisition, and use the conservative release policy. They do not
+claim suspend, session, lock, or resume coverage.
+
+Configuration and diagnostic text have byte limits. Parsing rejects oversized
+files, lines, keys, values, duplicate keys, invalid UTF-8, malformed assignments,
+and invalid scalar values. Diagnostic truncation preserves UTF-8 boundaries.
+Native class, window, menu, tray, icon, bitmap, diagnostic edit, text, and layout
+results are checked. Partial native resources are released in reverse order, and
+startup stops before timing acquisition if the tray surface is unavailable.
+
 `TaskDialogIndirect` is preferred because the tray embeds the Common Controls v6
 manifest. Its built-in warning icon and standard Windows visual style are combined
 with custom IDs `2001` for `Cancel` and `2002` for `Stop and Quit`. The HRESULT is

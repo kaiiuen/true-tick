@@ -89,6 +89,11 @@ and an `equal`, `finer`, or `unverified` effective relation. The tooltip, status
 summary, and diagnostic header use the latest verified effective observation from
 request, release, query, or power reconciliation. Query, request, release, and
 power reconciliation observations are carried through controller and app state.
+The tray popup has a non-reentrant active guard. Tray notifications and window
+commands received while the popup is active are ignored, while the one returned
+`TPM_RETURNCMD` value is dispatched once. Command IDs are checked against the
+current enabled state before any action. Repeated Start, Stop, and setting
+commands therefore remain idempotent, and Quit remains a single exit path.
 A reported current
 value at or below the requested value is satisfied, with a lower value labeled
 finer. A higher value remains unverified. Unsupported native timer capability
@@ -141,7 +146,24 @@ non-elevated, idempotent, removable, and not performed by tests. Config
 persistence and a real registry operation are kept transactionally consistent
 with a rollback attempt or an explicit repair-needed status. Initial power
 observation records success or the failure reason in the diagnostic log. A failed
-observation remains unknown and blocks acquisition.
+A failed observation remains unknown and blocks acquisition. A later power
+query failure explicitly clears any previous AC or battery state, records the
+failure, blocks new acquisition, and follows the conservative release path for
+owned timing. Session, lock, suspend, and resume behavior is not inferred from
+this query.
+
+Configuration input is bounded before parsing. The internal v1 rejects oversized
+files, lines, keys, values, duplicate keys, invalid UTF-8, malformed assignments,
+and invalid booleans or integers. Diagnostic fields and native diagnostic text
+are bounded at valid UTF-8 boundaries. Startup status is bounded before it is
+shown. Native class, window, menu, tray icon, bitmap, diagnostic control, text,
+and layout failures are checked and record raw native status codes. Startup fails
+closed before automatic acquisition when the tray surface cannot be created.
+
+Normal `WM_QUIT` and `GetMessageW` failure are modeled separately. Every normal
+exit attempts the guarded owned-request cleanup. Unresolved cleanup keeps a usable
+message loop alive for retry or produces a built-in warning before an irrecoverable
+exit. Tray and diagnostic resources are destroyed before `App` is dropped.
 
 Active documentation is checked with `scripts/check_doc_punctuation.py`. The
 checker rejects em dash and semicolon characters and skips historical archive

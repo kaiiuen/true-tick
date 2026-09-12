@@ -66,6 +66,19 @@ Dialog uses a warning-style `MessageBoxW` fallback with `Yes = Stop and Quit` an
 `No = Cancel`. Only `IDYES` selects Stop and Quit. Cancel, close, unknown or zero
 results, and MessageBox failure keep the application open. A failed warning does not
 silently reopen the context menu.
+
+The reliability safeguards now include a non-reentrant popup guard, current-state
+command validation, exactly-once returned-command dispatch, and deterministic
+burst and repeated-command tests. Normal message-loop exit and `GetMessageW`
+failure are modeled separately. The cleanup gate attempts owned-request release
+once per successful path, keeps a usable loop open when cleanup is unresolved,
+and destroys tray, diagnostic, and callback resources before dropping `App`.
+Power query failure clears stale AC or battery state to `Unknown`, records the
+structured error, blocks acquisition, and follows conservative release policy.
+Configuration files, parser fields, diagnostic fields, startup status, and native
+edit text are bounded. Duplicate keys, invalid UTF-8, malformed values, and
+oversized inputs are rejected. Native class, window, menu, tray, icon, bitmap,
+text, and layout results are checked with raw failure codes recorded.
 Running and verified ownership is green. Starting, stopping, pending, degraded,
 or unverified behavior is yellow. Stopped, blocked, unsupported, or error behavior
 is red. Unsupported is produced when the native capability is unavailable. Error
