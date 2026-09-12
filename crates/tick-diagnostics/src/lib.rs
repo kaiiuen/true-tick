@@ -432,6 +432,31 @@ mod tests {
     }
 
     #[test]
+    fn duration_schedule_chain_retains_deadline_timing_and_policy_fields() {
+        let store = DiagnosticStore::new(16);
+        let root = store.begin_operation(DiagnosticSource::TrayCommand);
+        let deadline = store.child_operation(root, DiagnosticSource::Timer);
+        store.record_with_context(
+            DiagnosticRecord {
+                context: deadline,
+                phase: DiagnosticPhase::Timer,
+                source: DiagnosticSource::Timer,
+                outcome: DiagnosticOutcome::InProgress,
+                native: NativeOutcome::default(),
+            },
+            "duration.schedule",
+            "policy=deferred action=start duration_minutes=5 generation=4 deadline_monotonic_ms=300000 remaining_ms=300000 timing_snapshot=valid=true requested_hns=unknown selected_hns=unknown effective_hns=unknown raw_status=unknown",
+        );
+        let event = &store.snapshot()[0];
+        assert_eq!(event.operation_id, deadline.operation_id);
+        assert_eq!(event.parent_operation_id, Some(root.operation_id));
+        assert_eq!(event.correlation_id, root.correlation_id);
+        assert!(event.details.contains("generation=4"));
+        assert!(event.details.contains("remaining_ms=300000"));
+        assert!(event.details.contains("policy=deferred"));
+    }
+
+    #[test]
     fn event_format_is_bounded_for_large_fields() {
         let store = DiagnosticStore::new(8);
         store.record("event", "x".repeat(10_000));
