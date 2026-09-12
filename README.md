@@ -86,7 +86,7 @@ columns are bounded and Details absorbs remaining width. Normal refresh restores
 horizontal scroll position when Windows permits it. Reopening reuses the existing
 window and posts one refresh rather than rebuilding synchronously.
 
-The status summary is a read-only `STATIC` control. It has no `WS_VSCROLL`, `ES_AUTOVSCROLL`, or multiline edit style. Its stable wrapped region uses a 220 logical pixel base height and is sized from the current DPI and minimum client height. The toolbar is a computed flow row. At 96 DPI its fixed controls, eight gaps, margins, and 140 pixel flexible message minimum require a 916 pixel client width. The toolbar never wraps or stacks.
+The diagnostic summary is a restrained native HUD. A lifecycle-derived State line is larger and bold, followed by concise key/value lines for Effective timing, Ownership, Power, Startup, Running duration, Next action, and retained event history. Native etched separators make the HUD, one-row toolbar, and report grid distinct. The HUD is a read-only `STATIC` presentation with no `WS_VSCROLL`, `ES_AUTOVSCROLL`, or multiline edit style. Its base height is 188 logical pixels. At 96 DPI the toolbar client minimum is 916 pixels and the minimum client height is 324 pixels. `WM_GETMINMAXINFO` converts those intended client minimums to outer tracking dimensions with `AdjustWindowRectExForDpi`, with the legacy frame API as a fallback.
 
 Layout failure handling records `BeginDeferWindowPos`, every failed `DeferWindowPos`, and `EndDeferWindowPos`. It then positions every child with individual `SetWindowPos` calls. Child creation returns `-1` after every partial child set is destroyed. Reuse verifies the parent and every required child before showing the window.
 
@@ -319,6 +319,18 @@ behavior also remain runtime-unverified because validation does not launch this
 internal application.
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) and [`STATUS.md`](STATUS.md).
+
+## Diagnostic HUD, presentation, and evidence limits
+
+The HUD State value is derived from the same lifecycle state used by the tray, not from a stale raw status field. The history field reports the actual retained event count, the 512 event cap, and whether a truncation marker is present. The grid retains all bounded raw details that fit the current snapshot.
+
+The diagnostic window uses a small presentation layer only. It reapplies the system GUI font, a system-derived bold font for State, system background and text colors, ListView colors, and native control repainting for `WM_THEMECHANGED`, `WM_SYSCOLORCHANGE`, and `WM_SETTINGCHANGE`. High contrast follows system colors first. Tray status icon colors remain separate. Native menus, `MessageBoxW`, tooltips, and title-bar behavior remain Windows-owned. Native menus and dialogs may follow Windows theme behavior separately from this diagnostic surface.
+
+The DPI posture is system DPI aware for the current Windows 10 and Windows 11 scope. The source handles `WM_DPICHANGED` and uses DPI-scaled layout plus DPI-aware frame metrics. It does not claim Per-Monitor V2 until runtime validation on supported displays is complete.
+
+Every root tray operation records an `operation.begin` row with `phase=Begin` and `outcome=InProgress`, then exactly one terminal `operation.complete` outcome. Logs opening reports Failed when native window creation or initial layout fails. Refresh and nested presentation events retain the active operation context. Repeated identical layout failures are coalesced with a bounded repeat count and never report Completed.
+
+The TSV header remains the eleven detailed columns `Row`, `Sequence`, `Elapsed`, `Operation`, `Parent`, `Correlation`, `Phase`, `Source`, `Outcome`, `Event`, and `Details`. `Row` is the current retained snapshot position and `Sequence` is event identity. Copy and Export use the actual selected rows from one bounded snapshot, report retained count and truncation status, and never claim a complete session when the snapshot is filtered or truncated. The TSV row bound remains the 512 event retention bound.
 
 ## Audited v1 UX and diagnostics contract
 
