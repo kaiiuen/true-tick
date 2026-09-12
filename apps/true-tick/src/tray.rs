@@ -36,12 +36,15 @@ mod list_view_native {
     pub const LVM_DELETEALLITEMS: u32 = LVM_FIRST + 9;
     pub const LVM_GETITEMCOUNT: u32 = LVM_FIRST + 4;
     pub const LVM_GETNEXTITEM: u32 = LVM_FIRST + 12;
+    pub const LVM_GETCOLUMNWIDTH: u32 = LVM_FIRST + 29;
     pub const LVM_SETITEMSTATE: u32 = LVM_FIRST + 43;
     pub const LVM_INSERTITEMW: u32 = LVM_FIRST + 77;
     pub const LVM_SETITEMTEXTW: u32 = LVM_FIRST + 116;
     pub const LVM_INSERTCOLUMNW: u32 = LVM_FIRST + 97;
     pub const LVM_SETEXTENDEDLISTVIEWSTYLE: u32 = LVM_FIRST + 54;
     pub const LVM_SETCOLUMNWIDTH: u32 = LVM_FIRST + 30;
+    pub const LVSCW_AUTOSIZE: i32 = -1;
+    pub const LVSCW_AUTOSIZE_USEHEADER: i32 = -2;
     pub const LVIF_TEXT: u32 = 0x0001;
     pub const LVIF_STATE: u32 = 0x0008;
     pub const LVIS_SELECTED: u32 = 0x0002;
@@ -200,6 +203,9 @@ const DIAGNOSTIC_WINDOW_PARENT: *mut c_void = std::ptr::null_mut();
 const DIAGNOSTIC_SUMMARY_HEIGHT: i32 = 148;
 const DIAGNOSTIC_TOOLBAR_HEIGHT: i32 = 44;
 const DIAGNOSTIC_COLUMN_WIDTHS: [i32; 11] = [54, 70, 78, 78, 70, 86, 82, 90, 86, 160, 240];
+const DIAGNOSTIC_COLUMN_MIN_WIDTHS: [i32; 11] = [36, 52, 64, 64, 52, 64, 60, 68, 64, 84, 240];
+const DIAGNOSTIC_COLUMN_MAX_WIDTHS: [i32; 11] =
+    [84, 120, 140, 144, 120, 144, 112, 124, 124, 260, 640];
 const DIAGNOSTIC_DEFAULT_WIDTH: i32 = 980;
 const DIAGNOSTIC_DEFAULT_HEIGHT: i32 = 600;
 const COLOR_WINDOW: i32 = 5;
@@ -4067,7 +4073,46 @@ unsafe fn layout_diagnostic_controls(window: *mut c_void, app: &App) {
     }
     if let Some(list) = app.diagnostic_list {
         let _ = MoveWindow(list, 0, list_top, width, height.saturating_sub(list_top), 1);
+        auto_fit_diagnostic_columns(list, width, dpi);
     }
+}
+
+unsafe fn auto_fit_diagnostic_columns(list: *mut c_void, client_width: i32, dpi: u32) {
+    let mut measured = [0i32; REPORT_COLUMNS.len()];
+    for (index, value) in measured.iter_mut().enumerate() {
+        let _ = SendMessageW(list, LVM_SETCOLUMNWIDTH, index, LVSCW_AUTOSIZE as isize);
+        let content_width = SendMessageW(list, LVM_GETCOLUMNWIDTH, index, 0).max(0) as i32;
+        let _ = SendMessageW(
+            list,
+            LVM_SETCOLUMNWIDTH,
+            index,
+            LVSCW_AUTOSIZE_USEHEADER as isize,
+        );
+        let header_width = SendMessageW(list, LVM_GETCOLUMNWIDTH, index, 0).max(0) as i32;
+        *value = content_width.max(header_width);
+    }
+
+    let mut fixed_width = 0i32;
+    for index in 0..REPORT_COLUMNS.len() - 1 {
+        let minimum = scale_logical(DIAGNOSTIC_COLUMN_MIN_WIDTHS[index], dpi);
+        let maximum = scale_logical(DIAGNOSTIC_COLUMN_MAX_WIDTHS[index], dpi);
+        let width = measured[index].clamp(minimum, maximum);
+        let _ = SendMessageW(list, LVM_SETCOLUMNWIDTH, index, width as isize);
+        fixed_width = fixed_width.saturating_add(width);
+    }
+
+    let details_index = REPORT_COLUMNS.len() - 1;
+    let details_minimum = scale_logical(DIAGNOSTIC_COLUMN_MIN_WIDTHS[details_index], dpi);
+    let details_maximum = scale_logical(DIAGNOSTIC_COLUMN_MAX_WIDTHS[details_index], dpi);
+    let measured_details = measured[details_index].clamp(details_minimum, details_maximum);
+    let remaining_width = client_width.saturating_sub(fixed_width);
+    let details_width = measured_details.max(details_minimum).max(remaining_width);
+    let _ = SendMessageW(
+        list,
+        LVM_SETCOLUMNWIDTH,
+        details_index,
+        details_width as isize,
+    );
 }
 
 unsafe fn initialize_diagnostic_list(list: *mut c_void) -> Result<(), u32> {
