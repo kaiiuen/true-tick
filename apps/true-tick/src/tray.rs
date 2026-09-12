@@ -21,7 +21,8 @@ use crate::tray_surface::{
     dpi_to_icon_canvas, icon_pixel_color, menu_action_keeps_open, menu_command_dispatch_allowed,
     menu_command_is_enabled, menu_description, menu_items, power_reconciliation,
     release_needs_handoff, tooltip, tray_notification_opens_menu, HandoffProgress, HandoffTracker,
-    PowerReconciliation, TimingValues, TrayStatus, HANDOFF_POLL_INTERVAL_MS, STATUS_COMMAND_ID,
+    PowerReconciliation, TimingValues, TrayStatus, GITHUB_COMMAND_ID, GITHUB_URL,
+    HANDOFF_POLL_INTERVAL_MS, LOGS_COMMAND_ID,
 };
 
 const WM_APP: u32 = 0x8000;
@@ -100,6 +101,7 @@ const TTS_ALWAYSTIP: u32 = 0x0001;
 const TTS_NOPREFIX: u32 = 0x0002;
 const TTF_IDISHWND: u32 = 0x0001;
 const TTF_TRACK: u32 = 0x0020;
+const TTF_ABSOLUTE: u32 = 0x0080;
 const WM_USER: u32 = 0x0400;
 const TTM_TRACKACTIVATE: u32 = WM_USER + 17;
 const TTM_TRACKPOSITION: u32 = WM_USER + 18;
@@ -1546,6 +1548,11 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
             app.config.automatic,
             app.timing_values(),
         );
+        let header_flags = if items[0].enabled {
+            MF_STRING
+        } else {
+            MF_STRING | MF_GRAYED
+        };
         let start_flags = if items[1].enabled {
             MF_STRING
         } else {
@@ -1569,8 +1576,8 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
         let menu_ok = append_menu_checked(
             app,
             menu,
-            MF_STRING | MF_GRAYED,
-            0,
+            header_flags,
+            GITHUB_COMMAND_ID,
             wide(&items[0].label).as_ptr(),
         ) && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
             && append_menu_checked(
@@ -1614,7 +1621,7 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
                 app,
                 menu,
                 MF_STRING,
-                STATUS_COMMAND_ID,
+                LOGS_COMMAND_ID,
                 wide(&items[6].label).as_ptr(),
             )
             && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
@@ -1726,7 +1733,7 @@ unsafe fn create_menu_help(hwnd: *mut c_void, app: &mut App) -> bool {
 fn menu_tool_info(hwnd: *mut c_void, app: &App) -> ToolInfo {
     ToolInfo {
         cb_size: size_of::<ToolInfo>() as u32,
-        flags: TTF_IDISHWND | TTF_TRACK,
+        flags: TTF_IDISHWND | TTF_TRACK | TTF_ABSOLUTE,
         hwnd,
         id: hwnd as usize,
         rect: Rect {
@@ -1740,6 +1747,11 @@ fn menu_tool_info(hwnd: *mut c_void, app: &App) -> ToolInfo {
         l_param: 0,
         reserved: std::ptr::null_mut(),
     }
+}
+
+fn track_position_lparam(x: i32, y: i32) -> isize {
+    let packed = (x as u32 & 0xffff) | ((y as u32 & 0xffff) << 16);
+    packed as usize as isize
 }
 
 fn update_menu_help(app: &mut App, command: usize) {
@@ -1778,10 +1790,25 @@ fn update_menu_help(app: &mut App, command: usize) {
             (&tool as *const ToolInfo).cast::<c_void>() as isize,
         );
         let mut cursor = Point::default();
-        if GetCursorPos(&mut cursor) != 0 {
-            let position = ((cursor.x as u16 as u32) | ((cursor.y as u16 as u32) << 16)) as isize;
-            SendMessageW(tooltip, TTM_TRACKPOSITION, 0, position);
+        if GetCursorPos(&mut cursor) == 0 {
+            app.record(
+                "native.GetCursorPos.menu_help.error",
+                format!("raw_status={}", GetLastError()),
+            );
+            SendMessageW(
+                tooltip,
+                TTM_TRACKACTIVATE,
+                0,
+                (&tool as *const ToolInfo).cast::<c_void>() as isize,
+            );
+            return;
         }
+        SendMessageW(
+            tooltip,
+            TTM_TRACKPOSITION,
+            0,
+            track_position_lparam(cursor.x, cursor.y),
+        );
         SendMessageW(
             tooltip,
             TTM_TRACKACTIVATE,
@@ -1857,10 +1884,11 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
     match command {
         ID_START => manual_start(app),
         ID_STOP => manual_stop(app),
-        STATUS_COMMAND_ID => {
-            app.record("tray.command", "command=status");
+        LOGS_COMMAND_ID => {
+            app.record("tray.command", "command=logs");
             open_diagnostic_window(app);
         }
+        GITHUB_COMMAND_ID => open_github_page(hwnd, app),
         ID_STARTUP_ON => set_startup(app, true),
         ID_STARTUP_OFF => set_startup(app, false),
         ID_AUTOMATIC_ON => set_automatic(app, true),
@@ -1973,6 +2001,30 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
         _ => {}
     }
     menu_action_keeps_open(command)
+}
+
+unsafe fn open_github_page(hwnd: *mut c_void, app: &mut App) {
+    let operation = wide("open");
+    let url = wide(GITHUB_URL);
+    let result = ShellExecuteW(
+        hwnd,
+        operation.as_ptr(),
+        url.as_ptr(),
+        std::ptr::null(),
+        std::ptr::null(),
+        SW_SHOWNORMAL,
+    );
+    if (result as isize) <= 32 {
+        app.record(
+            "native.ShellExecuteW.github.error",
+            format!("result={} raw_status={}", result as isize, GetLastError()),
+        );
+    } else {
+        app.record(
+            "native.ShellExecuteW.github.result",
+            format!("result=success url={GITHUB_URL}"),
+        );
+    }
 }
 
 unsafe fn open_diagnostic_window(app: &mut App) {
@@ -2666,6 +2718,14 @@ extern "system" {
 #[link(name = "shell32")]
 extern "system" {
     fn Shell_NotifyIconW(message: u32, data: *mut NotifyIconData) -> i32;
+    fn ShellExecuteW(
+        hwnd: *mut c_void,
+        operation: *const u16,
+        file: *const u16,
+        parameters: *const u16,
+        directory: *const u16,
+        show_command: i32,
+    ) -> *mut c_void;
 }
 
 #[link(name = "gdi32")]
@@ -2734,6 +2794,12 @@ mod tests {
             class_registration_result(0, 5),
             NativeResult::Failed { raw_error: 5 }
         );
+    }
+
+    #[test]
+    fn signed_screen_coordinates_keep_their_low_32_bits() {
+        assert_eq!(track_position_lparam(-1, -2) as u32, 0xfffe_ffff);
+        assert_eq!(track_position_lparam(-1920, 1080) as u32, 0x0438_f880);
     }
 
     #[test]

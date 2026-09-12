@@ -246,7 +246,9 @@ pub(crate) fn status_label(status: TrayStatus, timing: TimingValues) -> String {
     format!("Status: {concise}")
 }
 
-pub(crate) const STATUS_COMMAND_ID: usize = 1009;
+pub(crate) const LOGS_COMMAND_ID: usize = 1009;
+pub(crate) const GITHUB_COMMAND_ID: usize = 1010;
+pub(crate) const GITHUB_URL: &str = "https://github.com/kaiiuen/true-tick";
 
 pub(crate) const fn menu_description(command_id: usize) -> Option<&'static str> {
     match command_id {
@@ -254,7 +256,8 @@ pub(crate) const fn menu_description(command_id: usize) -> Option<&'static str> 
         1002 => Some("Release True Tick timing"),
         1005 | 1006 => Some("Launch True Tick when you sign in"),
         1007 | 1008 => Some("Request timing automatically on AC power"),
-        STATUS_COMMAND_ID => Some("Open status and session logs"),
+        LOGS_COMMAND_ID => Some("Open status and session logs"),
+        GITHUB_COMMAND_ID => Some("Open True Tick on GitHub"),
         1004 => Some("Stop safely and quit"),
         _ => None,
     }
@@ -330,7 +333,7 @@ pub(crate) const fn menu_command_is_enabled(
         1006 => startup_enabled,
         1007 => !automatic,
         1008 => automatic,
-        STATUS_COMMAND_ID | 1004 => true,
+        LOGS_COMMAND_ID | GITHUB_COMMAND_ID | 1004 => true,
         _ => false,
     }
 }
@@ -344,7 +347,7 @@ pub(crate) fn menu_items(
     [
         MenuItem {
             label: version_header(),
-            enabled: false,
+            enabled: true,
         },
         MenuItem {
             label: "Start".to_owned(),
@@ -367,7 +370,7 @@ pub(crate) fn menu_items(
             enabled: false,
         },
         MenuItem {
-            label: "Status".to_owned(),
+            label: "Logs".to_owned(),
             enabled: true,
         },
         MenuItem {
@@ -457,11 +460,14 @@ mod tests {
     }
 
     #[test]
-    fn status_command_remains_clickable_below_the_disabled_summary() {
-        assert_eq!(STATUS_COMMAND_ID, 1009);
+    fn logs_command_remains_clickable_below_the_disabled_summary() {
+        assert_eq!(LOGS_COMMAND_ID, 1009);
+        assert_eq!(GITHUB_COMMAND_ID, 1010);
+        assert_eq!(GITHUB_URL, "https://github.com/kaiiuen/true-tick");
         let items = menu_items(TrayStatus::Stopped, false, false, TimingValues::default());
-        assert!(!items[0].enabled);
+        assert!(items[0].enabled);
         assert!(!items[5].enabled);
+        assert_eq!(items[6].label, "Logs");
         assert!(items[6].enabled);
     }
 
@@ -474,7 +480,8 @@ mod tests {
             (1006, "Launch True Tick when you sign in"),
             (1007, "Request timing automatically on AC power"),
             (1008, "Request timing automatically on AC power"),
-            (STATUS_COMMAND_ID, "Open status and session logs"),
+            (LOGS_COMMAND_ID, "Open status and session logs"),
+            (GITHUB_COMMAND_ID, "Open True Tick on GitHub"),
             (1004, "Stop safely and quit"),
         ];
         for (command_id, expected) in descriptions {
@@ -605,7 +612,7 @@ mod tests {
         for command in [1001, 1002, 1005, 1006, 1007, 1008] {
             assert!(menu_action_keeps_open(command));
         }
-        for command in [STATUS_COMMAND_ID, 1004] {
+        for command in [LOGS_COMMAND_ID, GITHUB_COMMAND_ID, 1004] {
             assert!(!menu_action_keeps_open(command));
         }
     }
@@ -766,11 +773,11 @@ mod tests {
                 "Auto-start: On",
                 "Auto-time: Off",
                 "Status: Running (0.497 ms)",
-                "Status",
+                "Logs",
                 "Quit"
             ]
         );
-        assert!(!items[0].enabled);
+        assert!(items[0].enabled);
         assert!(!items[5].enabled);
         assert!(!items[1].enabled);
         assert!(items[2].enabled);
