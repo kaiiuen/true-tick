@@ -455,11 +455,11 @@ fn native_detail(details: &str, key: &str) -> Option<i64> {
 fn native_outcome(name: &str, details: &str) -> NativeOutcome {
     let raw_status = native_detail(details, "raw_status");
     NativeOutcome {
-        ntstatus: (name.contains("Nt") || name.contains("timer"))
+        ntstatus: (name.contains("Nt") || name.starts_with("timer."))
             .then_some(raw_status)
             .flatten()
             .and_then(|value| i32::try_from(value).ok()),
-        win32_last_error: (!name.contains("Nt") && !name.contains("timer"))
+        win32_last_error: (!name.contains("Nt") && !name.starts_with("timer."))
             .then_some(raw_status)
             .flatten()
             .and_then(|value| u32::try_from(value).ok()),
@@ -652,6 +652,16 @@ mod tests {
     fn native_boolean_wrapper_uses_windows_values() {
         assert_eq!(nt_boolean(false), 0);
         assert_eq!(nt_boolean(true), 1);
+    }
+
+    #[test]
+    fn native_diagnostic_types_distinguish_ntstatus_from_win32_status() {
+        let nt = native_outcome("timer.resolve", "raw_status=-7 requested_hns=5000");
+        assert_eq!(nt.ntstatus, Some(-7));
+        assert_eq!(nt.win32_last_error, None);
+        let win32 = native_outcome("native.SetTimer.error", "raw_status=1400");
+        assert_eq!(win32.ntstatus, None);
+        assert_eq!(win32.win32_last_error, Some(1400));
     }
 
     #[test]

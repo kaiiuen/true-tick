@@ -1651,7 +1651,7 @@ fn numeric_detail(details: &str, key: &str) -> Option<i64> {
 fn native_outcome(name: &str, details: &str) -> NativeOutcome {
     let raw_status = numeric_detail(details, "raw_status");
     let raw_error = numeric_detail(details, "raw_error");
-    let ntstatus = if name.contains("Nt") || name.contains("timer") {
+    let ntstatus = if name.contains("Nt") || name.starts_with("timer.") {
         raw_status.and_then(|value| i32::try_from(value).ok())
     } else {
         None
