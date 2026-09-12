@@ -273,6 +273,9 @@ struct ListViewColumn {
     subitem: i32,
     image: i32,
     order: i32,
+    minimum_width: i32,
+    default_width: i32,
+    ideal_width: i32,
 }
 
 #[repr(C)]
@@ -289,7 +292,9 @@ struct ListViewItem {
     indent: i32,
     group_id: i32,
     columns: u32,
-    placeholder: *mut c_void,
+    column_indices: *mut u32,
+    column_formats: *mut i32,
+    group: i32,
 }
 
 #[repr(C)]
@@ -3496,6 +3501,9 @@ unsafe fn initialize_diagnostic_list(list: *mut c_void) -> bool {
             subitem: index as i32,
             image: 0,
             order: index as i32,
+            minimum_width: 0,
+            default_width: 0,
+            ideal_width: 0,
         };
         if SendMessageW(
             list,
@@ -3529,13 +3537,15 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &App) {
             state: 0,
             state_mask: 0,
             text: first.as_mut_ptr(),
-            text_maximum: first.len() as i32,
+            text_maximum: first.len().saturating_sub(1) as i32,
             image: 0,
             parameter: 0,
             indent: 0,
             group_id: 0,
             columns: 0,
-            placeholder: std::ptr::null_mut(),
+            column_indices: std::ptr::null_mut(),
+            column_formats: std::ptr::null_mut(),
+            group: 0,
         };
         if SendMessageW(
             list,
@@ -3555,13 +3565,15 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &App) {
                 state: 0,
                 state_mask: 0,
                 text: text.as_mut_ptr(),
-                text_maximum: text.len() as i32,
+                text_maximum: text.len().saturating_sub(1) as i32,
                 image: 0,
                 parameter: 0,
                 indent: 0,
                 group_id: 0,
                 columns: 0,
-                placeholder: std::ptr::null_mut(),
+                column_indices: std::ptr::null_mut(),
+                column_formats: std::ptr::null_mut(),
+                group: 0,
             };
             let _ = SendMessageW(
                 list,

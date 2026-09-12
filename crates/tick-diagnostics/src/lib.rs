@@ -542,9 +542,11 @@ mod tests {
         assert_eq!(row.cells[5], "Release");
         assert_eq!(row.cells[6], "Handoff");
         assert_eq!(row.cells[7], "Unverified");
-        assert!(row.cells[9].contains("ntstatus=-7"));
-        assert!(row.cells[9].contains("win32_last_error=5"));
-        assert!(row.cells[9].contains("requested_hns=5000"));
+        assert_eq!(row.cells[8], "timer.release");
+        assert_eq!(
+            row.cells[9],
+            "command=stop ntstatus=-7 win32_last_error=5 requested_hns=5000 selected_hns=5000 effective_hns=9966"
+        );
     }
 
     #[test]
