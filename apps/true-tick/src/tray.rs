@@ -177,6 +177,7 @@ const BS_PUSHBUTTON: u32 = 0x00000000;
 const SS_LEFT: u32 = 0x00000000;
 
 const WM_SIZE: u32 = 0x0005;
+const WM_DPICHANGED: u32 = 0x02E0;
 const WM_SETREDRAW: u32 = 0x000B;
 const WM_PAINT: u32 = 0x000F;
 const WM_CLOSE: u32 = 0x0010;
@@ -198,14 +199,17 @@ const WS_EX_TOOLWINDOW: u32 = 0x00000080;
 const WS_EX_APPWINDOW: u32 = 0x00040000;
 const SW_SHOWNORMAL: i32 = 1;
 const SW_RESTORE: i32 = 9;
-const DIAGNOSTIC_MIN_WIDTH: i32 = 820;
-const DIAGNOSTIC_MIN_HEIGHT: i32 = 260;
 const DIAGNOSTIC_WINDOW_TITLE: &str = "True™ Tick Status and Diagnostics";
 const DIAGNOSTIC_LOADING_SUMMARY: &str = "Loading True™ Tick diagnostics...";
 const MAX_STARTUP_STATUS_BYTES: usize = 512;
 const DIAGNOSTIC_WINDOW_PARENT: *mut c_void = std::ptr::null_mut();
-const DIAGNOSTIC_SUMMARY_HEIGHT: i32 = 148;
-const DIAGNOSTIC_TOOLBAR_HEIGHT: i32 = 44;
+const DIAGNOSTIC_SUMMARY_HEIGHT: i32 = 220;
+const DIAGNOSTIC_TOOLBAR_HEIGHT: i32 = 36;
+const DIAGNOSTIC_GRID_MIN_HEIGHT: i32 = 96;
+const DIAGNOSTIC_TOOLBAR_MARGIN: i32 = 8;
+const DIAGNOSTIC_TOOLBAR_GAP: i32 = 8;
+const DIAGNOSTIC_TOOLBAR_MIN_MESSAGE_WIDTH: i32 = 140;
+const DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS: [i32; 8] = [64, 52, 72, 132, 88, 160, 64, 64];
 const DIAGNOSTIC_COLUMN_WIDTHS: [i32; 11] = [54, 70, 78, 78, 70, 86, 82, 90, 86, 160, 240];
 const DIAGNOSTIC_COLUMN_MIN_WIDTHS: [i32; 11] = [36, 52, 64, 64, 52, 64, 60, 68, 64, 84, 240];
 const DIAGNOSTIC_COLUMN_MAX_WIDTHS: [i32; 11] =
@@ -218,16 +222,13 @@ const DEFAULT_GUI_FONT: i32 = 17;
 const DIAGNOSTIC_RANGE_INPUT_LIMIT: usize = 64;
 const WS_CHILD: u32 = 0x40000000;
 const WS_HSCROLL: u32 = 0x00100000;
-const WS_VSCROLL: u32 = 0x00200000;
 const WS_EX_CLIENTEDGE: u32 = 0x00000200;
 const SWP_NOZORDER: u32 = 0x0004;
 const SWP_NOACTIVATE: u32 = 0x0010;
 const SWP_NOSENDCHANGING: u32 = 0x0400;
 const SB_HORZ: i32 = 0;
 
-const ES_MULTILINE: u32 = 0x0004;
-const ES_READONLY: u32 = 0x0800;
-const ES_AUTOVSCROLL: u32 = 0x0040;
+const SS_NOPREFIX: u32 = 0x0000_0080;
 
 const ICC_LISTVIEW_CLASSES: u32 = 0x0000_0001;
 // The standard bar-class group includes the native tooltip control.
@@ -3749,6 +3750,149 @@ fn scale_logical(value: i32, dpi: u32) -> i32 {
     value.saturating_mul(dpi as i32).saturating_add(95) / 96
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DiagnosticLayoutRect {
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+}
+
+impl DiagnosticLayoutRect {
+    fn right(self) -> i32 {
+        self.left.saturating_add(self.width)
+    }
+
+    fn bottom(self) -> i32 {
+        self.top.saturating_add(self.height)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DiagnosticToolbarLayout {
+    display_label: DiagnosticLayoutRect,
+    display_input: DiagnosticLayoutRect,
+    show_all: DiagnosticLayoutRect,
+    transfer_label: DiagnosticLayoutRect,
+    range_input: DiagnosticLayoutRect,
+    selection_summary: DiagnosticLayoutRect,
+    copy: DiagnosticLayoutRect,
+    export: DiagnosticLayoutRect,
+    message: DiagnosticLayoutRect,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DiagnosticLayout {
+    summary: DiagnosticLayoutRect,
+    toolbar: DiagnosticToolbarLayout,
+    list: DiagnosticLayoutRect,
+}
+
+fn diagnostic_toolbar_min_width(dpi: u32) -> i32 {
+    let fixed_width = DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS
+        .into_iter()
+        .fold(0i32, i32::saturating_add);
+    let gaps = DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS.len() as i32 * DIAGNOSTIC_TOOLBAR_GAP;
+    scale_logical(
+        DIAGNOSTIC_TOOLBAR_MARGIN * 2 + fixed_width + gaps + DIAGNOSTIC_TOOLBAR_MIN_MESSAGE_WIDTH,
+        dpi.max(96),
+    )
+}
+
+fn diagnostic_min_client_height(dpi: u32) -> i32 {
+    scale_logical(
+        DIAGNOSTIC_SUMMARY_HEIGHT + DIAGNOSTIC_TOOLBAR_HEIGHT + DIAGNOSTIC_GRID_MIN_HEIGHT,
+        dpi.max(96),
+    )
+}
+
+fn diagnostic_toolbar_layout(
+    width: i32,
+    top: i32,
+    height: i32,
+    dpi: u32,
+) -> DiagnosticToolbarLayout {
+    let dpi = dpi.max(96);
+    let row_height = scale_logical(24, dpi).min(height.max(0));
+    let row_top = top.saturating_add((height.saturating_sub(row_height)) / 2);
+    let gap = scale_logical(DIAGNOSTIC_TOOLBAR_GAP, dpi);
+    let margin = scale_logical(DIAGNOSTIC_TOOLBAR_MARGIN, dpi);
+    let widths = DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS.map(|value| scale_logical(value, dpi));
+    let mut cursor = margin;
+    let mut next = |control_width: i32| {
+        let rect = DiagnosticLayoutRect {
+            left: cursor,
+            top: row_top,
+            width: control_width,
+            height: row_height,
+        };
+        cursor = cursor.saturating_add(control_width).saturating_add(gap);
+        rect
+    };
+    let display_label = next(widths[0]);
+    let display_input = next(widths[1]);
+    let show_all = next(widths[2]);
+    let transfer_label = next(widths[3]);
+    let range_input = next(widths[4]);
+    let selection_summary = next(widths[5]);
+    let copy = next(widths[6]);
+    let export = next(widths[7]);
+    let message_left = cursor;
+    let message_width = width
+        .saturating_sub(message_left)
+        .saturating_sub(margin)
+        .max(0);
+    let message = DiagnosticLayoutRect {
+        left: message_left,
+        top: row_top,
+        width: message_width,
+        height: row_height,
+    };
+    DiagnosticToolbarLayout {
+        display_label,
+        display_input,
+        show_all,
+        transfer_label,
+        range_input,
+        selection_summary,
+        copy,
+        export,
+        message,
+    }
+}
+
+fn diagnostic_layout(width: i32, height: i32, dpi: u32) -> DiagnosticLayout {
+    let dpi = dpi.max(96);
+    let toolbar_height = scale_logical(DIAGNOSTIC_TOOLBAR_HEIGHT, dpi);
+    let grid_minimum = scale_logical(DIAGNOSTIC_GRID_MIN_HEIGHT, dpi);
+    let summary_height = scale_logical(DIAGNOSTIC_SUMMARY_HEIGHT, dpi).min(
+        height
+            .saturating_sub(toolbar_height)
+            .saturating_sub(grid_minimum)
+            .max(0),
+    );
+    let list_top = summary_height.saturating_add(toolbar_height);
+    DiagnosticLayout {
+        summary: DiagnosticLayoutRect {
+            left: 0,
+            top: 0,
+            width: width.max(0),
+            height: summary_height,
+        },
+        toolbar: diagnostic_toolbar_layout(width, summary_height, toolbar_height, dpi),
+        list: DiagnosticLayoutRect {
+            left: 0,
+            top: list_top,
+            width: width.max(0),
+            height: height.saturating_sub(list_top).max(0),
+        },
+    }
+}
+
+fn diagnostic_summary_style() -> u32 {
+    WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX
+}
+
 unsafe fn diagnostic_display_text(app: &App) -> String {
     let Some(input) = app.diagnostic_display_input else {
         return String::new();
@@ -4019,7 +4163,130 @@ unsafe fn apply_diagnostic_grid_selection(
     }
 }
 
-unsafe fn layout_diagnostic_controls(window: *mut c_void, app: &App) {
+unsafe fn record_diagnostic_layout_failure(
+    app: &App,
+    stage: &str,
+    index: Option<usize>,
+    raw_status: u32,
+) {
+    app.diagnostics.record(
+        "diagnostic.layout.error",
+        format!(
+            "stage={stage} control_index={} raw_status={raw_status}",
+            index.map_or_else(|| "none".to_owned(), |value| value.to_string())
+        ),
+    );
+}
+
+unsafe fn fallback_diagnostic_layout(
+    window: *mut c_void,
+    app: &App,
+    controls: &[(Option<*mut c_void>, DiagnosticLayoutRect)],
+) -> bool {
+    let mut success = true;
+    for (index, (control, rect)) in controls.iter().enumerate() {
+        let Some(control) = *control else {
+            record_diagnostic_layout_failure(app, "missing_control", Some(index), 0);
+            success = false;
+            continue;
+        };
+        if SetWindowPos(
+            control,
+            std::ptr::null_mut(),
+            rect.left,
+            rect.top,
+            rect.width,
+            rect.height,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
+        ) == 0
+        {
+            record_diagnostic_layout_failure(app, "SetWindowPos", Some(index), GetLastError());
+            success = false;
+        }
+    }
+    let _ = InvalidateRect(window, std::ptr::null(), 1);
+    success
+}
+
+unsafe fn apply_diagnostic_layout(
+    window: *mut c_void,
+    app: &App,
+    controls: &[(Option<*mut c_void>, DiagnosticLayoutRect)],
+) -> bool {
+    let mut defer = BeginDeferWindowPos(controls.len() as i32);
+    if defer.is_null() {
+        record_diagnostic_layout_failure(app, "BeginDeferWindowPos", None, GetLastError());
+        return fallback_diagnostic_layout(window, app, controls);
+    }
+    let mut deferred_failure = false;
+    for (index, (control, rect)) in controls.iter().enumerate() {
+        let Some(control) = *control else {
+            record_diagnostic_layout_failure(app, "missing_control", Some(index), 0);
+            deferred_failure = true;
+            continue;
+        };
+        if deferred_failure {
+            continue;
+        }
+        let next = DeferWindowPos(
+            defer,
+            control,
+            std::ptr::null_mut(),
+            rect.left,
+            rect.top,
+            rect.width,
+            rect.height,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
+        );
+        if next.is_null() {
+            record_diagnostic_layout_failure(app, "DeferWindowPos", Some(index), GetLastError());
+            deferred_failure = true;
+        } else {
+            defer = next;
+        }
+    }
+    let end_result = EndDeferWindowPos(defer);
+    if end_result == 0 {
+        record_diagnostic_layout_failure(app, "EndDeferWindowPos", None, GetLastError());
+        deferred_failure = true;
+    }
+    if deferred_failure {
+        fallback_diagnostic_layout(window, app, controls)
+    } else {
+        let _ = InvalidateRect(window, std::ptr::null(), 1);
+        true
+    }
+}
+
+unsafe fn fit_diagnostic_details_to_viewport(list: *mut c_void, client_width: i32, dpi: u32) {
+    if list.is_null() {
+        return;
+    }
+    let horizontal_scroll = GetScrollPos(list, SB_HORZ);
+    let mut fixed_width = 0i32;
+    for index in 0..REPORT_COLUMNS.len() - 1 {
+        let current = SendMessageW(list, LVM_GETCOLUMNWIDTH, index, 0).max(0) as i32;
+        let minimum = scale_logical(DIAGNOSTIC_COLUMN_MIN_WIDTHS[index], dpi);
+        let maximum = scale_logical(DIAGNOSTIC_COLUMN_MAX_WIDTHS[index], dpi);
+        let width = current.clamp(minimum, maximum);
+        let _ = SendMessageW(list, LVM_SETCOLUMNWIDTH, index, width as isize);
+        fixed_width = fixed_width.saturating_add(width);
+    }
+    let details_index = REPORT_COLUMNS.len() - 1;
+    let details_minimum = scale_logical(DIAGNOSTIC_COLUMN_MIN_WIDTHS[details_index], dpi);
+    let details_width = client_width
+        .saturating_sub(fixed_width)
+        .max(details_minimum);
+    let _ = SendMessageW(
+        list,
+        LVM_SETCOLUMNWIDTH,
+        details_index,
+        details_width as isize,
+    );
+    let _ = SetScrollPos(list, SB_HORZ, horizontal_scroll, 0);
+}
+
+unsafe fn layout_diagnostic_controls(window: *mut c_void, app: &App) -> bool {
     let mut client = Rect {
         left: 0,
         top: 0,
@@ -4027,91 +4294,32 @@ unsafe fn layout_diagnostic_controls(window: *mut c_void, app: &App) {
         bottom: 0,
     };
     if GetClientRect(window, &mut client) == 0 {
-        return;
+        record_diagnostic_layout_failure(app, "GetClientRect", None, GetLastError());
+        return false;
     }
     let width = (client.right - client.left).max(0);
     let height = (client.bottom - client.top).max(0);
     let dpi = GetDpiForWindow(window).max(96);
-    let summary_height = scale_logical(DIAGNOSTIC_SUMMARY_HEIGHT, dpi)
-        .min(height.saturating_sub(scale_logical(100, dpi)).max(0));
-    let toolbar_height = scale_logical(DIAGNOSTIC_TOOLBAR_HEIGHT, dpi)
-        .min(height.saturating_sub(summary_height).max(0));
-    let toolbar_top = summary_height;
-    let list_top = summary_height.saturating_add(toolbar_height);
-    let row_height = scale_logical(26, dpi);
-    let row_top = toolbar_top.saturating_add((toolbar_height - row_height).max(0) / 2);
-    let y_label = row_top.saturating_add(scale_logical(1, dpi));
-    let position = |logical: i32| scale_logical(logical, dpi);
-    let message_left = position(796);
-    let message_width = width.saturating_sub(message_left).max(0);
+    let layout = diagnostic_layout(width, height, dpi);
+    let toolbar = layout.toolbar;
     let controls = [
-        (app.diagnostic_summary, (0, 0, width, summary_height)),
-        (
-            app.diagnostic_display_label,
-            (position(8), y_label, position(68), row_height),
-        ),
-        (
-            app.diagnostic_display_input,
-            (position(84), row_top, position(52), row_height),
-        ),
-        (
-            app.diagnostic_show_all_button,
-            (position(144), row_top, position(72), row_height),
-        ),
-        (
-            app.diagnostic_toolbar_label,
-            (position(228), y_label, position(132), row_height),
-        ),
-        (
-            app.diagnostic_range_input,
-            (position(368), row_top, position(88), row_height),
-        ),
-        (
-            app.diagnostic_selection_summary,
-            (position(464), y_label, position(180), row_height),
-        ),
-        (
-            app.diagnostic_copy_button,
-            (position(652), row_top, position(64), row_height),
-        ),
-        (
-            app.diagnostic_export_button,
-            (position(724), row_top, position(64), row_height),
-        ),
-        (
-            app.diagnostic_message,
-            (message_left, y_label, message_width, row_height),
-        ),
-        (
-            app.diagnostic_list,
-            (0, list_top, width, height.saturating_sub(list_top)),
-        ),
+        (app.diagnostic_summary, layout.summary),
+        (app.diagnostic_display_label, toolbar.display_label),
+        (app.diagnostic_display_input, toolbar.display_input),
+        (app.diagnostic_show_all_button, toolbar.show_all),
+        (app.diagnostic_toolbar_label, toolbar.transfer_label),
+        (app.diagnostic_range_input, toolbar.range_input),
+        (app.diagnostic_selection_summary, toolbar.selection_summary),
+        (app.diagnostic_copy_button, toolbar.copy),
+        (app.diagnostic_export_button, toolbar.export),
+        (app.diagnostic_message, toolbar.message),
+        (app.diagnostic_list, layout.list),
     ];
-    let mut defer = BeginDeferWindowPos(controls.len() as i32);
-    if defer.is_null() {
-        return;
+    let positioned = apply_diagnostic_layout(window, app, &controls);
+    if let Some(list) = app.diagnostic_list {
+        fit_diagnostic_details_to_viewport(list, layout.list.width, dpi);
     }
-    for (control, (x, y, control_width, control_height)) in controls {
-        let Some(control) = control else {
-            continue;
-        };
-        let next = DeferWindowPos(
-            defer,
-            control,
-            std::ptr::null_mut(),
-            x,
-            y,
-            control_width,
-            control_height,
-            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
-        );
-        if next.is_null() {
-            return;
-        }
-        defer = next;
-    }
-    let _ = EndDeferWindowPos(defer);
-    let _ = InvalidateRect(window, std::ptr::null(), 1);
+    positioned
 }
 
 fn diagnostic_snapshot_key(events: &[tick_diagnostics::DiagnosticEvent]) -> Option<(usize, u64)> {
@@ -5118,30 +5326,22 @@ unsafe extern "system" fn diagnostic_window_proc(
         let app_ptr = app_create_params(create);
         let app = app_ptr as *mut App;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, app_ptr as isize);
-        let edit_class = wide("EDIT");
+        let static_class = wide("STATIC");
         let summary = CreateWindowExW(
             0,
-            edit_class.as_ptr(),
+            static_class.as_ptr(),
             wide(DIAGNOSTIC_LOADING_SUMMARY).as_ptr(),
-            WS_CHILD
-                | WS_VISIBLE
-                | WS_VSCROLL
-                | WS_CLIPCHILDREN
-                | ES_MULTILINE
-                | ES_READONLY
-                | WS_BORDER
-                | ES_AUTOVSCROLL,
+            diagnostic_summary_style(),
             0,
             0,
             800,
-            DIAGNOSTIC_SUMMARY_HEIGHT,
+            scale_logical(DIAGNOSTIC_SUMMARY_HEIGHT, 96),
             hwnd,
             std::ptr::null_mut(),
             GetModuleHandleW(std::ptr::null()),
             std::ptr::null_mut(),
         );
         let summary_error = if summary.is_null() { GetLastError() } else { 0 };
-        let static_class = wide("STATIC");
         let display_label = CreateWindowExW(
             0,
             static_class.as_ptr(),
@@ -5488,8 +5688,8 @@ unsafe extern "system" fn diagnostic_window_proc(
             let limits = l_param as *mut MinMaxInfo;
             if !limits.is_null() {
                 let dpi = GetDpiForWindow(hwnd).max(96);
-                (*limits).minimum_track_size.x = scale_logical(DIAGNOSTIC_MIN_WIDTH, dpi);
-                (*limits).minimum_track_size.y = scale_logical(DIAGNOSTIC_MIN_HEIGHT, dpi);
+                (*limits).minimum_track_size.x = diagnostic_toolbar_min_width(dpi);
+                (*limits).minimum_track_size.y = diagnostic_min_client_height(dpi);
             }
             return 0;
         } else if message == WM_CLOSE {
@@ -5972,6 +6172,15 @@ extern "system" {
     fn GetClientRect(window: *mut c_void, rect: *mut Rect) -> i32;
     fn SendMessageW(hwnd: *mut c_void, message: u32, w: usize, l: isize) -> isize;
     fn BeginDeferWindowPos(number: i32) -> *mut c_void;
+    fn SetWindowPos(
+        window: *mut c_void,
+        insert_after: *mut c_void,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        flags: u32,
+    ) -> i32;
     fn DeferWindowPos(
         defer: *mut c_void,
         window: *mut c_void,
@@ -6106,7 +6315,7 @@ mod tests {
         assert_ne!(ID_DIAGNOSTIC_DISPLAY_LIMIT, ID_DIAGNOSTIC_RANGE);
         assert_ne!(ID_DIAGNOSTIC_SHOW_ALL, ID_DIAGNOSTIC_RANGE);
         assert_eq!(DIAGNOSTIC_RANGE_INPUT_LIMIT, 64);
-        assert_eq!(DIAGNOSTIC_TOOLBAR_HEIGHT, 44);
+        assert_eq!(DIAGNOSTIC_TOOLBAR_HEIGHT, 36);
         let selection = RowSelection::new(12, 24);
         assert_eq!(
             diagnostic_range_details(selection, 32),
@@ -6129,6 +6338,65 @@ mod tests {
         ] {
             assert!(!name.is_empty());
         }
+    }
+
+    #[test]
+    fn diagnostic_summary_is_a_non_scrolling_read_only_static_contract() {
+        let style = diagnostic_summary_style();
+        assert_ne!(style & WS_CHILD, 0);
+        assert_ne!(style & WS_VISIBLE, 0);
+        assert_ne!(style & SS_NOPREFIX, 0);
+        assert_eq!(style & (0x0020_0000 | 0x0040 | 0x0004), 0);
+        assert!(DIAGNOSTIC_SUMMARY_HEIGHT >= 10 * 18);
+    }
+
+    #[test]
+    fn diagnostic_toolbar_layout_is_one_row_and_derived_from_flow() {
+        let layout = diagnostic_layout(980, 600, 96);
+        let toolbar = layout.toolbar;
+        let controls = [
+            toolbar.display_label,
+            toolbar.display_input,
+            toolbar.show_all,
+            toolbar.transfer_label,
+            toolbar.range_input,
+            toolbar.selection_summary,
+            toolbar.copy,
+            toolbar.export,
+            toolbar.message,
+        ];
+        assert!(controls
+            .windows(2)
+            .all(|pair| pair[0].right() <= pair[1].left));
+        assert!(controls
+            .iter()
+            .all(|control| control.top == toolbar.display_input.top
+                && control.height == toolbar.display_input.height));
+        assert_eq!(
+            toolbar.display_input.left - toolbar.display_label.right(),
+            8
+        );
+        assert_eq!(toolbar.message.width, 204);
+        assert_eq!(diagnostic_toolbar_min_width(96), 916);
+        assert!(toolbar.message.width >= DIAGNOSTIC_TOOLBAR_MIN_MESSAGE_WIDTH);
+    }
+
+    #[test]
+    fn diagnostic_minimum_size_and_dpi_scaling_keep_summary_and_grid_visible() {
+        assert_eq!(diagnostic_min_client_height(96), 352);
+        assert_eq!(diagnostic_toolbar_min_width(144), 1_374);
+        assert_eq!(diagnostic_min_client_height(144), 528);
+        let layout = diagnostic_layout(1_374, 528, 144);
+        assert_eq!(
+            layout.summary.height,
+            scale_logical(DIAGNOSTIC_SUMMARY_HEIGHT, 144)
+        );
+        assert_eq!(
+            layout.list.height,
+            scale_logical(DIAGNOSTIC_GRID_MIN_HEIGHT, 144)
+        );
+        assert!(layout.summary.bottom() <= layout.toolbar.display_input.top);
+        assert!(layout.toolbar.display_input.bottom() <= layout.list.top);
     }
 
     #[test]
@@ -6297,9 +6565,9 @@ mod tests {
         assert!(DIAGNOSTIC_WINDOW_PARENT.is_null());
         assert_ne!(diagnostic_window_extended_style() & WS_EX_APPWINDOW, 0);
         assert_eq!(diagnostic_window_extended_style() & WS_EX_TOOLWINDOW, 0);
-        assert_eq!(DIAGNOSTIC_MIN_WIDTH, 820);
-        assert_eq!(DIAGNOSTIC_MIN_HEIGHT, 260);
-        assert_eq!(DIAGNOSTIC_TOOLBAR_HEIGHT, 44);
+        assert_eq!(diagnostic_toolbar_min_width(96), 916);
+        assert_eq!(diagnostic_min_client_height(96), 352);
+        assert_eq!(DIAGNOSTIC_TOOLBAR_HEIGHT, 36);
     }
 
     #[test]
