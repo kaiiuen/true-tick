@@ -69,10 +69,21 @@ An inconclusive adapter postcondition enters an explicit uncertain ownership sta
 and suppresses repeat acquisition. The adapter retains enough request identity for
 a controlled matching release or recovery attempt. Normal message-loop shutdown
 uses one centralized cleanup guard. The `TPM_RETURNCMD` return ID is dispatched once by the tray command handler and Quit is not swallowed by the persistent-menu loop. Tray Quit records the active-state decision and shows a native warning when timing is running, starting, stopping, pending, degraded, unverified, or ownership is uncertain. The warning has exactly `Cancel` and `Stop and Quit`. `Cancel` leaves timing and the menu command loop unchanged. `Stop and Quit` uses the same guarded release path as Stop and exits only after verification. A failed release leaves the app alive, updates the icon and diagnostic log, and allows retry. Normal cleanup preserves an unverified warning when cleanup cannot be confirmed. The runtime does not use a busy loop,
+
 high priority, affinity, QoS, execution-state requests, power-plan changes,
 registry tuning beyond the explicit current-user startup boundary, driver,
 hardware clock control, process detection, network services, installer, secure
 updater, or release machinery.
+
+`TaskDialogIndirect` is preferred because the tray embeds the Common Controls v6
+manifest. Its built-in warning icon and standard Windows visual style are combined
+with custom IDs `2001` for `Cancel` and `2002` for `Stop and Quit`. The HRESULT is
+captured and recorded in decimal and hexadecimal. A failed Task Dialog call is a
+not-shown result, never an implicit Cancel that reopens the menu. The failure then
+uses a warning-style `MessageBoxW` fallback whose text maps `Yes` to Stop and Quit
+and `No` to Cancel. Only `IDYES` selects Stop and Quit. Close, `IDCANCEL`, unknown
+or zero results, and MessageBox failure are fail-closed Cancel decisions. A failed
+warning path closes the menu without silently reopening it.
 Boot startup registration is a per-user Run-key operation controlled by
 `startup_enabled` in the local config. Portable A/B mode registers the buildable
 `Launcher.exe` entry point, not `true-tick.exe` from either slot. Normal debug

@@ -58,6 +58,14 @@ Battery, Battery Saver, and unknown power states remain non-acquiring. A
 restrictive power transition attempts to release owned state. Normal Quit requires
 a safe stop when timing is active or uncertain and reports failed cleanup as an
 unverified warning rather than exiting.
+Quit warnings use the built-in Task Dialog warning icon and standard Windows visual
+style through the Common Controls v6 manifest. Task Dialog IDs are `2001` for
+`Cancel` and `2002` for `Stop and Quit`, and only `2002` can select the guarded stop
+path. The Task Dialog HRESULT is logged in decimal and hexadecimal. A failed Task
+Dialog uses a warning-style `MessageBoxW` fallback with `Yes = Stop and Quit` and
+`No = Cancel`. Only `IDYES` selects Stop and Quit. Cancel, close, unknown or zero
+results, and MessageBox failure keep the application open. A failed warning does not
+silently reopen the context menu.
 Running and verified ownership is green. Starting, stopping, pending, degraded,
 or unverified behavior is yellow. Stopped, blocked, unsupported, or error behavior
 is red. Unsupported is produced when the native capability is unavailable. Error

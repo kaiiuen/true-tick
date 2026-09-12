@@ -62,6 +62,16 @@ notifications open this same menu. Button-down and double-click notifications ar
 ignored, so one Windows notification does not create duplicate menus. Start and Stop
 remain manual controls and use the same guarded policy and ownership lifecycle as
 automatic activation. Quit logs its request, active-state decision, dialog result, cleanup result, and exit permission. If timing is running, starting, stopping, pending, degraded, unverified, or ownership is uncertain, the warning offers exactly `Cancel` and `Stop and Quit`. Cancel leaves timing, the application, and the popup command loop unchanged. Stop and Quit uses the same guarded release path as Stop and exits only after release verification. A failed or uncertain release keeps the app open, updates status and diagnostics, and allows retry. If the state is definitely stopped with no pending ownership, Quit exits without a warning. The diagnostic window shows a bounded, local in-memory session log.
+
+TaskDialogIndirect is the preferred quit warning because the tray manifest enables
+Common Controls v6. It uses the built-in warning icon and standard Windows visual
+style with custom button IDs `2001` for `Cancel` and `2002` for `Stop and Quit`.
+The HRESULT is captured and logged in decimal and hexadecimal. Any failed Task
+Dialog call is treated as not shown and invokes a built-in `MessageBoxW` fallback
+with warning styling and `Yes = Stop and Quit` plus `No = Cancel`. Only `IDYES`
+can select Stop and Quit. Close, Cancel, unknown results, zero results, and any
+MessageBox failure keep the application open. If no warning is shown, the menu is
+closed rather than silently reopened.
 It excludes raw pointers, private tokens, credentials, arbitrary secrets, and
 unbounded sensitive paths. The tooltip and status menu use short runtime timing values such as `Running
 (0.500 ms)`, `Running (0.497 ms, finer)`, `Stopped (current: 0.497 ms)`,
