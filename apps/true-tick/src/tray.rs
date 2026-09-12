@@ -76,13 +76,29 @@ const GWLP_USERDATA: i32 = -21;
 const GW_CHILD: u32 = 5;
 const IDI_APPLICATION: usize = 32512;
 const MB_ICONWARNING: u32 = 0x0000_0030;
-const TASKDIALOG_BUTTON_CANCEL: i32 = 1;
-const TASKDIALOG_BUTTON_STOP_AND_QUIT: i32 = 2;
+const TASKDIALOG_BUTTON_CANCEL: i32 = 2001;
+const TASKDIALOG_BUTTON_STOP_AND_QUIT: i32 = 2002;
+const TASKDIALOG_ICON_WARNING: *const u16 = (-1isize) as *const u16;
+const TDF_ALLOW_DIALOG_CANCELLATION: u32 = 0x0008;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum QuitDecision {
     ExitNormally,
     RequireSafetyDialog { reason: QuitSafetyReason },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuitDialogDecision {
+    StopAndQuit,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct QuitWarningResult {
+    decision: QuitDialogDecision,
+    task_dialog_hresult: i32,
+    message_box_result: Option<i32>,
+    dialog_shown: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -888,8 +904,20 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
                 }
                 QuitDecision::RequireSafetyDialog { reason } => {
                     app.record("quit.warning.shown", format!("reason={reason:?}"));
-                    match show_quit_warning(hwnd) {
-                        TASKDIALOG_BUTTON_STOP_AND_QUIT => {
+                    let warning = show_quit_warning(hwnd);
+                    let task_dialog_hresult = warning.task_dialog_hresult;
+                    app.record(
+                        "quit.dialog.result",
+                        format!(
+                            "task_dialog_hresult={task_dialog_hresult} task_dialog_hresult_hex=0x{:08X} message_box_result={:?} final_decision={:?} dialog_shown={}",
+                            task_dialog_hresult as u32,
+                            warning.message_box_result,
+                            warning.decision,
+                            warning.dialog_shown
+                        ),
+                    );
+                    match warning.decision {
+                        QuitDialogDecision::StopAndQuit => {
                             app.record("quit.dialog.result", "result=stop_and_quit");
                             app.record("quit.stop_and_quit.selected", "result=selected");
                             match app.cleanup_normal_shutdown() {
@@ -923,12 +951,14 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
                                 }
                             }
                         }
-                        _ => {
-                            app.record("quit.dialog.result", "result=cancel");
-                            app.record("quit.cancel.selected", "result=cancelled");
+                        QuitDialogDecision::Cancel => {
+                            app.record(
+                                "quit.cancel.selected",
+                                format!("result=cancelled dialog_shown={}", warning.dialog_shown),
+                            );
                             app.record("quit.cleanup.result", "result=not_attempted");
                             app.record("quit.exit.allowed", "result=denied");
-                            return true;
+                            return warning.dialog_shown;
                         }
                     }
                 }
@@ -1324,7 +1354,7 @@ fn quit_decision_for(status: TrayStatus, ownership: OwnershipState) -> QuitDecis
     QuitDecision::ExitNormally
 }
 
-unsafe fn show_quit_warning(hwnd: *mut c_void) -> i32 {
+unsafe fn show_quit_warning(hwnd: *mut c_void) -> QuitWarningResult {
     let cancel = wide("Cancel");
     let stop_and_quit = wide("Stop and Quit");
     let buttons = [
@@ -1346,10 +1376,10 @@ unsafe fn show_quit_warning(hwnd: *mut c_void) -> i32 {
         size: size_of::<TaskDialogConfig>() as u32,
         parent: hwnd,
         instance: std::ptr::null_mut(),
-        flags: 0,
+        flags: TDF_ALLOW_DIALOG_CANCELLATION,
         common_buttons: 0,
         window_title: title.as_ptr(),
-        main_icon: std::ptr::null(),
+        main_icon: TASKDIALOG_ICON_WARNING,
         main_instruction: instruction.as_ptr(),
         content: content.as_ptr(),
         button_count: buttons.len() as u32,
@@ -1367,14 +1397,31 @@ unsafe fn show_quit_warning(hwnd: *mut c_void) -> i32 {
         callback_data: 0,
         width: 0,
     };
-    let mut selected = TASKDIALOG_BUTTON_CANCEL;
-    let _ = TaskDialogIndirect(
+    let mut selected = 0;
+    let task_dialog_hresult = TaskDialogIndirect(
         &config,
         &mut selected,
         std::ptr::null_mut(),
         std::ptr::null_mut(),
     );
-    selected
+    QuitWarningResult {
+        decision: if task_dialog_hresult < 0 {
+            QuitDialogDecision::Cancel
+        } else {
+            task_dialog_decision(selected)
+        },
+        task_dialog_hresult,
+        message_box_result: None,
+        dialog_shown: task_dialog_hresult >= 0,
+    }
+}
+
+fn task_dialog_decision(button_id: i32) -> QuitDialogDecision {
+    if button_id == TASKDIALOG_BUTTON_STOP_AND_QUIT {
+        QuitDialogDecision::StopAndQuit
+    } else {
+        QuitDialogDecision::Cancel
+    }
 }
 
 fn returned_menu_command(result: i32) -> Option<usize> {
@@ -1573,6 +1620,34 @@ mod tests {
             returned_menu_command(ID_AUTOMATIC_OFF as i32),
             Some(ID_AUTOMATIC_OFF)
         );
+    }
+
+    #[test]
+    fn task_dialog_uses_non_colliding_ids_and_only_stop_id_quits() {
+        assert_eq!(TASKDIALOG_BUTTON_CANCEL, 2001);
+        assert_eq!(TASKDIALOG_BUTTON_STOP_AND_QUIT, 2002);
+        assert_ne!(TASKDIALOG_BUTTON_CANCEL, 2);
+        assert_ne!(TASKDIALOG_BUTTON_STOP_AND_QUIT, 2);
+        assert_eq!(
+            task_dialog_decision(TASKDIALOG_BUTTON_STOP_AND_QUIT),
+            QuitDialogDecision::StopAndQuit
+        );
+        for button_id in [TASKDIALOG_BUTTON_CANCEL, 2, 0, -1, 9999] {
+            assert_eq!(task_dialog_decision(button_id), QuitDialogDecision::Cancel);
+        }
+    }
+
+    #[test]
+    fn failed_task_dialog_is_not_shown_and_fails_closed() {
+        let result = QuitWarningResult {
+            decision: QuitDialogDecision::Cancel,
+            task_dialog_hresult: -2,
+            message_box_result: None,
+            dialog_shown: false,
+        };
+        assert_eq!(result.decision, QuitDialogDecision::Cancel);
+        assert!(result.task_dialog_hresult < 0);
+        assert!(!result.dialog_shown);
     }
 
     #[test]
