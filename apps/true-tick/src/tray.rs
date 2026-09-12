@@ -32,11 +32,11 @@ use crate::tray_surface::{
     menu_description, menu_items_with_duration, power_reconciliation, release_needs_handoff,
     scheduled_display_key, status_menu_items, tooltip_at, tray_notification_opens_menu,
     HandoffProgress, HandoffTracker, PowerReconciliation, TimingValues, TrayStatus,
-    CANCEL_SCHEDULED_COMMAND_ID, GITHUB_COMMAND_ID, GITHUB_URL, HANDOFF_POLL_INTERVAL_MS,
-    LOGS_COMMAND_ID, PAUSE_FOR_15_COMMAND_ID, PAUSE_FOR_30_COMMAND_ID, PAUSE_FOR_5_COMMAND_ID,
-    PAUSE_FOR_60_COMMAND_ID, START_IN_15_COMMAND_ID, START_IN_1_COMMAND_ID, START_IN_30_COMMAND_ID,
-    START_IN_5_COMMAND_ID, START_IN_60_COMMAND_ID, STOP_IN_15_COMMAND_ID, STOP_IN_1_COMMAND_ID,
-    STOP_IN_30_COMMAND_ID, STOP_IN_5_COMMAND_ID, STOP_IN_60_COMMAND_ID,
+    CANCEL_PAUSE_COMMAND_ID, CANCEL_SCHEDULED_COMMAND_ID, GITHUB_COMMAND_ID, GITHUB_URL,
+    HANDOFF_POLL_INTERVAL_MS, LOGS_COMMAND_ID, PAUSE_FOR_15_COMMAND_ID, PAUSE_FOR_30_COMMAND_ID,
+    PAUSE_FOR_5_COMMAND_ID, PAUSE_FOR_60_COMMAND_ID, START_IN_15_COMMAND_ID, START_IN_1_COMMAND_ID,
+    START_IN_30_COMMAND_ID, START_IN_5_COMMAND_ID, START_IN_60_COMMAND_ID, STOP_IN_15_COMMAND_ID,
+    STOP_IN_1_COMMAND_ID, STOP_IN_30_COMMAND_ID, STOP_IN_5_COMMAND_ID, STOP_IN_60_COMMAND_ID,
 };
 
 const WM_APP: u32 = 0x8000;
@@ -2660,7 +2660,7 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
         } else {
             MF_STRING | MF_GRAYED
         };
-        let stop_flags = if items[3].enabled {
+        let stop_flags = if items[2].enabled {
             MF_STRING
         } else {
             MF_STRING | MF_GRAYED
@@ -2689,14 +2689,14 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
                 ID_START,
                 wide(&items[1].label).as_ptr(),
             )
-            && append_duration_choice_submenu(app, menu, DurationAction::Pause)
             && append_menu_checked(
                 app,
                 menu,
                 stop_flags,
                 ID_STOP,
-                wide(&items[3].label).as_ptr(),
+                wide(&items[2].label).as_ptr(),
             )
+            && append_duration_choice_submenu(app, menu, DurationAction::Pause)
             && append_duration_submenu(app, menu)
             && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
             && append_menu_checked(
@@ -2856,7 +2856,7 @@ unsafe fn refresh_popup_menu(app: &mut App) {
     );
     let _ = ModifyMenuW(
         handles.root,
-        4,
+        3,
         MF_BYPOSITION | MF_STRING | if stop_enabled { 0 } else { MF_GRAYED },
         ID_STOP,
         wide("Stop").as_ptr(),
@@ -2889,13 +2889,24 @@ unsafe fn refresh_popup_menu(app: &mut App) {
         wide(crate::tray_surface::automatic_label(app.config.automatic)).as_ptr(),
     );
     if let Some(duration) = handles.duration {
-        let cancel_enabled = app.pause.current().is_some();
+        let cancel_enabled = app
+            .pause
+            .current()
+            .is_some_and(|action| action.action != DurationAction::Pause);
         let _ = ModifyMenuW(
             duration,
             2,
             MF_BYPOSITION | MF_STRING | if cancel_enabled { 0 } else { MF_GRAYED },
             CANCEL_SCHEDULED_COMMAND_ID,
             wide("Cancel scheduled action").as_ptr(),
+        );
+        let pause_active = app.pause.pause_active();
+        let _ = ModifyMenuW(
+            duration,
+            3,
+            MF_BYPOSITION | MF_STRING | if pause_active { 0 } else { MF_GRAYED },
+            CANCEL_PAUSE_COMMAND_ID,
+            wide("Resume now").as_ptr(),
         );
     }
     if let Some(status_menu) = handles.status {
@@ -2957,13 +2968,16 @@ unsafe fn append_duration_choice_submenu(
     let choices = duration_choices(action);
     let mut ok = true;
     for (command, item) in command_ids.iter().zip(choices.iter()) {
-        ok &= append_menu_checked(
-            app,
-            submenu,
-            MF_STRING,
-            *command,
-            wide(&item.label).as_ptr(),
-        );
+        let enabled = match action {
+            DurationAction::Start => !app.pause.pause_active(),
+            DurationAction::Stop | DurationAction::Pause => true,
+        };
+        let flags = if enabled {
+            MF_STRING
+        } else {
+            MF_STRING | MF_GRAYED
+        };
+        ok &= append_menu_checked(app, submenu, flags, *command, wide(&item.label).as_ptr());
     }
     if !ok {
         DestroyMenu(submenu);
@@ -2998,7 +3012,8 @@ unsafe fn append_duration_submenu(app: &mut App, menu: *mut c_void) -> bool {
     }
     let mut ok = append_duration_choice_submenu(app, submenu, DurationAction::Start);
     ok &= append_duration_choice_submenu(app, submenu, DurationAction::Stop);
-    let cancel = duration_menu_items(app.pause.current())[2].clone();
+    let items = duration_menu_items(app.pause.current());
+    let cancel = items[2].clone();
     let cancel_flags = if cancel.enabled {
         MF_STRING
     } else {
@@ -3010,6 +3025,19 @@ unsafe fn append_duration_submenu(app: &mut App, menu: *mut c_void) -> bool {
         cancel_flags,
         CANCEL_SCHEDULED_COMMAND_ID,
         wide(&cancel.label).as_ptr(),
+    );
+    let resume = items[3].clone();
+    let resume_flags = if resume.enabled {
+        MF_STRING
+    } else {
+        MF_STRING | MF_GRAYED
+    };
+    ok &= append_menu_checked(
+        app,
+        submenu,
+        resume_flags,
+        CANCEL_PAUSE_COMMAND_ID,
+        wide(&resume.label).as_ptr(),
     );
     if !ok {
         DestroyMenu(submenu);
@@ -3198,6 +3226,7 @@ fn submenu_description(menu: *mut c_void) -> Option<&'static str> {
             "Start in >" => Some("Schedule a future guarded acquire"),
             "Stop in >" => Some("Schedule a future guarded release"),
             "Pause for >" => Some("Suppress acquisition for a fixed duration"),
+            "Resume now" => Some("Resume timing and cancel the pause"),
             "Status >" => Some("View read-only lifecycle details"),
             _ => None,
         };
@@ -3357,7 +3386,7 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
             open_diagnostic_window(app);
         }
         GITHUB_COMMAND_ID => open_github_page(hwnd, app),
-        CANCEL_SCHEDULED_COMMAND_ID => cancel_scheduled_action(app),
+        CANCEL_SCHEDULED_COMMAND_ID | CANCEL_PAUSE_COMMAND_ID => cancel_scheduled_action(app),
         START_IN_1_COMMAND_ID
         | START_IN_5_COMMAND_ID
         | START_IN_15_COMMAND_ID

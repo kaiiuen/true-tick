@@ -315,6 +315,7 @@ pub(crate) const PAUSE_FOR_15_COMMAND_ID: usize = 1022;
 pub(crate) const PAUSE_FOR_30_COMMAND_ID: usize = 1023;
 pub(crate) const PAUSE_FOR_60_COMMAND_ID: usize = 1024;
 pub(crate) const CANCEL_SCHEDULED_COMMAND_ID: usize = 1025;
+pub(crate) const CANCEL_PAUSE_COMMAND_ID: usize = 1026;
 pub(crate) const DURATION_MENU_COMMAND_ID: usize = 1101;
 pub(crate) const START_IN_MENU_COMMAND_ID: usize = 1102;
 pub(crate) const STOP_IN_MENU_COMMAND_ID: usize = 1103;
@@ -373,8 +374,13 @@ pub(crate) fn duration_menu_items(scheduled: Option<ScheduledAction>) -> Vec<Men
         },
         MenuItem {
             label: "Cancel scheduled action".to_owned(),
-            enabled: scheduled.is_some(),
-            command_id: None,
+            enabled: scheduled.is_some_and(|action| action.action != DurationAction::Pause),
+            command_id: Some(CANCEL_SCHEDULED_COMMAND_ID),
+        },
+        MenuItem {
+            label: "Resume now".to_owned(),
+            enabled: scheduled.is_some_and(|action| action.action == DurationAction::Pause),
+            command_id: Some(CANCEL_PAUSE_COMMAND_ID),
         },
     ]
 }
@@ -392,6 +398,7 @@ pub(crate) const fn menu_description(command_id: usize) -> Option<&'static str> 
         STOP_IN_MENU_COMMAND_ID => Some("Schedule a future guarded release"),
         PAUSE_FOR_MENU_COMMAND_ID => Some("Suppress acquisition for a fixed duration"),
         CANCEL_SCHEDULED_COMMAND_ID => Some("Clear the current scheduled action"),
+        CANCEL_PAUSE_COMMAND_ID => Some("Resume timing and cancel the pause"),
         STATUS_MENU_COMMAND_ID => Some("View read-only lifecycle details"),
         STATUS_STATE_COMMAND_ID => Some("Current True Tick lifecycle state"),
         STATUS_TIMING_COMMAND_ID => Some("Latest verified effective timing observation"),
@@ -472,6 +479,7 @@ pub(crate) const fn menu_action_keeps_open(command_id: usize) -> bool {
                 | PAUSE_FOR_30_COMMAND_ID
                 | PAUSE_FOR_60_COMMAND_ID
                 | CANCEL_SCHEDULED_COMMAND_ID
+                | CANCEL_PAUSE_COMMAND_ID
     )
 }
 
@@ -535,7 +543,7 @@ pub(crate) const fn menu_command_is_enabled_with_pause(
         | PAUSE_FOR_15_COMMAND_ID
         | PAUSE_FOR_30_COMMAND_ID
         | PAUSE_FOR_60_COMMAND_ID => true,
-        CANCEL_SCHEDULED_COMMAND_ID => schedule_active,
+        CANCEL_SCHEDULED_COMMAND_ID | CANCEL_PAUSE_COMMAND_ID => schedule_active,
         _ => false,
     }
 }
@@ -720,17 +728,17 @@ pub(crate) fn menu_items_with_duration(
             command_id: None,
         },
         MenuItem {
-            label: "Pause >".to_owned(),
-            enabled: true,
-            command_id: None,
-        },
-        MenuItem {
             label: "Stop".to_owned(),
             enabled: !paused
                 && !matches!(
                     status,
                     TrayStatus::Stopped | TrayStatus::Pausing | TrayStatus::Stopping
                 ),
+            command_id: None,
+        },
+        MenuItem {
+            label: "Pause >".to_owned(),
+            enabled: true,
             command_id: None,
         },
         MenuItem {
@@ -779,9 +787,15 @@ mod tests {
                 .iter()
                 .map(|item| item.label.as_str())
                 .collect::<Vec<_>>(),
-            ["Start in >", "Stop in >", "Cancel scheduled action"]
+            [
+                "Start in >",
+                "Stop in >",
+                "Cancel scheduled action",
+                "Resume now"
+            ]
         );
         assert!(!duration[2].enabled);
+        assert!(!duration[3].enabled);
         assert_eq!(
             duration_choices(DurationAction::Start)
                 .iter()
@@ -815,6 +829,44 @@ mod tests {
             Some((DurationAction::Pause, DurationChoice::ThirtyMinutes))
         );
         assert_eq!(duration_command(9999), None);
+        let now = Instant::now();
+        let paused = ScheduledAction {
+            action: DurationAction::Pause,
+            duration: DurationChoice::FiveMinutes,
+            deadline: now,
+            generation: 1,
+        };
+        let paused_items = duration_menu_items(Some(paused));
+        assert!(!paused_items[2].enabled);
+        assert!(paused_items[3].enabled);
+    }
+
+    #[test]
+    fn primary_menu_has_one_pause_submenu_and_start_is_disabled_while_paused() {
+        let items = menu_items_with_duration(
+            TrayStatus::Paused,
+            false,
+            false,
+            TimingValues::default(),
+            true,
+        );
+        let labels = items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(labels[1..5], ["Start", "Stop", "Pause >", "Schedule >"]);
+        assert_eq!(
+            labels.iter().filter(|label| **label == "Pause >").count(),
+            1
+        );
+        assert!(!items[1].enabled);
+        assert!(!menu_command_is_enabled_with_pause(
+            1001,
+            TrayStatus::Paused,
+            false,
+            false,
+            true
+        ));
     }
 
     #[test]
@@ -980,7 +1032,8 @@ mod tests {
             true,
         );
         assert!(!paused_menu[1].enabled);
-        assert!(paused_menu[2].enabled);
+        assert!(!paused_menu[2].enabled);
+        assert!(paused_menu[3].enabled);
         assert!(paused_menu[8].enabled);
     }
 
@@ -1418,8 +1471,8 @@ mod tests {
             [
                 version_header().as_str(),
                 "Start",
-                "Pause >",
                 "Stop",
+                "Pause >",
                 "Schedule >",
                 "Auto-start: On",
                 "Auto-time: Off",
