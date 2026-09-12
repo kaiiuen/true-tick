@@ -479,6 +479,7 @@ struct App {
     diagnostic_list: Option<*mut c_void>,
     diagnostic_selection: Option<RowSelection>,
     diagnostic_selection_sequences: Option<Vec<u64>>,
+    diagnostic_selection_reset: bool,
     diagnostic_message_text: String,
     diagnostic_refresh_pending: bool,
     menu_active: bool,
@@ -657,6 +658,7 @@ pub fn run() {
             diagnostic_list: None,
             diagnostic_selection: None,
             diagnostic_selection_sequences: None,
+            diagnostic_selection_reset: false,
             diagnostic_message_text: String::new(),
             diagnostic_refresh_pending: false,
             menu_active: false,
@@ -3665,6 +3667,11 @@ unsafe fn refresh_diagnostic_controls(
     let retained_rows = events.len();
     let input = diagnostic_range_text(app);
     let input_is_all = input.trim().is_empty() || input.trim().eq_ignore_ascii_case("all");
+    if preserve_selection && app.diagnostic_selection_reset {
+        set_diagnostic_selection_summary(app, "Selection reset: enter a new retained range");
+        set_diagnostic_action_enabled(app, false);
+        return;
+    }
     if preserve_selection && !input_is_all {
         if let Some(sequences) = app.diagnostic_selection_sequences.clone() {
             if let Some(selection) = row_selection_for_sequences(events, &sequences) {
@@ -3678,6 +3685,7 @@ unsafe fn refresh_diagnostic_controls(
             }
             app.diagnostic_selection = None;
             app.diagnostic_selection_sequences = None;
+            app.diagnostic_selection_reset = true;
             set_diagnostic_selection_summary(
                 app,
                 "Selection reset: selected rows are no longer retained",
@@ -3691,6 +3699,7 @@ unsafe fn refresh_diagnostic_controls(
                 "diagnostic.selection.reset",
                 format!("reason=rows_not_retained retained_rows={retained_rows}"),
             );
+            request_diagnostic_refresh(app);
             return;
         }
     }
@@ -3698,6 +3707,7 @@ unsafe fn refresh_diagnostic_controls(
         Ok(selection) => {
             app.diagnostic_selection = Some(selection);
             app.diagnostic_selection_sequences = Some(selected_event_sequences(events, selection));
+            app.diagnostic_selection_reset = false;
             if app.diagnostic_message_text.starts_with("Invalid range:") {
                 set_diagnostic_message(app, "");
             }
@@ -3710,6 +3720,7 @@ unsafe fn refresh_diagnostic_controls(
         Err(error) => {
             app.diagnostic_selection = None;
             app.diagnostic_selection_sequences = None;
+            app.diagnostic_selection_reset = false;
             set_diagnostic_selection_summary(app, "Selection unavailable");
             set_diagnostic_message(app, format!("Invalid range: {error}"));
             set_diagnostic_action_enabled(app, false);
@@ -4209,6 +4220,7 @@ fn diagnostic_toolbar_action(app: &mut App, action: &str) {
     };
     app.diagnostic_selection = Some(selection);
     app.diagnostic_selection_sequences = Some(selected_event_sequences(&events, selection));
+    app.diagnostic_selection_reset = false;
     let rows = diagnostic_grid_rows(&events, selection);
     let tsv = format_tsv(&rows);
     let details = diagnostic_range_details(selection, retained_rows);
@@ -4371,6 +4383,7 @@ fn diagnostic_range_changed(app: &mut App) {
         Ok(selection) => {
             app.diagnostic_selection = Some(selection);
             app.diagnostic_selection_sequences = Some(selected_event_sequences(&events, selection));
+            app.diagnostic_selection_reset = false;
             app.record(
                 "diagnostic.range.parsed",
                 format!(
@@ -4395,6 +4408,7 @@ fn diagnostic_range_changed(app: &mut App) {
             );
             app.diagnostic_selection = None;
             app.diagnostic_selection_sequences = None;
+            app.diagnostic_selection_reset = false;
             app.finish_operation(DiagnosticOutcome::Failed);
         }
     }
@@ -4698,6 +4712,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             (*app).diagnostic_list = None;
             (*app).diagnostic_selection = None;
             (*app).diagnostic_selection_sequences = None;
+            (*app).diagnostic_selection_reset = false;
             (*app).diagnostic_message_text.clear();
             (*app).diagnostic_refresh_pending = false;
         }

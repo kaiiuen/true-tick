@@ -736,6 +736,22 @@ mod tests {
         );
     }
 
+    fn test_event(sequence: u64) -> DiagnosticEvent {
+        DiagnosticEvent {
+            sequence,
+            elapsed: Duration::from_millis(sequence),
+            operation_id: sequence,
+            parent_operation_id: None,
+            correlation_id: sequence,
+            phase: DiagnosticPhase::Observe,
+            source: DiagnosticSource::Diagnostic,
+            outcome: DiagnosticOutcome::Completed,
+            native: NativeOutcome::default(),
+            name: "test.event".to_owned(),
+            details: String::new(),
+        }
+    }
+
     #[test]
     fn row_selection_parser_rejects_malformed_reversed_zero_negative_and_out_of_range() {
         assert_eq!(
@@ -762,6 +778,78 @@ mod tests {
         assert_eq!(
             parse_row_selection("1-5", 4),
             Err(RowSelectionError::OutOfRange { retained_rows: 4 })
+        );
+    }
+
+    #[test]
+    fn retained_row_mapping_keeps_row_and_sequence_distinct_for_the_report() {
+        let events = (401..=912).map(test_event).collect::<Vec<_>>();
+        let selection = parse_row_selection("353-354", events.len()).expect("sample range");
+        let rows = diagnostic_grid_rows(&events, selection);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].cells[0], "353");
+        assert_eq!(rows[0].cells[1], "753");
+        assert_eq!(rows[1].cells[0], "354");
+        assert_eq!(rows[1].cells[1], "754");
+        assert_eq!(selected_event_sequences(&events, selection), [753, 754]);
+        assert_eq!(
+            row_selection_for_sequences(&events, &[753, 754]),
+            Some(RowSelection::new(353, 354))
+        );
+    }
+
+    #[test]
+    fn truncation_keeps_report_rows_numbered_from_the_retained_snapshot() {
+        let store = DiagnosticStore::new(4);
+        for sequence in 1..=8 {
+            store.record("event", sequence.to_string());
+        }
+        let events = store.snapshot();
+        let rows = diagnostic_grid_rows(&events, RowSelection::all(events.len()));
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].cells[0], "1");
+        assert_eq!(rows[1].cells[0], "2");
+        assert_eq!(rows[2].cells[0], "3");
+        assert_eq!(rows[3].cells[0], "4");
+        assert_eq!(events[0].name, "diagnostic.log_truncated");
+        assert_ne!(rows[0].cells[0], rows[0].cells[1]);
+    }
+
+    #[test]
+    fn sequence_identity_preserves_a_range_when_retained_rows_shift() {
+        let old_events = (401..=912).map(test_event).collect::<Vec<_>>();
+        let old_selection = RowSelection::new(353, 354);
+        let sequences = selected_event_sequences(&old_events, old_selection);
+        let mut new_events = old_events[1..].to_vec();
+        new_events.push(test_event(913));
+        assert_eq!(
+            row_selection_for_sequences(&new_events, &sequences),
+            Some(RowSelection::new(352, 353))
+        );
+        assert_eq!(
+            row_selection_for_sequences(&new_events, &[753, 754, 912]),
+            None
+        );
+    }
+
+    #[test]
+    fn selected_tsv_contains_row_and_sequence_for_only_the_selected_rows() {
+        let events = (401..=912).map(test_event).collect::<Vec<_>>();
+        let selection = RowSelection::new(353, 354);
+        let output = format_tsv(&diagnostic_grid_rows(&events, selection));
+        let lines = output.lines().collect::<Vec<_>>();
+        assert_eq!(
+            lines[0],
+            "Row\tSequence\tElapsed\tOperation\tParent\tCorrelation\tPhase\tSource\tOutcome\tEvent\tDetails"
+        );
+        assert_eq!(lines.len(), 3);
+        assert_eq!(
+            lines[1].split('\t').take(2).collect::<Vec<_>>(),
+            ["353", "753"]
+        );
+        assert_eq!(
+            lines[2].split('\t').take(2).collect::<Vec<_>>(),
+            ["354", "754"]
         );
     }
 
