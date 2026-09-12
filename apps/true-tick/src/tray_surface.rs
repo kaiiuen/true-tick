@@ -572,11 +572,25 @@ fn format_duration(duration: Duration) -> String {
     format_duration_seconds(duration.as_secs())
 }
 
-pub(crate) fn format_remaining_duration(duration: Duration) -> String {
-    let seconds = duration
+pub(crate) fn remaining_display_seconds(duration: Duration) -> u64 {
+    duration
         .as_secs()
-        .saturating_add(u64::from(!duration.subsec_nanos().eq(&0)));
-    format_duration_seconds(seconds)
+        .saturating_add(u64::from(duration.subsec_nanos() != 0))
+}
+
+pub(crate) fn scheduled_display_key(
+    action: ScheduledAction,
+    now: Instant,
+) -> (DurationAction, u64, u64) {
+    (
+        action.action,
+        action.generation,
+        remaining_display_seconds(action.remaining(now)),
+    )
+}
+
+pub(crate) fn format_remaining_duration(duration: Duration) -> String {
+    format_duration_seconds(remaining_display_seconds(duration))
 }
 
 fn format_duration_seconds(seconds: u64) -> String {
@@ -865,6 +879,48 @@ mod tests {
             "5m 0s"
         );
         assert_eq!(format_duration(Duration::from_millis(299_999)), "4m 59s");
+        assert_eq!(remaining_display_seconds(Duration::from_millis(4_999)), 5);
+        assert_eq!(remaining_display_seconds(Duration::from_secs(5)), 5);
+        assert_eq!(remaining_display_seconds(Duration::ZERO), 0);
+    }
+
+    #[test]
+    fn schedule_publication_key_changes_with_generation_bucket_cancellation_and_expiration() {
+        let now = Instant::now();
+        let action = ScheduledAction {
+            action: DurationAction::Start,
+            duration: DurationChoice::FiveMinutes,
+            deadline: now + Duration::from_millis(2_001),
+            generation: 4,
+        };
+        assert_eq!(
+            scheduled_display_key(action, now),
+            (DurationAction::Start, 4, 3)
+        );
+        assert_ne!(
+            scheduled_display_key(action, now + Duration::from_millis(1_100)),
+            scheduled_display_key(action, now)
+        );
+        let replacement = ScheduledAction {
+            generation: 5,
+            ..action
+        };
+        assert_ne!(
+            scheduled_display_key(replacement, now),
+            scheduled_display_key(action, now)
+        );
+        assert_eq!(
+            scheduled_display_key(
+                ScheduledAction {
+                    deadline: now,
+                    ..action
+                },
+                now,
+            ),
+            (DurationAction::Start, 4, 0)
+        );
+        let cancelled: Option<(DurationAction, u64, u64)> = None;
+        assert_ne!(cancelled, Some(scheduled_display_key(action, now)));
     }
 
     #[test]

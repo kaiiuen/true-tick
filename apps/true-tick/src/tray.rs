@@ -29,13 +29,13 @@ use crate::tray_surface::{
     dpi_to_icon_canvas, duration_choices, duration_command, duration_menu_items, icon_pixel_color,
     menu_action_keeps_open, menu_command_dispatch_allowed, menu_command_is_enabled_with_pause,
     menu_description, menu_items_with_duration, power_reconciliation, release_needs_handoff,
-    status_menu_items, tooltip_at, tray_notification_opens_menu, HandoffProgress, HandoffTracker,
-    PowerReconciliation, TimingValues, TrayStatus, CANCEL_SCHEDULED_COMMAND_ID, GITHUB_COMMAND_ID,
-    GITHUB_URL, HANDOFF_POLL_INTERVAL_MS, LOGS_COMMAND_ID, PAUSE_FOR_15_COMMAND_ID,
-    PAUSE_FOR_30_COMMAND_ID, PAUSE_FOR_5_COMMAND_ID, PAUSE_FOR_60_COMMAND_ID,
-    START_IN_15_COMMAND_ID, START_IN_1_COMMAND_ID, START_IN_30_COMMAND_ID, START_IN_5_COMMAND_ID,
-    START_IN_60_COMMAND_ID, STOP_IN_15_COMMAND_ID, STOP_IN_1_COMMAND_ID, STOP_IN_30_COMMAND_ID,
-    STOP_IN_5_COMMAND_ID, STOP_IN_60_COMMAND_ID,
+    scheduled_display_key, status_menu_items, tooltip_at, tray_notification_opens_menu,
+    HandoffProgress, HandoffTracker, PowerReconciliation, TimingValues, TrayStatus,
+    CANCEL_SCHEDULED_COMMAND_ID, GITHUB_COMMAND_ID, GITHUB_URL, HANDOFF_POLL_INTERVAL_MS,
+    LOGS_COMMAND_ID, PAUSE_FOR_15_COMMAND_ID, PAUSE_FOR_30_COMMAND_ID, PAUSE_FOR_5_COMMAND_ID,
+    PAUSE_FOR_60_COMMAND_ID, START_IN_15_COMMAND_ID, START_IN_1_COMMAND_ID, START_IN_30_COMMAND_ID,
+    START_IN_5_COMMAND_ID, START_IN_60_COMMAND_ID, STOP_IN_15_COMMAND_ID, STOP_IN_1_COMMAND_ID,
+    STOP_IN_30_COMMAND_ID, STOP_IN_5_COMMAND_ID, STOP_IN_60_COMMAND_ID,
 };
 
 const WM_APP: u32 = 0x8000;
@@ -51,8 +51,11 @@ const PBT_APMPOWERSTATUSCHANGE: usize = 0x000A;
 const HANDOFF_TIMER_ID: usize = 0x5449;
 const DURATION_TIMER_ID_BASE: usize = 0x6000;
 const POPUP_REFRESH_TIMER_ID: usize = 0x7000;
-/// Popup-only UI cadence for live countdown and status refresh.
+/// Popup-only UI cadence for live status refresh.
 const POPUP_REFRESH_INTERVAL_MS: u32 = 500;
+const SCHEDULE_DISPLAY_TIMER_ID: usize = 0x7100;
+/// Bounded tray countdown cadence. The publication key suppresses redundant updates.
+const SCHEDULE_DISPLAY_INTERVAL_MS: u32 = 1_000;
 const ID_START: usize = 1001;
 const ID_STOP: usize = 1002;
 const ID_QUIT: usize = 1004;
@@ -409,7 +412,7 @@ struct PublicationKey {
     effective: Option<tick_core::Hns>,
     requested: Option<tick_core::Hns>,
     handoff: bool,
-    scheduled: Option<(DurationAction, u64)>,
+    scheduled: Option<(DurationAction, u64, u64)>,
 }
 
 struct App {
@@ -434,6 +437,7 @@ struct App {
     menu_active: bool,
     popup_menus: Option<PopupMenuHandles>,
     popup_refresh_timer_active: bool,
+    schedule_display_timer_active: bool,
     handoff: Option<HandoffTracker>,
     menu_help: Option<*mut c_void>,
     menu_help_text: Vec<u16>,
@@ -602,6 +606,7 @@ pub fn run() {
             menu_active: false,
             popup_menus: None,
             popup_refresh_timer_active: false,
+            schedule_display_timer_active: false,
             handoff: None,
             menu_help: None,
             menu_help_text: Vec::new(),
@@ -1304,6 +1309,7 @@ fn schedule_duration_action(app: &mut App, action: DurationAction, duration: Dur
         app.publish();
         return;
     }
+    begin_schedule_display_timer(app);
     app.record(
         "duration.schedule.result",
         format!(
@@ -1353,6 +1359,7 @@ fn cancel_scheduled_action(app: &mut App) {
     );
     app.record("duration.cancel.timing", app.timing_snapshot_details());
     cancel_duration_timer(app);
+    kill_schedule_display_timer(app);
     let cancelled = app.pause.cancel().expect("scheduled action was checked");
     app.scheduled_operation = None;
     app.record(
@@ -1390,6 +1397,55 @@ fn cancel_duration_timer(app: &mut App) {
                 }),
             );
         }
+    }
+}
+
+fn begin_schedule_display_timer(app: &mut App) {
+    if app.schedule_display_timer_active {
+        return;
+    }
+    let Some(hwnd) = app.tray_icon.as_ref().map(|icon| icon.h_wnd) else {
+        app.record(
+            "duration.display_timer",
+            "outcome=unavailable reason=tray_window_missing",
+        );
+        return;
+    };
+    let result = unsafe {
+        SetTimer(
+            hwnd,
+            SCHEDULE_DISPLAY_TIMER_ID,
+            SCHEDULE_DISPLAY_INTERVAL_MS,
+            std::ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        app.record(
+            "native.SetTimer.duration_display.error",
+            format!("raw_status={}", unsafe { GetLastError() }),
+        );
+    } else {
+        app.schedule_display_timer_active = true;
+    }
+}
+
+fn kill_schedule_display_timer(app: &mut App) {
+    if !app.schedule_display_timer_active {
+        return;
+    }
+    app.schedule_display_timer_active = false;
+    if let Some(hwnd) = app.tray_icon.as_ref().map(|icon| icon.h_wnd) {
+        unsafe {
+            let _ = KillTimer(hwnd, SCHEDULE_DISPLAY_TIMER_ID);
+        }
+    }
+}
+
+fn handle_schedule_display_timer(app: &mut App) {
+    if app.pause.active() {
+        app.publish();
+    } else {
+        kill_schedule_display_timer(app);
     }
 }
 
@@ -1570,6 +1626,7 @@ fn handle_duration_timer(app: &mut App, timer_id: usize) {
         }
         CoordinatorTimerEvent::Expired(action) => {
             cancel_duration_timer(app);
+            kill_schedule_display_timer(app);
             let _ = app.pause.cancel();
             execute_scheduled_action(app, action);
         }
@@ -1872,6 +1929,7 @@ impl App {
             );
         }
         cancel_duration_timer(self);
+        kill_schedule_display_timer(self);
         self.scheduled_operation = None;
         self.begin_operation(DiagnosticSource::Shutdown);
         self.record(
@@ -1987,6 +2045,7 @@ impl App {
         }
         self.tray_status = status;
         let timing = self.timing_values();
+        let now = std::time::Instant::now();
         let key = PublicationKey {
             status,
             ownership: self.controller.ownership(),
@@ -1996,18 +2055,13 @@ impl App {
             scheduled: self
                 .pause
                 .current()
-                .map(|action| (action.action, action.generation)),
+                .map(|action| scheduled_display_key(action, now)),
         };
         if self.last_publication == Some(key) {
             return;
         }
         self.last_publication = Some(key);
-        let status_text = tooltip_at(
-            status,
-            timing,
-            self.pause.current(),
-            std::time::Instant::now(),
-        );
+        let status_text = tooltip_at(status, timing, self.pause.current(), now);
         self.record(
             "tray.status.changed",
             format!("status={status:?} tooltip={status_text}"),
@@ -2409,6 +2463,9 @@ unsafe extern "system" fn window_proc(
             }
             WM_TIMER if w_param == POPUP_REFRESH_TIMER_ID => {
                 refresh_popup_menu(app);
+            }
+            WM_TIMER if w_param == SCHEDULE_DISPLAY_TIMER_ID => {
+                handle_schedule_display_timer(app);
             }
             WM_TIMER if w_param == HANDOFF_TIMER_ID => {
                 handle_handoff_timer(app);
