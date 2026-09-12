@@ -4515,13 +4515,14 @@ fn diagnostic_transfer_source(
 }
 
 const fn diagnostic_list_style() -> u32 {
-    WS_CHILD
+    (WS_CHILD
         | WS_VISIBLE
         | WS_CLIPCHILDREN
         | WS_BORDER
         | WS_HSCROLL
         | LVS_REPORT
-        | LVS_SHOWSELALWAYS
+        | LVS_SHOWSELALWAYS)
+        & !LVS_SINGLESEL
 }
 
 fn diagnostic_toolbar_action(app: &mut App, action: &str) {

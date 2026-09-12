@@ -976,6 +976,10 @@ mod tests {
             [11, 13, 14]
         );
         assert_eq!(
+            selected_event_sequences_for_positions(&events, visible, &[3, 3, usize::MAX]),
+            [14]
+        );
+        assert_eq!(
             visible_positions_for_sequences(&events, visible, &[14, 12]),
             [1, 3]
         );
