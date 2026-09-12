@@ -4,7 +4,7 @@
 //! ownership from an effective value and never writes a guessed global default.
 
 use tick_core::{CoreError, Hns, Status};
-use tick_platform_windows::{TimerError, TimerObservation, TimerPlatform};
+use tick_platform_windows::{NtStatus, TimerError, TimerObservation, TimerPlatform};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OwnershipState {
@@ -72,48 +72,128 @@ pub enum Verification {
     Unverified,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TimingSnapshot {
+    pub requested: Option<Hns>,
+    pub selected: Option<Hns>,
+    pub effective: Option<Hns>,
+    pub raw_status: Option<NtStatus>,
+}
+
+impl TimingSnapshot {
+    pub fn effective_relation(self) -> Option<&'static str> {
+        let boundary = self.selected.or(self.requested);
+        match (boundary, self.effective) {
+            (Some(requested), Some(effective)) if effective < requested => Some("finer"),
+            (Some(requested), Some(effective)) if effective == requested => Some("equal"),
+            (Some(_), Some(_)) => Some("unverified"),
+            _ => None,
+        }
+    }
+
+    pub fn invalidate_effective(&mut self) {
+        self.effective = None;
+        self.raw_status = None;
+    }
+}
+
 #[derive(Debug)]
 pub struct TimerController<P> {
     platform: P,
     ownership: Ownership,
     requested_interval: Hns,
     selected_interval: Option<Hns>,
+    release_boundary: Option<Hns>,
     verification: Verification,
     observation: Option<TimerObservation>,
+    snapshot: TimingSnapshot,
 }
 
 impl<P: TimerPlatform> TimerController<P> {
-    pub const fn new(platform: P, requested_interval: Hns) -> Self {
+    pub fn new(platform: P, requested_interval: Hns) -> Self {
         Self {
             platform,
             ownership: Ownership::new(),
             requested_interval,
             selected_interval: None,
+            release_boundary: None,
             verification: Verification::NotCollected,
             observation: None,
+            snapshot: TimingSnapshot {
+                requested: None,
+                selected: None,
+                effective: None,
+                raw_status: None,
+            },
         }
     }
 
     fn selected_for_query(&mut self) -> Result<Hns, TimerError> {
-        if let Some(interval) = self.selected_interval {
-            Ok(interval)
-        } else {
-            let interval = self.platform.resolve(self.requested_interval)?;
-            self.selected_interval = Some(interval);
-            Ok(interval)
+        if let Some(interval) = self.release_boundary {
+            return Ok(interval);
         }
+        if let Some(interval) = self.selected_interval {
+            return Ok(interval);
+        }
+        let interval = self.platform.resolve(self.requested_interval)?;
+        self.selected_interval = Some(interval);
+        Ok(interval)
+    }
+
+    fn record_query(&mut self, interval: Hns, reported_current: Hns, raw_status: NtStatus) {
+        self.observation = Some(TimerObservation {
+            requested: interval,
+            reported_current,
+            raw_status,
+        });
+        self.snapshot.requested = Some(interval);
+        self.snapshot.effective = Some(reported_current);
+        self.snapshot.raw_status = Some(raw_status);
+    }
+
+    fn invalidate_query(&mut self) {
+        self.observation = None;
+        self.snapshot.invalidate_effective();
     }
 
     pub fn query(&mut self) -> Result<TimerObservation, TimerError> {
-        let interval = self.selected_for_query()?;
-        let query = self.platform.query(interval)?;
-        let observation = TimerObservation {
-            requested: interval,
-            reported_current: query.reported_current,
-            raw_status: query.raw_status,
+        let interval = match self.selected_for_query() {
+            Ok(interval) => interval,
+            Err(error) => {
+                self.invalidate_query();
+                return Err(error);
+            }
         };
-        self.observation = Some(observation);
-        Ok(observation)
+        let query = match self.platform.query(interval) {
+            Ok(query) => query,
+            Err(error) => {
+                self.invalidate_query();
+                return Err(error);
+            }
+        };
+        self.snapshot.selected = self.selected_interval.or(self.release_boundary);
+        self.record_query(interval, query.reported_current, query.raw_status);
+        Ok(self.observation.expect("query observation was recorded"))
+    }
+
+    /// Observe current timing using an existing release boundary.
+    ///
+    /// This never resolves a new request interval. It is used only by the
+    /// bounded release handoff watcher.
+    pub fn observe_current(&mut self, boundary: Hns) -> Result<TimerObservation, TimerError> {
+        if self.release_boundary != Some(boundary) {
+            return Err(TimerError::InvalidInterval);
+        }
+        let query = match self.platform.query(boundary) {
+            Ok(query) => query,
+            Err(error) => {
+                self.invalidate_query();
+                return Err(error);
+            }
+        };
+        self.snapshot.selected = Some(boundary);
+        self.record_query(boundary, query.reported_current, query.raw_status);
+        Ok(self.observation.expect("handoff observation was recorded"))
     }
 
     pub fn start(&mut self) -> Result<Verification, TimerError> {
@@ -122,14 +202,24 @@ impl<P: TimerPlatform> TimerController<P> {
         {
             return Ok(self.verification);
         }
-        let interval = self.platform.resolve(self.requested_interval)?;
+        let interval = match self.platform.resolve(self.requested_interval) {
+            Ok(interval) => interval,
+            Err(error) => {
+                self.invalidate_query();
+                return Err(error);
+            }
+        };
         self.selected_interval = Some(interval);
-        let query = self.platform.preflight(interval)?;
-        self.observation = Some(TimerObservation {
-            requested: interval,
-            reported_current: query.reported_current,
-            raw_status: query.raw_status,
-        });
+        self.release_boundary = None;
+        let query = match self.platform.preflight(interval) {
+            Ok(query) => query,
+            Err(error) => {
+                self.invalidate_query();
+                return Err(error);
+            }
+        };
+        self.snapshot.selected = Some(interval);
+        self.record_query(interval, query.reported_current, query.raw_status);
         let request_observation = match self.platform.request(interval) {
             Ok(observation) => observation,
             Err(error) => {
@@ -138,18 +228,20 @@ impl<P: TimerPlatform> TimerController<P> {
                     reported_current,
                 } = error
                 {
-                    self.observation = Some(TimerObservation {
-                        requested: interval,
-                        reported_current,
-                        raw_status,
-                    });
+                    self.snapshot.selected = Some(interval);
+                    self.record_query(interval, reported_current, raw_status);
                     self.ownership.mark_uncertain();
                     self.verification = Verification::Unverified;
                 }
                 return Err(error);
             }
         };
-        self.observation = Some(request_observation);
+        self.snapshot.selected = Some(interval);
+        self.record_query(
+            request_observation.requested,
+            request_observation.reported_current,
+            request_observation.raw_status,
+        );
         self.ownership.apply(Transition::Acquire).map_err(|_| {
             TimerError::PostconditionUnverified {
                 raw_status: 0,
@@ -172,11 +264,17 @@ impl<P: TimerPlatform> TimerController<P> {
                 return Err(error);
             }
         };
-        self.observation = Some(observation);
+        self.snapshot.selected = Some(interval);
+        self.record_query(
+            observation.requested,
+            observation.reported_current,
+            observation.raw_status,
+        );
         self.ownership
             .apply(Transition::Release)
             .map_err(|_| TimerError::ReleaseFailed { raw_status: 0 })?;
         self.verification = Verification::NotCollected;
+        self.release_boundary = Some(interval);
         self.selected_interval = None;
         Ok(true)
     }
@@ -191,6 +289,24 @@ impl<P: TimerPlatform> TimerController<P> {
 
     pub const fn observation(&self) -> Option<TimerObservation> {
         self.observation
+    }
+
+    pub const fn snapshot(&self) -> TimingSnapshot {
+        self.snapshot
+    }
+
+    pub const fn selected_interval(&self) -> Option<Hns> {
+        self.selected_interval
+    }
+
+    pub const fn release_boundary(&self) -> Option<Hns> {
+        self.release_boundary
+    }
+
+    /// Ends the release-observation window without changing the last snapshot.
+    pub fn clear_release_boundary(&mut self) {
+        self.release_boundary = None;
+        self.snapshot.selected = None;
     }
 
     pub const fn status(&self) -> Status {

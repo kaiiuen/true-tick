@@ -149,7 +149,7 @@ impl TimerPlatform for WindowsTimerPlatform {
             format!(
                 "requested_hns={} requested_ms={}",
                 interval.value(),
-                interval.value() / 10_000
+                interval.format_milliseconds()
             ),
         );
         #[cfg(windows)]
@@ -233,7 +233,7 @@ impl TimerPlatform for WindowsTimerPlatform {
             format!(
                 "requested_hns={} requested_ms={}",
                 interval.value(),
-                interval.value() / 10_000
+                interval.format_milliseconds()
             ),
         );
         let query = self.query(interval)?;

@@ -4,9 +4,10 @@ use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use tick_core::{DesiredIntent, DesiredIntentQueue};
 use tick_diagnostics::{format_event, truncate_utf8, DiagnosticStore, DEFAULT_MAX_EVENTS};
 use tick_observation_windows::{ObservationSource, WindowsObservation};
-use tick_ownership::{OwnershipState, TimerController, Verification};
+use tick_ownership::{OwnershipState, TimerController, TimingSnapshot, Verification};
 use tick_platform_windows::{TimerObservation, WindowsTimerPlatform};
 use tick_policy::{decide, PolicyInput, PowerState};
 use tick_startup_windows::{
@@ -329,8 +330,10 @@ struct App {
     executable: PathBuf,
     startup_status: String,
     tray_icon: Option<NotifyIconData>,
-    timing_observation: Option<TimerObservation>,
+    timing_snapshot: TimingSnapshot,
     invalid_interval: bool,
+    external_timing: bool,
+    desired_intent: DesiredIntentQueue,
     diagnostics: Arc<DiagnosticStore>,
     diagnostic_window: Option<*mut c_void>,
     menu_active: bool,
@@ -468,9 +471,7 @@ pub fn run() {
             ),
             observation,
             config: loaded,
-            tray_status: if startup_status.starts_with("Red") {
-                TrayStatus::Error
-            } else if power_observation_error.is_some() {
+            tray_status: if power_observation_error.is_some() {
                 TrayStatus::Degraded
             } else {
                 TrayStatus::Stopped
@@ -479,8 +480,10 @@ pub fn run() {
             executable,
             startup_status,
             tray_icon: None,
-            timing_observation: None,
+            timing_snapshot: TimingSnapshot::default(),
             invalid_interval: false,
+            external_timing: false,
+            desired_intent: DesiredIntentQueue::new(),
             diagnostics,
             diagnostic_window: None,
             menu_active: false,
@@ -606,7 +609,8 @@ pub fn run() {
             abort_startup(app_ptr, "True™ Tick could not create its tray window.");
             return;
         }
-        let mut icon = match NotifyIconData::new(hwnd, app.tray_status, app.timing_values()) {
+        let mut icon = match NotifyIconData::new(hwnd, app.lifecycle_status(), app.timing_values())
+        {
             Ok(icon) => icon,
             Err(raw_error) => {
                 app.record(
@@ -800,13 +804,6 @@ fn reconcile(app: &mut App) {
 }
 
 fn apply_policy(app: &mut App) {
-    if app.handoff.is_some() {
-        app.record(
-            "policy.recalculate.deferred",
-            "reason=handoff_pending ownership=released",
-        );
-        return;
-    }
     let power = app.observation.power().state;
     let decision = decide(PolicyInput {
         enabled: true,
@@ -820,42 +817,125 @@ fn apply_policy(app: &mut App) {
             decision.status, decision.reason
         ),
     );
-    if decision.status == tick_core::Status::Requested {
-        app.tray_status = TrayStatus::Starting;
-        app.publish();
-        app.record("ownership.acquire.request", "source=policy");
-        let start_result = app.controller.start();
-        app.sync_timing_observation();
-        app.invalid_interval = matches!(
-            start_result,
-            Err(tick_platform_windows::TimerError::InvalidInterval)
+    let intent = if app.config.automatic && decision.status == tick_core::Status::Requested {
+        DesiredIntent::Acquire
+    } else {
+        DesiredIntent::Release
+    };
+    if app.handoff.is_some() {
+        app.record(
+            "policy.recalculate.deferred",
+            format!("reason=handoff_pending queued_intent={intent:?}"),
         );
-        app.tray_status = match start_result {
-            Ok(Verification::Verified | Verification::FinerThanRequested) => {
-                app.record("verification.result", format!("result={start_result:?}"));
-                app.record("ownership.changed", "state=owned");
-                TrayStatus::Running
-            }
-            Ok(verification) => {
-                app.record("verification.result", format!("result={verification:?}"));
-                TrayStatus::Unverified
-            }
-            Err(error) => {
-                app.record("ownership.acquire.error", format!("error={error:?}"));
-                match error {
-                    tick_platform_windows::TimerError::Unsupported => TrayStatus::Unsupported,
-                    _ => TrayStatus::Error,
-                }
-            }
-        };
+    }
+    queue_intent(app, intent, format!("policy reason={:?}", decision.reason));
+}
+
+fn queue_intent(app: &mut App, intent: DesiredIntent, source: impl AsRef<str>) {
+    app.desired_intent.request(intent);
+    app.record(
+        "lifecycle.desired_intent",
+        format!("intent={intent:?} source={}", source.as_ref()),
+    );
+    if app.handoff.is_some() {
+        app.tray_status = TrayStatus::Stopping;
         app.publish();
         return;
     }
+    process_desired_intent(app);
+}
 
-    release_for_policy(app, decision.reason);
+fn process_desired_intent(app: &mut App) {
+    if app.handoff.is_some() {
+        app.tray_status = TrayStatus::Stopping;
+        app.publish();
+        return;
+    }
+    let Some(intent) = app.desired_intent.take() else {
+        return;
+    };
+    match intent {
+        DesiredIntent::Acquire => {
+            let power = app.observation.power().state;
+            let decision = decide(PolicyInput {
+                enabled: true,
+                eligible_profile: true,
+                power,
+            });
+            if decision.status == tick_core::Status::Requested {
+                acquire_timer(app);
+            } else {
+                release_for_policy(app, decision.reason);
+            }
+        }
+        DesiredIntent::Release => {
+            if app.tray_status == TrayStatus::Starting {
+                app.desired_intent.request(DesiredIntent::Release);
+                app.record(
+                    "lifecycle.release_queued",
+                    "reason=acquisition_verification_pending",
+                );
+            } else if matches!(
+                app.controller.ownership(),
+                OwnershipState::Owned | OwnershipState::Uncertain
+            ) {
+                let _ = guarded_release(app, "desired intent", TrayStatus::Stopped);
+            } else {
+                app.tray_status = TrayStatus::Stopped;
+                app.publish();
+            }
+        }
+    }
+}
+
+fn acquire_timer(app: &mut App) {
+    if app.controller.ownership() != OwnershipState::Released {
+        show_ownership_status(app, TrayStatus::Stopped);
+        return;
+    }
+    app.tray_status = TrayStatus::Starting;
+    app.publish();
+    app.record("ownership.acquire.request", "source=desired_intent");
+    let start_result = app.controller.start();
+    app.sync_timing_snapshot();
+    app.invalid_interval = matches!(
+        start_result,
+        Err(tick_platform_windows::TimerError::InvalidInterval)
+    );
+    let status = match start_result {
+        Ok(Verification::Verified | Verification::FinerThanRequested) => {
+            app.record("verification.result", format!("result={start_result:?}"));
+            app.record("ownership.changed", "state=owned");
+            TrayStatus::Running
+        }
+        Ok(verification) => {
+            app.record("verification.result", format!("result={verification:?}"));
+            TrayStatus::Unverified
+        }
+        Err(error) => {
+            app.record("ownership.acquire.error", format!("error={error:?}"));
+            match error {
+                tick_platform_windows::TimerError::Unsupported => TrayStatus::Unsupported,
+                _ => TrayStatus::Error,
+            }
+        }
+    };
+    app.tray_status = status;
+    app.publish();
+    if app.desired_intent.pending().is_some() {
+        process_desired_intent(app);
+    }
 }
 
 fn release_for_policy(app: &mut App, reason: tick_policy::PolicyReason) {
+    if app.handoff.is_some() {
+        queue_intent(
+            app,
+            DesiredIntent::Release,
+            format!("policy reason={reason:?}"),
+        );
+        return;
+    }
     let released_status = match reason {
         tick_policy::PolicyReason::BatteryRestricted
         | tick_policy::PolicyReason::BatterySaverRestricted
@@ -864,7 +944,15 @@ fn release_for_policy(app: &mut App, reason: tick_policy::PolicyReason) {
         tick_policy::PolicyReason::NoEligibleProfile
         | tick_policy::PolicyReason::EligibleProfile => TrayStatus::Stopped,
     };
-    let _ = guarded_release(app, format!("policy reason={reason:?}"), released_status);
+    if matches!(
+        app.controller.ownership(),
+        OwnershipState::Owned | OwnershipState::Uncertain
+    ) {
+        let _ = guarded_release(app, format!("policy reason={reason:?}"), released_status);
+    } else {
+        app.tray_status = released_status;
+        app.publish();
+    }
 }
 
 fn guarded_release(
@@ -883,25 +971,22 @@ fn guarded_release(
         "ownership.release.request",
         format!("source={}", source.as_ref()),
     );
+    app.external_timing = false;
     app.tray_status = TrayStatus::Stopping;
     app.publish();
     let stop_result = app.controller.stop();
-    app.sync_timing_observation();
+    app.sync_timing_snapshot();
     match stop_result {
         Ok(released) => {
             app.record(
                 "ownership.changed",
                 format!("state=released changed={released}"),
             );
-            let effective = app
-                .timing_observation
-                .map(|observation| observation.reported_current);
-            let boundary = app
-                .timing_observation
-                .map(|observation| observation.requested);
+            let effective = app.timing_snapshot.effective;
+            let boundary = app.timing_snapshot.requested;
             if released && boundary.is_some_and(|value| release_needs_handoff(value, effective)) {
                 let boundary = boundary.expect("boundary checked above");
-                if begin_handoff(app, boundary, released_status) {
+                if begin_handoff(app, boundary, TrayStatus::Stopped) {
                     return Ok(released);
                 }
             }
@@ -909,6 +994,7 @@ fn guarded_release(
                 "ownership.result",
                 format!("state=released effective_system={effective:?} handoff=not_required"),
             );
+            app.controller.clear_release_boundary();
             app.tray_status = released_status;
             app.publish();
             Ok(released)
@@ -925,22 +1011,13 @@ fn guarded_release(
 fn manual_start(app: &mut App) {
     app.record("tray.command", "command=start");
     app.record("lifecycle.start_request", "source=manual");
-    if app.handoff.is_some() {
-        app.record(
-            "lifecycle.start_request.deferred",
-            "reason=handoff_pending ownership=released",
-        );
-        return;
-    }
-    app.tray_status = TrayStatus::Starting;
-    app.publish();
-    reconcile(app);
+    queue_intent(app, DesiredIntent::Acquire, "manual");
 }
 
 fn manual_stop(app: &mut App) {
     app.record("tray.command", "command=stop");
     app.record("lifecycle.stop_request", "source=manual");
-    let _ = guarded_release(app, "manual", TrayStatus::Stopped);
+    queue_intent(app, DesiredIntent::Release, "manual");
 }
 
 fn release_for_power_change(app: &mut App) {
@@ -991,29 +1068,27 @@ fn show_ownership_status(app: &mut App, released_status: TrayStatus) {
 }
 
 impl App {
-    fn sync_timing_observation(&mut self) {
-        self.timing_observation = self.controller.observation();
+    fn sync_timing_snapshot(&mut self) {
+        self.timing_snapshot = self.controller.snapshot();
+    }
+
+    fn lifecycle_status(&self) -> TrayStatus {
+        crate::tray_surface::lifecycle_status(self.tray_status, self.handoff.is_some())
     }
 
     fn timing_values(&self) -> TimingValues {
-        let requested = self
-            .timing_observation
-            .map(|observation| observation.requested)
-            .or_else(|| {
-                (self.config.request_interval != config::AUTOMATIC_REQUEST_INTERVAL)
-                    .then_some(self.config.request_interval)
-            });
-        let effective = self
-            .timing_observation
-            .map(|observation| observation.reported_current);
-        TimingValues {
-            requested,
-            effective,
-            external: self.controller.ownership() == OwnershipState::Released
-                && matches!((requested, effective), (Some(requested), Some(effective)) if effective < requested),
-            handoff_pending: self.handoff.is_some(),
-            invalid_interval: self.invalid_interval,
-        }
+        let external = self.external_timing
+            || (self.controller.ownership() == OwnershipState::Released
+                && matches!(
+                    (self.timing_snapshot.requested, self.timing_snapshot.effective),
+                    (Some(requested), Some(effective)) if effective < requested
+                ));
+        TimingValues::from_snapshot(
+            self.timing_snapshot,
+            self.handoff.is_some(),
+            external,
+            self.invalid_interval,
+        )
     }
 
     fn cleanup_normal_shutdown(&mut self) -> Result<(), String> {
@@ -1071,11 +1146,13 @@ impl App {
     }
 
     fn publish(&mut self) {
+        let status = self.lifecycle_status();
+        self.tray_status = status;
         let timing = self.timing_values();
-        let status_text = tooltip(self.tray_status, timing);
+        let status_text = tooltip(status, timing);
         self.record(
             "tray.status.changed",
-            format!("status={:?} tooltip={status_text}", self.tray_status),
+            format!("status={status:?} tooltip={status_text}"),
         );
         self.record(
             "ownership.state",
@@ -1091,7 +1168,7 @@ impl App {
             ),
         );
         if let Some(icon) = self.tray_icon.as_mut() {
-            if let Err(raw_error) = update_icon(icon, self.tray_status, timing) {
+            if let Err(raw_error) = update_icon(icon, status, timing) {
                 self.record(
                     "native.Shell_NotifyIconW.modify.error",
                     format!("raw_status={raw_error}"),
@@ -1104,7 +1181,7 @@ impl App {
 fn refresh_timing_observation(app: &mut App) -> Option<TimerObservation> {
     match app.controller.query() {
         Ok(observation) => {
-            app.sync_timing_observation();
+            app.sync_timing_snapshot();
             app.record(
                 "timer.query.observation",
                 format!(
@@ -1118,7 +1195,11 @@ fn refresh_timing_observation(app: &mut App) -> Option<TimerObservation> {
             Some(observation)
         }
         Err(error) => {
-            app.record("timer.query.error", format!("error={error:?}"));
+            app.sync_timing_snapshot();
+            app.record(
+                "timer.query.error",
+                format!("error={error:?} effective=unknown"),
+            );
             None
         }
     }
@@ -1131,8 +1212,11 @@ fn begin_handoff(app: &mut App, boundary: tick_core::Hns, released_status: TrayS
             "handoff.timeout",
             "reason=watcher_unavailable ownership=released effective_system=finer",
         );
-        app.tray_status = released_status;
+        app.external_timing = true;
+        app.controller.clear_release_boundary();
+        app.tray_status = TrayStatus::Stopped;
         app.publish();
+        process_desired_intent(app);
         return false;
     };
     let timer = unsafe {
@@ -1156,8 +1240,11 @@ fn begin_handoff(app: &mut App, boundary: tick_core::Hns, released_status: TrayS
             "ownership.result",
             "state=released effective_system=finer due_to=external_or_unknown_client",
         );
-        app.tray_status = released_status;
+        app.external_timing = true;
+        app.controller.clear_release_boundary();
+        app.tray_status = TrayStatus::Stopped;
         app.publish();
+        process_desired_intent(app);
         return false;
     }
     app.handoff = Some(tracker);
@@ -1188,11 +1275,37 @@ fn finish_handoff_timer(app: &mut App) {
 }
 
 fn handle_handoff_timer(app: &mut App) {
-    let Some(mut tracker) = app.handoff.take() else {
+    let Some(tracker) = app.handoff.take() else {
         return;
     };
-    let observation = refresh_timing_observation(app);
+    app.handoff = Some(tracker);
+    let boundary = tracker.boundary();
+    let observation = match app.controller.observe_current(boundary) {
+        Ok(observation) => {
+            app.sync_timing_snapshot();
+            app.record(
+                "timer.handoff.observation",
+                format!(
+                    "requested_hns={} effective_hns={} raw_status={} effective_relation={}",
+                    observation.requested.value(),
+                    observation.reported_current.value(),
+                    observation.raw_status,
+                    observation.effective_relation()
+                ),
+            );
+            Some(observation)
+        }
+        Err(error) => {
+            app.sync_timing_snapshot();
+            app.record(
+                "timer.handoff.query.error",
+                format!("error={error:?} effective=unknown"),
+            );
+            None
+        }
+    };
     let effective = observation.map(|value| value.reported_current);
+    let mut tracker = app.handoff.take().expect("handoff tracker remains active");
     let progress = tracker.observe(effective);
     app.record(
         "handoff.observation",
@@ -1224,8 +1337,11 @@ fn handle_handoff_timer(app: &mut App) {
                 "ownership.result",
                 "state=released effective_system=non_finer handoff=completed",
             );
-            app.tray_status = tracker.released_status();
+            app.controller.clear_release_boundary();
+            app.tray_status = TrayStatus::Stopped;
+            app.external_timing = false;
             app.publish();
+            process_desired_intent(app);
         }
         HandoffProgress::TimedOut => {
             finish_handoff_timer(app);
@@ -1241,8 +1357,11 @@ fn handle_handoff_timer(app: &mut App) {
                 "ownership.result",
                 "state=released effective_system=finer due_to=external_or_unknown_client",
             );
-            app.tray_status = tracker.released_status();
+            app.controller.clear_release_boundary();
+            app.tray_status = TrayStatus::Stopped;
+            app.external_timing = true;
             app.publish();
+            process_desired_intent(app);
         }
     }
 }
@@ -1414,7 +1533,7 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
             break;
         }
         let items = menu_items(
-            app.tray_status,
+            app.lifecycle_status(),
             app.config.startup_enabled,
             app.config.automatic,
             app.timing_values(),
@@ -1716,7 +1835,7 @@ unsafe fn append_menu_checked(
 unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) -> bool {
     if !menu_command_is_enabled(
         command,
-        app.tray_status,
+        app.lifecycle_status(),
         app.config.startup_enabled,
         app.config.automatic,
     ) {
@@ -1919,14 +2038,15 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &App) {
     if edit.is_null() {
         return;
     }
-    let timing_details = match app.timing_observation {
-        Some(observation) => format!(
-            "Timing observation: {} requested_hns={} effective_hns={} raw_status={} effective_relation={}\r\n",
-            tooltip(app.tray_status, app.timing_values()),
-            observation.requested.value(),
-            observation.reported_current.value(),
-            observation.raw_status,
-            observation.effective_relation()
+    let timing_details = match app.timing_snapshot.effective {
+        Some(effective) => format!(
+            "Timing observation: {} requested_hns={} selected_hns={} effective_hns={} raw_status={} effective_relation={}\r\n",
+            tooltip(app.lifecycle_status(), app.timing_values()),
+            app.timing_snapshot.requested.map_or_else(|| "unknown".to_owned(), |value| value.value().to_string()),
+            app.timing_snapshot.selected.map_or_else(|| "unknown".to_owned(), |value| value.value().to_string()),
+            effective.value(),
+            app.timing_snapshot.raw_status.map_or_else(|| "unknown".to_owned(), |value| value.to_string()),
+            app.timing_snapshot.effective_relation().unwrap_or("unknown")
         ),
         None => "Timing observation: unknown\r\n".to_owned(),
     };
@@ -2064,7 +2184,6 @@ fn set_automatic(app: &mut App, enabled: bool) {
                 app.config.automatic
             ),
         );
-        app.tray_status = TrayStatus::Error;
         app.publish();
         return;
     }
@@ -2133,7 +2252,6 @@ fn set_startup(app: &mut App, enabled: bool) {
                         "auto-start enabled in config, current-user registration unavailable: {error}"
                     ));
                 }
-                app.tray_status = TrayStatus::Error;
                 app.publish();
                 return;
             }
@@ -2163,7 +2281,6 @@ fn set_startup(app: &mut App, enabled: bool) {
             ),
         );
         app.startup_status = bounded_startup_status("startup registration error");
-        app.tray_status = TrayStatus::Error;
         app.publish();
         return;
     }
@@ -2200,11 +2317,6 @@ fn set_startup(app: &mut App, enabled: bool) {
         } else {
             "startup config persistence failed, repair required"
         });
-        app.tray_status = if rollback.is_ok() {
-            TrayStatus::Error
-        } else {
-            TrayStatus::Unverified
-        };
         app.publish();
         return;
     }
@@ -2236,7 +2348,12 @@ fn set_startup(app: &mut App, enabled: bool) {
 }
 
 fn quit_decision(app: &App) -> QuitDecision {
-    quit_decision_for(app.tray_status, app.controller.ownership())
+    if app.handoff.is_some() {
+        return QuitDecision::RequireSafetyDialog {
+            reason: QuitSafetyReason::TimingNotSettled,
+        };
+    }
+    quit_decision_for(app.lifecycle_status(), app.controller.ownership())
 }
 
 fn quit_decision_for(status: TrayStatus, ownership: OwnershipState) -> QuitDecision {

@@ -1,5 +1,5 @@
 use tick_core::Hns;
-use tick_ownership::OwnershipState;
+use tick_ownership::{OwnershipState, TimingSnapshot};
 use tick_policy::PowerState;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -59,6 +59,14 @@ pub(crate) fn power_reconciliation(
     }
 }
 
+pub(crate) const fn lifecycle_status(status: TrayStatus, handoff_active: bool) -> TrayStatus {
+    if handoff_active {
+        TrayStatus::Stopping
+    } else {
+        status
+    }
+}
+
 impl TrayStatus {
     pub(crate) const fn icon_color(self) -> IconColor {
         match self {
@@ -96,7 +104,26 @@ pub(crate) struct TimingValues {
     pub(crate) invalid_interval: bool,
 }
 
+impl TimingValues {
+    pub(crate) fn from_snapshot(
+        snapshot: TimingSnapshot,
+        handoff_pending: bool,
+        external: bool,
+        invalid_interval: bool,
+    ) -> Self {
+        Self {
+            requested: snapshot.requested,
+            effective: snapshot.effective,
+            external,
+            handoff_pending,
+            invalid_interval,
+        }
+    }
+}
+
+/// Handoff policy poll interval, not a timer-resolution value.
 pub(crate) const HANDOFF_POLL_INTERVAL_MS: u32 = 250;
+/// Handoff policy observation budget, not a timer-resolution value.
 pub(crate) const HANDOFF_MAX_POLLS: u8 = 12;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -128,6 +155,7 @@ impl HandoffTracker {
         self.boundary
     }
 
+    #[allow(dead_code)]
     pub(crate) const fn released_status(self) -> TrayStatus {
         self.released_status
     }
@@ -154,8 +182,7 @@ pub(crate) fn release_needs_handoff(boundary: Hns, effective: Option<Hns>) -> bo
 }
 
 fn format_ms(value: Hns) -> String {
-    let thousandths = value.value().saturating_add(5) / 10;
-    format!("{}.{:03}", thousandths / 1_000, thousandths % 1_000)
+    value.format_milliseconds()
 }
 
 pub(crate) fn version_header() -> String {
@@ -172,14 +199,16 @@ pub(crate) fn tooltip(status: TrayStatus, timing: TimingValues) -> String {
             || "Running".to_owned(),
             |value| format!("Running {} ms", format_ms(value)),
         ),
+        TrayStatus::Stopped if timing.external => "Stopped, external timing".to_owned(),
         TrayStatus::Stopped => timing.effective.map_or_else(
             || "Stopped".to_owned(),
             |value| format!("Stopped {} ms", format_ms(value)),
         ),
         TrayStatus::Starting => timing.requested.map_or_else(
-            || "Starting".to_owned(),
-            |requested| format!("Starting {} ms", format_ms(requested)),
+            || "Starting, verifying".to_owned(),
+            |requested| format!("Starting {} ms, verifying", format_ms(requested)),
         ),
+        TrayStatus::Stopping if timing.handoff_pending => "Stopping, handoff pending".to_owned(),
         TrayStatus::Stopping => "Stopping".to_owned(),
         TrayStatus::Error => "Error".to_owned(),
         TrayStatus::Pending
@@ -199,17 +228,17 @@ pub(crate) fn status_label(status: TrayStatus, timing: TimingValues) -> String {
             || concise.to_owned(),
             |value| format!("Running ({} ms)", format_ms(value)),
         ),
+        TrayStatus::Stopped if timing.external => "Stopped (external timing)".to_owned(),
         TrayStatus::Stopped => timing.effective.map_or_else(
             || concise.to_owned(),
             |value| format!("Stopped ({} ms)", format_ms(value)),
         ),
         TrayStatus::Starting => timing.requested.map_or_else(
             || concise.to_owned(),
-            |value| format!("Starting ({} ms)", format_ms(value)),
+            |value| format!("Starting ({} ms, verifying)", format_ms(value)),
         ),
-        TrayStatus::Stopping if timing.handoff_pending || timing.external => {
-            "Stopping (external timing)".to_owned()
-        }
+        TrayStatus::Stopping if timing.handoff_pending => "Stopping (handoff pending)".to_owned(),
+        TrayStatus::Stopping if timing.external => "Stopped (external timing)".to_owned(),
         TrayStatus::Error if timing.invalid_interval => "Error (invalid interval)".to_owned(),
         TrayStatus::Error => "Error (operation failed)".to_owned(),
         _ => concise.to_owned(),
@@ -375,7 +404,7 @@ mod tests {
                     ..TimingValues::default()
                 }
             ),
-            "Status: Stopping (external timing)"
+            "Status: Stopping (handoff pending)"
         );
         assert_eq!(
             status_label(
@@ -459,7 +488,7 @@ mod tests {
                     invalid_interval: false,
                 },
             ),
-            "True™ Tick: Stopped 0.497 ms"
+            "True™ Tick: Stopped, external timing"
         );
     }
 
@@ -747,7 +776,7 @@ mod tests {
                     ..TimingValues::default()
                 }
             ),
-            "True™ Tick: Starting 0.500 ms"
+            "True™ Tick: Starting 0.500 ms, verifying"
         );
         assert_eq!(tooltip(TrayStatus::Stopping, finer), "True™ Tick: Stopping");
         assert_eq!(
@@ -759,7 +788,18 @@ mod tests {
                     ..TimingValues::default()
                 }
             ),
-            "True™ Tick: Stopping"
+            "True™ Tick: Stopping, handoff pending"
+        );
+        assert_eq!(
+            tooltip(
+                TrayStatus::Stopped,
+                TimingValues {
+                    external: true,
+                    effective: Some(Hns::new(4_966)),
+                    ..TimingValues::default()
+                }
+            ),
+            "True™ Tick: Stopped, external timing"
         );
         assert_eq!(
             tooltip(

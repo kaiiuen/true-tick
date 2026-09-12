@@ -9,8 +9,10 @@ const MAX_CONFIG_KEY_BYTES: usize = 64;
 const MAX_CONFIG_VALUE_BYTES: usize = 1024;
 const MAX_CONFIG_ERROR_BYTES: usize = 256;
 
-/// Zero is the persisted sentinel for selecting the smallest native boundary.
+/// Zero is the persisted sentinel for selecting the current native boundary.
 pub const AUTOMATIC_REQUEST_INTERVAL: Hns = Hns::ZERO;
+/// Legacy one-millisecond config value accepted only during migration.
+const LEGACY_ONE_MILLISECOND_REQUEST_INTERVAL: Hns = Hns::new(10_000);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
@@ -210,12 +212,13 @@ fn parse_with_migration(text: &str) -> Result<(Config, bool), ConfigError> {
                         line_number + 1
                     ))
                 })?;
-                config.request_interval = if value == 10_000 {
-                    migrated = true;
-                    AUTOMATIC_REQUEST_INTERVAL
-                } else {
-                    Hns::new(value)
-                };
+                config.request_interval =
+                    if Hns::new(value) == LEGACY_ONE_MILLISECOND_REQUEST_INTERVAL {
+                        migrated = true;
+                        AUTOMATIC_REQUEST_INTERVAL
+                    } else {
+                        Hns::new(value)
+                    };
             }
             other => return Err(invalid_reason(format!("unknown configuration key {other}"))),
         }

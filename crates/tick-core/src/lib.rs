@@ -10,6 +10,11 @@ use std::time::Duration;
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Hns(u64);
 
+/// Number of 100-nanosecond units in one millisecond.
+pub const HNS_PER_MILLISECOND: u64 = 10_000;
+/// Number of 100-nanosecond units in one thousandth of a millisecond.
+pub const HNS_PER_THOUSANDTH_MILLISECOND: u64 = HNS_PER_MILLISECOND / 1_000;
+
 impl Hns {
     pub const ZERO: Self = Self(0);
 
@@ -23,6 +28,13 @@ impl Hns {
 
     pub fn to_duration(self) -> Duration {
         Duration::from_nanos(self.0.saturating_mul(100))
+    }
+
+    /// Formats the value for concise user-facing millisecond display.
+    pub fn format_milliseconds(self) -> String {
+        let thousandths = self.0.saturating_add(HNS_PER_THOUSANDTH_MILLISECOND / 2)
+            / HNS_PER_THOUSANDTH_MILLISECOND;
+        format!("{}.{:03}", thousandths / 1_000, thousandths % 1_000)
     }
 }
 
@@ -62,7 +74,36 @@ pub enum Status {
 }
 
 /// Pure event vocabulary shared by boundaries. Payloads are intentionally logical.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DesiredIntent {
+    Acquire,
+    Release,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DesiredIntentQueue {
+    pending: Option<DesiredIntent>,
+}
+
+impl DesiredIntentQueue {
+    pub const fn new() -> Self {
+        Self { pending: None }
+    }
+
+    pub const fn pending(self) -> Option<DesiredIntent> {
+        self.pending
+    }
+
+    pub fn request(&mut self, intent: DesiredIntent) {
+        self.pending = Some(intent);
+    }
+
+    pub fn take(&mut self) -> Option<DesiredIntent> {
+        self.pending.take()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Event {
     Start,
     Stop,
@@ -108,5 +149,25 @@ mod tests {
     #[test]
     fn hns_display_is_explicit_about_units() {
         assert_eq!(Hns::new(5_000).to_string(), "5000 HNS");
+    }
+
+    #[test]
+    fn hns_millisecond_formatting_uses_the_shared_conversion() {
+        assert_eq!(Hns::new(4_966).format_milliseconds(), "0.497");
+        assert_eq!(Hns::new(5_000).format_milliseconds(), "0.500");
+    }
+
+    #[test]
+    fn desired_intent_has_only_the_two_serialized_targets() {
+        assert_ne!(DesiredIntent::Acquire, DesiredIntent::Release);
+    }
+
+    #[test]
+    fn desired_intent_queue_keeps_only_the_latest_request() {
+        let mut queue = DesiredIntentQueue::new();
+        queue.request(DesiredIntent::Acquire);
+        queue.request(DesiredIntent::Release);
+        assert_eq!(queue.take(), Some(DesiredIntent::Release));
+        assert_eq!(queue.take(), None);
     }
 }
