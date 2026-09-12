@@ -4079,7 +4079,10 @@ fn diagnostic_toolbar_action(app: &mut App, action: &str) {
             );
             app.record(
                 "diagnostic.validation_failure",
-                "reason=no_retained_events format=TSV row_count=0",
+                format!(
+                    "selected_range=none retained_rows={} row_count=0 format=TSV result=failed reason=no_retained_events",
+                    retained_rows
+                ),
             );
             unsafe {
                 set_diagnostic_message(app, "No retained events.");
@@ -4090,11 +4093,15 @@ fn diagnostic_toolbar_action(app: &mut App, action: &str) {
         Err(error) => {
             app.record(
                 "diagnostic.range.parsed",
-                format!("result=invalid retained_rows={retained_rows} format=TSV error={error}"),
+                format!(
+                    "selected_range=none retained_rows={retained_rows} row_count=0 format=TSV result=invalid error={error}"
+                ),
             );
             app.record(
                 "diagnostic.validation_failure",
-                format!("result=invalid retained_rows={retained_rows} format=TSV error={error}"),
+                format!(
+                    "selected_range=none retained_rows={retained_rows} row_count=0 format=TSV result=failed error={error}"
+                ),
             );
             unsafe {
                 set_diagnostic_message(app, format!("Invalid range: {error}"));
@@ -4118,7 +4125,10 @@ fn diagnostic_toolbar_action(app: &mut App, action: &str) {
     );
     match action {
         "copy" => {
-            app.record("diagnostic.copy.request", details.clone());
+            app.record(
+                "diagnostic.copy.request",
+                format!("{details} result=requested"),
+            );
             let result = unsafe {
                 copy_tsv_to_clipboard(app.diagnostic_window.unwrap_or(std::ptr::null_mut()), &tsv)
             };
@@ -4147,7 +4157,10 @@ fn diagnostic_toolbar_action(app: &mut App, action: &str) {
                     };
                     app.record(
                         "native.clipboard.error",
-                        format!("stage={} raw_status={raw_error}", error.stage),
+                        format!(
+                            "stage={} {details} result=failed raw_status={raw_error}",
+                            error.stage
+                        ),
                     );
                     unsafe {
                         set_diagnostic_message(
@@ -4164,7 +4177,10 @@ fn diagnostic_toolbar_action(app: &mut App, action: &str) {
             }
         }
         "export" => {
-            app.record("diagnostic.export.request", details.clone());
+            app.record(
+                "diagnostic.export.request",
+                format!("{details} result=requested"),
+            );
             let path = match unsafe {
                 choose_export_path(app.diagnostic_window.unwrap_or(std::ptr::null_mut()))
             } {
@@ -4187,7 +4203,7 @@ fn diagnostic_toolbar_action(app: &mut App, action: &str) {
                 Err(error) => {
                     app.record(
                         "native.GetSaveFileNameW.error",
-                        format!("raw_status={}", error.raw_error),
+                        format!("{details} result=failed raw_status={}", error.raw_error),
                     );
                     unsafe {
                         set_diagnostic_message(
@@ -4221,7 +4237,10 @@ fn diagnostic_toolbar_action(app: &mut App, action: &str) {
                 Err(error) => {
                     app.record(
                         "native.export.file.error",
-                        format!("stage={} raw_status={}", error.stage, error.raw_error),
+                        format!(
+                            "stage={} {details} result=failed raw_status={}",
+                            error.stage, error.raw_error
+                        ),
                     );
                     unsafe {
                         set_diagnostic_message(
@@ -4268,11 +4287,15 @@ fn diagnostic_range_changed(app: &mut App) {
         Err(error) => {
             app.record(
                 "diagnostic.range.parsed",
-                format!("result=invalid retained_rows={retained_rows} format=TSV error={error}"),
+                format!(
+                    "selected_range=none retained_rows={retained_rows} row_count=0 format=TSV result=invalid error={error}"
+                ),
             );
             app.record(
                 "diagnostic.validation_failure",
-                format!("result=invalid retained_rows={retained_rows} format=TSV error={error}"),
+                format!(
+                    "selected_range=none retained_rows={retained_rows} row_count=0 format=TSV result=failed error={error}"
+                ),
             );
             app.finish_operation(DiagnosticOutcome::Failed);
         }
