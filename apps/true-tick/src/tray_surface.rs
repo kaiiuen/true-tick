@@ -490,7 +490,7 @@ pub(crate) const fn menu_command_is_enabled_with_pause(
     status: TrayStatus,
     startup_enabled: bool,
     automatic: bool,
-    paused: bool,
+    schedule_active: bool,
 ) -> bool {
     match command_id {
         1001 => !matches!(
@@ -520,7 +520,7 @@ pub(crate) const fn menu_command_is_enabled_with_pause(
         | PAUSE_FOR_15_COMMAND_ID
         | PAUSE_FOR_30_COMMAND_ID
         | PAUSE_FOR_60_COMMAND_ID => true,
-        CANCEL_SCHEDULED_COMMAND_ID => paused,
+        CANCEL_SCHEDULED_COMMAND_ID => schedule_active,
         _ => false,
     }
 }
@@ -1134,6 +1134,31 @@ mod tests {
         assert!(!menu_command_dispatch_allowed(true, false));
         assert!(menu_command_dispatch_allowed(true, true));
         assert!(menu_command_dispatch_allowed(false, false));
+    }
+
+    #[test]
+    fn cancellation_remains_enabled_for_each_schedule_while_menu_is_open() {
+        for status in [
+            TrayStatus::ScheduledStart,
+            TrayStatus::ScheduledStop,
+            TrayStatus::Paused,
+        ] {
+            assert!(menu_command_is_enabled_with_pause(
+                CANCEL_SCHEDULED_COMMAND_ID,
+                status,
+                false,
+                false,
+                true,
+            ));
+        }
+        assert!(menu_action_keeps_open(CANCEL_SCHEDULED_COMMAND_ID));
+        assert!(!menu_command_is_enabled_with_pause(
+            CANCEL_SCHEDULED_COMMAND_ID,
+            TrayStatus::Stopped,
+            false,
+            false,
+            false,
+        ));
     }
 
     #[test]

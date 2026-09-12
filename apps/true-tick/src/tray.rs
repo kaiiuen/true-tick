@@ -1364,10 +1364,8 @@ fn cancel_scheduled_action(app: &mut App) {
             cancelled.generation
         ),
     );
-    if cancelled.action == DurationAction::Pause {
-        refresh_power_for_duration(app, "cancel");
-        reconcile(app);
-    }
+    refresh_power_for_duration(app, "cancel");
+    apply_power_reconciliation(app);
     if app.menu_active {
         unsafe { refresh_popup_menu(app) };
     }
@@ -2664,14 +2662,14 @@ unsafe fn refresh_popup_menu(app: &mut App) {
         app.lifecycle_status(),
         app.config.startup_enabled,
         app.config.automatic,
-        app.pause.pause_active(),
+        app.pause.active(),
     );
     let stop_enabled = menu_command_is_enabled_with_pause(
         ID_STOP,
         app.lifecycle_status(),
         app.config.startup_enabled,
         app.config.automatic,
-        app.pause.pause_active(),
+        app.pause.active(),
     );
     let _ = ModifyMenuW(
         handles.root,

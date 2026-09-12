@@ -330,6 +330,43 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_clears_start_stop_and_pause_after_replacement() {
+        let now = start();
+        for action in [
+            DurationAction::Start,
+            DurationAction::Stop,
+            DurationAction::Pause,
+        ] {
+            let mut coordinator = DurationCoordinator::new();
+            coordinator.schedule(action, DurationChoice::FiveMinutes, now);
+            let replaced = coordinator.schedule(
+                action,
+                DurationChoice::FifteenMinutes,
+                now + Duration::from_secs(1),
+            );
+            let current = match replaced {
+                ScheduleRequest::Replaced { current, .. } => current,
+                ScheduleRequest::Started(_) => panic!("replacement must retain one action"),
+            };
+            assert!(coordinator.cancel().is_some());
+            assert!(!coordinator.active());
+            assert_eq!(coordinator.current(), None);
+            assert_eq!(
+                coordinator.timer_event(current.generation, current.deadline),
+                CoordinatorTimerEvent::Stale
+            );
+        }
+    }
+
+    #[test]
+    fn cancel_without_an_action_is_idempotent_and_does_not_change_generation() {
+        let mut coordinator = DurationCoordinator::new();
+        assert_eq!(coordinator.generation(), 0);
+        assert!(coordinator.cancel().is_none());
+        assert_eq!(coordinator.generation(), 0);
+    }
+
+    #[test]
     fn stale_replacement_generation_cannot_fire_the_new_action() {
         let now = start();
         let mut coordinator = DurationCoordinator::new();
