@@ -330,7 +330,7 @@ The HUD State value is derived from the same lifecycle state used by the tray, n
 
 The diagnostic window uses a small presentation layer only. It reapplies the system GUI font, a system-derived bold font for State, system background and text colors, ListView colors, and native control repainting for `WM_THEMECHANGED`, `WM_SYSCOLORCHANGE`, and `WM_SETTINGCHANGE`. High contrast follows system colors first. Tray status icon colors remain separate. Native menus, `MessageBoxW`, tooltips, and title-bar behavior remain Windows-owned. Native menus and dialogs may follow Windows theme behavior separately from this diagnostic surface.
 
-The DPI posture is system DPI aware for the current Windows 10 and Windows 11 scope. The source handles `WM_DPICHANGED` and uses DPI-scaled layout plus DPI-aware frame metrics. It does not claim Per-Monitor V2 until runtime validation on supported displays is complete.
+The embedded Windows manifest declares Per-Monitor V2 with a `true/pm` fallback for the current Windows 10 and Windows 11 scope. The source handles `GetDpiForWindow` and `WM_DPICHANGED` with DPI-scaled layout plus DPI-aware frame metrics. Runtime DPI compatibility remains unverified until validation on supported displays is complete.
 
 Every root tray operation records an `operation.begin` row with `phase=Begin` and `outcome=InProgress`, then exactly one terminal `operation.complete` outcome. Logs opening reports Failed when native window creation or initial layout fails. Refresh and nested presentation events retain the active operation context. Repeated identical layout failures are coalesced with a bounded repeat count and never report Completed.
 
