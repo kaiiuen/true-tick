@@ -4,7 +4,7 @@
 
 ## Current lifecycle contract
 
-The timer lifecycle controls the user-visible state. An active release handoff is always yellow `Stopping` with concise text such as `True™ Tick: Stopping, handoff pending`. Startup registration, configuration persistence, logging, and other diagnostics are separate evidence and cannot publish red lifecycle failure over a live handoff. The icon color is derived from the same lifecycle state as the text. Handoff completion clears the tracker and publishes red `Stopped` with actual current timing. A bounded timeout clears the tracker and publishes red `Stopped, external timing`.
+The timer lifecycle controls the user-visible state. An active release handoff is always yellow `Stopping, handoff` with concise text such as `True™ Tick: Stopping, handoff · 0.497 ms`. Startup registration, configuration persistence, logging, and other diagnostics are separate evidence and cannot publish red lifecycle failure over a live handoff. The icon color is derived from the same lifecycle state as the text. Handoff completion clears the tracker and publishes red `Stopped` with actual current effective timing. A bounded timeout clears the tracker and publishes red `Stopped` with actual current effective timing while ownership remains released.
 
 Desired intent is latest-wins `Acquire` or `Release`. Start, Stop, Auto-time, and power changes use this queue and the same serialized ownership path. A request during `Starting` or `Stopping` is retained until the transition completes or times out. Repeated requests do not issue duplicate native calls. Quit uses ownership, handoff, and uncertain state together, so it cannot exit while cleanup remains unresolved.
 
@@ -57,9 +57,11 @@ loop available, while successful Quit closes it.
 Start and Stop use the same guarded policy and ownership lifecycle as automatic
 activation. Start remains yellow through query, request, and verification, then
 turns green only after a verified request. The tray tooltip uses actual concise
-values such as `True™ Tick: Running 0.497 ms`, `True™ Tick: Stopped 0.997 ms`,
-`True™ Tick: Starting 0.500 ms`, `True™ Tick: Stopping`, `True™ Tick: Warning`,
-and `True™ Tick: Error`. After a successful request, the returned verified effective
+values such as `True™ Tick: Running · 0.497 ms`, `True™ Tick: Stopped · 0.997 ms`,
+`True™ Tick: Starting · 0.997 ms`, `True™ Tick: Stopping · 0.497 ms`,
+`True™ Tick: Warning`, and `True™ Tick: Error`. Scheduled and paused states use
+`Starting in 5m · 0.997 ms`, `Stopping in 5m · 0.497 ms`, and
+`Paused for 5m · 0.997 ms`. Invalid evidence uses `Timing unknown`. After a successful request, the returned verified effective
 observation replaces the preflight current value in the controller and app snapshot.
 Release observations update that same snapshot. A remaining finer or different value
 is displayed as external effective state and does not claim Tick ownership. Query,
@@ -77,8 +79,7 @@ sanitized and bounded so raw pointers, credentials, private tokens, arbitrary
 secrets, and unbounded sensitive paths are not recorded. Ownership state is
 logged separately from effective system state. After release, a remaining finer
 value is labeled external without claiming Tick ownership, and a later query
-may show the effective value returning to baseline. A successful owned release that
-leaves the effective value finer enters yellow `Stopping (waiting for handoff)`.
+may show the effective value returning to baseline. A successful owned release that leaves a remaining external effective value enters yellow `Stopping, handoff`.
 The active-only watcher queries every 250 ms for at most 12 observations. It turns
 red with `Stopped (current: X ms)` when the value is no longer finer. On timeout it
 turns red with `Stopped (external: X ms)` and logs released ownership with another
@@ -87,8 +88,7 @@ handoff classification.
 
 Startup always queries current timing after the tray surface is ready, even when
 Tick is stopped and Auto-time is off. A successful query displays stopped current
-timing without claiming ownership. A failed query displays `Stopped (timing
-unknown)` and records the failure. The selected or requested boundary remains
+timing without claiming ownership. A failed query displays `Stopped · Timing unknown` and records the failure. The selected or requested boundary remains
 separate from the current effective observation.
 
 Power broadcasts refresh timing and recalculate the visible state whether
@@ -155,9 +155,7 @@ bounded coordinator timer, so stale timer events do nothing. Start in queues a f
 acquire intent, refreshes current power at the deadline, and rechecks AC, Battery,
 Battery Saver, and unknown policy. A blocked start logs suppression and remains safe.
 Stop in uses guarded release, records an already released no-op, and uses the existing
-yellow handoff watcher when finer external timing remains. Pause for suppresses
-acquisition and releases through ownership logic. Expiry and cancellation refresh
-current power and re-evaluate policy through the serialized path. Fixed choices do not
+yellow handoff watcher when finer external timing remains. Pause for suppresses acquisition and releases through ownership logic. Scheduled Start remains released until its deadline. Scheduled Stop remains owned until its deadline unless policy blocks it. Expiry and cancellation refresh current power and re-evaluate policy through the serialized path. Fixed choices do not
 persist, stack, accept custom input, or create an indefinite pause.
 
 The header uses a safe fixed Windows shell URL operation for GitHub. Shell failure is
@@ -170,6 +168,10 @@ reported as degraded and blocks acquisition. A/B selection is a safe local
 scaffold. Missing or invalid active-slot metadata requires repair. It does not
 verify a signed package or perform rollback. No package, installer, signed
 artifact, tag, GitHub Release, or public publication is created here.
+
+## Tray tooltip and ownership contract
+
+The tooltip and icon consume the same derived lifecycle state. Verified Running is green. Stopped is red. Scheduled, paused, transitioning, handoff, and unverified states are yellow. Warning, Error, and policy-blocked states retain the existing safety mapping. Timing comes from the authoritative current effective snapshot. Requested and selected values never appear in the compact tooltip. Positive remaining schedule and pause durations round upward from the monotonic deadline. A plain Paused state has no countdown. Popup Status rows use the same state and timing source, with more detail in the running duration, next action, and ownership rows. The context-menu status row does not repeat the brand.
 
 ## Audited v1 UX and diagnostics update
 

@@ -4,7 +4,7 @@ This repository contains an internal v1 runtime, not a production release.
 
 ## Runtime invariants
 
-The ownership lifecycle is the source of truth for visible timer status. An active release handoff always derives to yellow `Stopping` and remains protected from unrelated startup, configuration, logging, or power diagnostic publication. Handoff completion clears the tracker and publishes red `Stopped` with the observed current timing. A bounded timeout clears the tracker and publishes red `Stopped, external timing`. The icon uses the same derived lifecycle status as the text.
+The ownership lifecycle is the source of truth for visible timer status. An active release handoff always derives to yellow `Stopping, handoff` and remains protected from unrelated startup, configuration, logging, or power diagnostic publication. Handoff completion clears the tracker and publishes red `Stopped` with the observed current effective timing. A bounded timeout clears the tracker and publishes red `Stopped` with the observed current effective timing while ownership remains released. The icon uses the same derived lifecycle state as the text.
 
 A latest-wins desired intent queue contains `Acquire` or `Release`. Start, Stop, automatic changes, and power transitions submit intent through the same serialized path. Requests received during `Starting` or `Stopping` are not dropped. Repeated native operations are idempotent, and only the ownership manager calls the native request and release operations.
 
@@ -56,9 +56,9 @@ same window, and refreshes its snapshot. The style contract is source-tested, bu
 actual taskbar appearance and runtime control behavior remain unverified because
 validation does not launch the app. Closing it destroys only the window and
 does not affect timer ownership. Full system reports, config paths, raw HNS values,
-power explanations, and full errors remain excluded from the compact menu and tooltip. The version header is clickable. Status contains disabled State, Timing, Running for, Next action, and Ownership rows, with Logs as the only clickable row. While a menu command is highlighted, `WM_MENUSELECT` drives a standard Windows tooltip with concise descriptions for Duration, Start in, Stop in, Pause for, Cancel scheduled action, Status, Logs, Start, Stop, settings, and Quit. The tooltip is destroyed when the popup closes and does not change timer state. The local diagnostic session records automatic selection, raw native boundaries, selected HNS, requested HNS, effective HNS, raw status, and an `equal`, `finer`, or `unverified` effective relation. After a successful request, the controller replaces the preflight current observation with the returned verified effective observation. Release also retains its returned current observation so the UI can show a remaining external effective state without claiming Tick ownership. A released finer effective value enters yellow `Stopping (waiting for handoff)`. The active-only watcher queries every 250 ms for at most 12 observations. Completion shows red `Stopped (current: X ms)`. Timeout shows red `Stopped (external: X ms)` and logs released ownership with another or unknown finer client. Battery-policy and other owned-request releases use the same classification.
+power explanations, and full errors remain excluded from the compact menu and tooltip. The version header is clickable. Status contains disabled State, Timing, Running for, Next action, and Ownership rows, with Logs as the only clickable row. While a menu command is highlighted, `WM_MENUSELECT` drives a standard Windows tooltip with concise descriptions for Duration, Start in, Stop in, Pause for, Cancel scheduled action, Status, Logs, Start, Stop, settings, and Quit. The tooltip is destroyed when the popup closes and does not change timer state. The local diagnostic session records automatic selection, raw native boundaries, selected HNS, requested HNS, effective HNS, raw status, and an `equal`, `finer`, or `unverified` effective relation. After a successful request, the controller replaces the preflight current observation with the returned verified effective observation. Release also retains its returned current observation so the UI can show a remaining external effective state without claiming Tick ownership. A remaining external effective value enters yellow `Stopping, handoff`. The active-only watcher queries every 250 ms for at most 12 observations. Completion shows red `Stopped` with current effective timing. Timeout shows red `Stopped` with current effective timing and logs released ownership with another or unknown client. Battery-policy and other owned-request releases use the same classification.
 
-Startup always performs a current timing query after the tray surface is ready, even when the runtime is stopped and Auto-time is off. A successful query produces stopped current timing. A failed query produces stopped timing unknown and a diagnostic error. Selected or requested boundaries remain separate from the current effective observation.
+Startup always performs a current timing query after the tray surface is ready, even when the runtime is stopped and Auto-time is off. A successful query produces stopped current timing. A failed query produces `Stopped · Timing unknown` and a diagnostic error. Selected or requested boundaries remain separate from the current effective observation.
 
 Power broadcasts refresh timing and recalculate status regardless of the Auto-time setting. AC with Auto-time off and no ownership is stopped and waits for manual Start. Restrictive power states release owned timing and report the policy reason. AC with Auto-time on acquires when no request is owned. AC with Auto-time off does not acquire and does not remain blocked after a battery-to-AC transition.
 
@@ -80,7 +80,7 @@ then clamps intermediate values to the nearest supported size. Status colors rem
 green for verified running, yellow for transition or uncertainty, and red for
 stopped or failed states. The tray shell may apply its own rendering scale.
 
-Duration scheduling is session-only with fixed choices. Start in and Stop in offer 1 minute, 5 minutes, 15 minutes, 30 minutes, and 1 hour. Pause for offers 5 minutes, 15 minutes, 30 minutes, and 1 hour. There is no custom input, persistence, stacking, or indefinite pause. Only one scheduled action or pause exists. A new selection logs its replacement before changing the monotonic deadline. Cancellation increments the generation and clears the bounded coordinator timer. Start in refreshes current power at its deadline, queues a future acquire intent, and rechecks AC, Battery, Battery Saver, and unknown policy. Stop in uses guarded release and records an already released no-op. Pause for suppresses acquisition, releases through ownership logic, and re-evaluates current policy on expiry or cancellation. Handoff remains the existing yellow bounded watcher. Stale timer generations do nothing. The GitHub header uses a fixed safe shell URL operation. Tooltip tracking uses absolute signed screen coordinates and deactivates after a failed cursor query.
+Duration scheduling is session-only with fixed choices. Start in and Stop in offer 1 minute, 5 minutes, 15 minutes, 30 minutes, and 1 hour. Pause for offers 5 minutes, 15 minutes, 30 minutes, and 1 hour. There is no custom input, persistence, stacking, or indefinite pause. Only one scheduled action or pause exists. Scheduled Start remains released until its monotonic deadline. Pause releases immediately and suppresses reacquisition until expiry. Scheduled Stop remains owned until its deadline unless policy blocks it. A new selection logs its replacement before changing the monotonic deadline. Cancellation increments the generation and clears the bounded coordinator timer. Start in refreshes current power at its deadline, queues a future acquire intent, and rechecks AC, Battery, Battery Saver, and unknown policy. Stop in uses guarded release and records an already released no-op. Pause for suppresses acquisition, releases through ownership logic, and re-evaluates current policy on expiry or cancellation. Handoff remains the existing yellow bounded watcher. Stale timer generations do nothing. The GitHub header uses a fixed safe shell URL operation. Tooltip tracking uses absolute signed screen coordinates and deactivates after a failed cursor query.
 
 An inconclusive adapter postcondition enters an explicit uncertain ownership state
 and suppresses repeat acquisition. The adapter retains enough request identity for
@@ -151,18 +151,24 @@ pending, degraded, or unverified behavior to yellow, and stopped, blocked,
 unsupported, or error behavior to red. Each public tray status is reachable from
 an explicit runtime path or is covered by a deterministic boundary test.
 The branded tooltip uses concise values such as
-`True™ Tick: Running 0.497 ms`, `True™ Tick: Stopped 0.997 ms`,
-`True™ Tick: Starting 0.500 ms`, `True™ Tick: Stopping`,
-`True™ Tick: Warning`, and `True™ Tick: Error`. The read-only Status submenu uses
-short labels such as `State: Running`, `Timing: 0.497 ms`, `Running for: 4m 12s`,
-and `Ownership: True™ Tick`. It uses `Unknown` when no observation is
-available. Raw HNS and full event details remain in the diagnostic window.
+`True™ Tick: Running · 0.497 ms`, `True™ Tick: Stopped · 0.997 ms`,
+`True™ Tick: Starting · 0.997 ms`, `True™ Tick: Stopping · 0.497 ms`,
+`True™ Tick: Warning`, and `True™ Tick: Error`. Scheduled and paused states use
+`Starting in 5m · 0.997 ms`, `Stopping in 5m · 0.497 ms`, and
+`Paused for 5m · 0.997 ms`. It uses `Timing unknown` when evidence is invalid.
+The read-only Status submenu uses the same state and timing wording, then adds
+`Running for`, `Next action`, and `Ownership` rows. The context-menu status row
+does not repeat the brand. Raw HNS and full event details remain in the diagnostic window.
 Controller and app state carry observations through query, request, release,
 and power reconciliation. A current value at or below the requested interval
 satisfies the postcondition. A lower current value is explicitly finer than
 requested. A higher current value is unverified. Current observation verifies
 only the available system power query and one power broadcast path. Full Battery
 Saver, session, lock, suspend, and resume notification support is not claimed.
+
+## Tray tooltip and ownership contract
+
+Tray rendering consumes one derived lifecycle state and one authoritative timing snapshot. Verified Running is green. Stopped is red. Scheduled, paused, transitioning, handoff, and unverified states are yellow. Warning, Error, and policy-blocked states retain their existing safety mapping. Tooltip timing is the current effective observation, never the requested or selected interval. Positive remaining schedule and pause durations round upward from the monotonic deadline. A plain Paused state has no countdown.
 
 ## Audited v1 tray and diagnostic surface
 

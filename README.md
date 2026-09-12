@@ -5,11 +5,11 @@ production release and is not authorized for publication.
 
 ## Lifecycle and timing invariants
 
-The timer lifecycle is authoritative for the tray status. While a release handoff is active, the derived status is always yellow `Stopping` and unrelated configuration, startup, logging, or power diagnostics cannot replace it with red `Error`, `Stopped`, or `Blocked`. The icon color is derived from that same lifecycle status. A handoff completion clears the tracker and publishes red `Stopped` with the current timing. A bounded timeout clears the tracker and publishes red `Stopped, external timing`.
+The timer lifecycle is authoritative for the tray status. While a release handoff is active, the derived status is always yellow `Stopping, handoff` and unrelated configuration, startup, logging, or power diagnostics cannot replace it with red `Error`, `Stopped`, or `Blocked`. The icon color is derived from that same lifecycle state. A handoff completion clears the tracker and publishes red `Stopped` with the current effective timing. A bounded timeout clears the tracker and publishes red `Stopped` with the current effective timing while ownership remains released.
 
 Manual and automatic changes use a latest-wins desired intent queue with only `Acquire` and `Release`. An intent received during `Starting` or `Stopping` is retained and processed after the transition. Native request and release calls remain serialized and idempotent. Power policy is applied when the queued intent is processed. Auto-time off on AC therefore remains stopped when no release is pending.
 
-All tray text, menu status, diagnostic headers, handoff classification, and timer logs read from one synchronized timing snapshot. The snapshot keeps requested, selected, effective, raw bounds, and raw status distinct. A failed current query invalidates effective timing and displays `unknown` rather than retaining stale current data. Handoff polling observes the stored release boundary and never selects a new request interval.
+All tray text, menu status, diagnostic headers, handoff classification, and timer logs read from one synchronized timing snapshot. The snapshot keeps requested, selected, effective, raw bounds, and raw status distinct. A failed current query invalidates effective timing and displays `Timing unknown` rather than retaining stale current data. Handoff polling observes the stored release boundary and never selects a new request interval.
 
 Live timer selection is query-driven. The persisted zero value is the automatic-selection sentinel. The named legacy migration value is accepted only while migrating old configuration. Timer-resolution examples and fixture values belong only in tests or migration fixtures. Handoff polling intervals and observation budgets are separate handoff policy constants and are not timer-resolution defaults.
 
@@ -62,7 +62,7 @@ reported by the current system. The adapter retains raw boundary values and
 selected HNS in diagnostics, then validates the selected value before requesting
 it. The compact tray menu starts with a clickable `True™ Tick v<version>` header sourced from Cargo package metadata. It then exposes `Start`, `Stop`, a `Duration` submenu, `Auto-start: On/Off`, `Auto-time: On/Off`, a read-only `Status` submenu, and `Quit`. `Duration` contains fixed `Start in`, `Stop in`, and `Pause for` submenus plus `Cancel scheduled action`. Start and stop offer 1 minute, 5 minutes, 15 minutes, 30 minutes, and 1 hour. Pause offers 5 minutes, 15 minutes, 30 minutes, and 1 hour. There is no custom duration, persistence, stacking, or indefinite pause. Auto-start controls launch at Windows login. Auto-time controls automatic timer acquisition after launch. The current defaults are `startup_enabled = true` and `automatic = false`, so login launch does not acquire timing until the user manually starts it.
 
-`Status` contains disabled State, Timing, Running for, Next action, and Ownership rows. `Logs` is the only clickable row in that submenu. Status and Logs do not change timer state. The Status Timing row uses the latest valid authoritative effective observation and displays `Unknown` when evidence is invalid or stale. Running for uses monotonic time from the last verified Running transition. The diagnostic window remains titled `True™ Tick Status and Diagnostics`, with a read-only session view and snapshot refresh on reopen. It uses a normal taskbar window with standard title-bar controls and does not change timer state when closed.
+`Status` contains disabled State, Timing, Running for, Next action, and Ownership rows. `Logs` is the only clickable row in that submenu. Status and Logs do not change timer state. The Status Timing row uses the latest valid authoritative effective observation and displays `Timing unknown` when evidence is invalid or stale. Running for uses monotonic time from the last verified Running transition. The diagnostic window remains titled `True™ Tick Status and Diagnostics`, with a read-only session view and snapshot refresh on reopen. It uses a normal taskbar window with standard title-bar controls and does not change timer state when closed.
 
 The native menu keeps Start, Stop, and both setting toggles open after successful or failed handling. Each reopen uses the original popup anchor POINT. Highlighting a command uses a standard Windows tooltip. Descriptions cover Duration, Start in, Stop in, Pause for, Cancel scheduled action, Status, Logs, Start, Stop, startup, automatic timing, and Quit. The tooltip is destroyed when the popup closes and never changes timer state. Logs closes the menu when it opens diagnostics. Quit is dispatched from the returned `TPM_RETURNCMD` command. Tray left-button-up and right-button-up notifications open this same menu. Button-down and double-click notifications are ignored. Start and Stop remain manual controls and use the same guarded policy and ownership lifecycle as automatic activation. Start remains yellow through query, request, and verification, then turns green only after a verified request. Quit logs its request, active-state decision, dialog result, cleanup result, and exit permission. If timing is running, starting, stopping, pending, degraded, unverified, or ownership is uncertain, the warning offers exactly `Cancel` and `Stop and Quit`. A failed or uncertain release keeps the app open and allows retry. The diagnostic window shows a bounded local in-memory session log.
 
@@ -75,17 +75,16 @@ the reliable MessageBox path. If no warning is shown, the menu is closed rather 
 silently reopened.
 It excludes raw pointers, private tokens, credentials, arbitrary secrets, and
 unbounded sensitive paths. The branded tooltip uses short runtime values such as
-`True™ Tick: Running 0.497 ms`, `True™ Tick: Stopped 0.997 ms`,
-`True™ Tick: Starting 0.500 ms`, `True™ Tick: Stopping`, `True™ Tick: Warning`,
-and `True™ Tick: Error`. The read-only Status submenu uses concise rows such as
+`True™ Tick: Running · 0.497 ms`, `True™ Tick: Stopped · 0.997 ms`,
+`True™ Tick: Starting · 0.997 ms`, `True™ Tick: Stopping · 0.497 ms`,
+`True™ Tick: Warning`, and `True™ Tick: Error`. The read-only Status submenu uses concise rows such as
 `State: Running`, `Timing: 0.497 ms`, `Running for: 4m 12s`, and
 `Ownership: True™ Tick`. Values use the selected request and the latest verified effective
 observation as distinct fields, and another platform boundary is allowed. After a
 	successful request, the returned effective observation replaces the preflight
 	current value in controller and app state. After release, the returned current
 	observation is retained as effective external state when another client remains
-	finer or otherwise active, without implying Tick ownership. After True™ Tick releases
-its request, a finer effective value enters yellow `Stopping (waiting for handoff)`.
+	finer or otherwise active, without implying Tick ownership. After True™ Tick releases its request, a remaining external effective value enters yellow `Stopping, handoff` until the bounded observation completes.
 The app queries the effective value only while that handoff is pending, using a
 250 ms Windows timer for at most 12 observations. A non-finer observation completes
 the handoff and shows red `Stopped (current: X ms)`. If the bound expires while a
@@ -93,11 +92,11 @@ finer value remains, the app shows red `Stopped (external: X ms)` and logs that 
 Tick ownership is released while another or unknown client keeps finer timing. This
 classification also applies to battery-policy and other owned-request releases.
 The captured `current_hns=9966` value was about `0.997 ms` because the old config requested
-`10000 HNS`. That config is migrated to automatic selection. At startup, the controller always queries the current effective timing, even when True™ Tick is stopped and Auto-time is off. A successful query is displayed as stopped current timing without claiming Tick ownership. A failed query is displayed as `Stopped (timing unknown)` and recorded as a diagnostic failure. The selected or requested boundary remains separate from the current effective observation.
+`10000 HNS`. That config is migrated to automatic selection. At startup, the controller always queries the current effective timing, even when True™ Tick is stopped and Auto-time is off. A successful query is displayed as stopped current timing without claiming Tick ownership. A failed query is displayed as `Stopped · Timing unknown` and recorded as a diagnostic failure. The selected or requested boundary remains separate from the current effective observation.
 
 Power broadcasts refresh timing and recalculate the visible state for both Auto-time settings. With Auto-time off, AC and no owned request show stopped current timing and wait for manual Start. Battery, Battery Saver, and unknown power remain conservative and release owned timing when policy requires it. Returning to AC with Auto-time on attempts acquisition. Returning to AC with Auto-time off shows stopped current timing rather than leaving a stale blocked state.
 
-Duration scheduling is session-only and uses monotonic deadlines. Only one scheduled action or pause exists. A new selection logs the replacement before it replaces the old generation. Cancellation invalidates the generation and kills the bounded coordinator timer, so stale timer events do nothing. Start in queues a future acquire intent, refreshes current power at the deadline, and applies AC, battery, Battery Saver, and unknown policy again. A blocked start is logged as suppressed and does not acquire. Stop in uses the guarded release path, records a no-op when already released, and uses the existing yellow handoff watcher when release leaves finer external timing. Pause for immediately suppresses acquisition and releases through ownership logic. Expiry or cancellation refreshes policy and re-evaluates it through the same serialized path. The coordinator uses at most one bounded Windows timer and does not poll permanently.
+Duration scheduling is session-only and uses monotonic deadlines. Only one scheduled action or pause exists. A new selection logs the replacement before it replaces the old generation. Cancellation invalidates the generation and kills the bounded coordinator timer, so stale timer events do nothing. Start in queues a future acquire intent, refreshes current power at the deadline, and applies AC, battery, Battery Saver, and unknown policy again. A blocked start is logged as suppressed and does not acquire. Stop in uses the guarded release path, records a no-op when already released, and uses the existing yellow handoff watcher when release leaves finer external timing. Pause for immediately suppresses acquisition and releases through ownership logic. A scheduled Start remains released until its deadline. A scheduled Stop keeps owned timing until its deadline unless policy blocks it. Expiry or cancellation refreshes policy and re-evaluates it through the same serialized path. The coordinator uses at most one bounded Windows timer and does not poll permanently.
 
 The display uses `Unknown` when no valid observation is available. Raw HNS and full event details remain in the diagnostic window. The read-only Status submenu records current state, effective timing, monotonic running duration, next action, and ownership. The local diagnostic session records automatic selection,
 raw native boundaries, selected HNS, requested HNS, effective HNS, raw status,
@@ -193,6 +192,12 @@ Active documentation is checked with the private workspace tool
 root against the active documentation files. The checker rejects em dash and
 semicolon characters and skips historical archive material. The tool is outside
 the GitHub project payload.
+
+## Tray tooltip and ownership contract
+
+The tray tooltip is branded and concise. It uses the current effective timing from the authoritative snapshot, never the requested interval. Valid timing is shown with a middle dot, for example `True™ Tick: Running · 0.497 ms`. Invalid timing is shown as `Timing unknown`. The states are `Stopped`, `Running`, `Starting`, `Stopping`, `Stopping, handoff`, `Starting in 5m`, and `Paused for 5m`. A plain paused state has no countdown. Positive schedule and pause time rounds upward from the monotonic deadline.
+
+The icon follows the same derived lifecycle state as the tooltip. Running with verified ownership is green. Stopped is red. Scheduled, paused, transitioning, handoff, and unverified states are yellow. Warning, error, and policy-blocked states retain the existing red safety mapping. Scheduled Start and Pause release True™ Tick ownership immediately. Scheduled Stop retains ownership until its deadline unless AC, battery, Battery Saver, or unknown policy requires an earlier release. The popup Status rows use the same snapshot and lifecycle wording, with additional running duration, next action, and ownership detail.
 
 ## Windows DLL boundary
 
