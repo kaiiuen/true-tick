@@ -119,7 +119,7 @@ const LVM_FIRST: u32 = 0x1000;
 const LVM_DELETEALLITEMS: u32 = LVM_FIRST + 9;
 const LVM_GETITEMCOUNT: u32 = LVM_FIRST + 4;
 const LVM_INSERTITEMW: u32 = LVM_FIRST + 77;
-const LVM_SETITEMTEXTW: u32 = LVM_FIRST + 74;
+const LVM_SETITEMTEXTW: u32 = LVM_FIRST + 116;
 const LVM_INSERTCOLUMNW: u32 = LVM_FIRST + 97;
 const LVM_SETEXTENDEDLISTVIEWSTYLE: u32 = LVM_FIRST + 54;
 const LVM_SETCOLUMNWIDTH: u32 = LVM_FIRST + 30;
@@ -3777,6 +3777,18 @@ unsafe fn initialize_diagnostic_list(list: *mut c_void) -> Result<(), u32> {
     Ok(())
 }
 
+fn diagnostic_grid_refresh_message(
+    snapshot_rows: usize,
+    inserted_rows: usize,
+    item_count: isize,
+    insert_failures: usize,
+    set_text_failures: usize,
+) -> String {
+    format!(
+        "snapshot_rows={snapshot_rows} inserted_rows={inserted_rows} item_count={item_count} insert_failures={insert_failures} set_text_failures={set_text_failures}"
+    )
+}
+
 unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
     let retained_rows = app.diagnostics.snapshot().len();
     refresh_diagnostic_controls(app, retained_rows);
@@ -3873,8 +3885,12 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
     let item_count = SendMessageW(list, LVM_GETITEMCOUNT, 0, 0);
     app.diagnostics.record(
         "diagnostic.grid.refresh",
-        format!(
-            "snapshot_rows={snapshot_rows} inserted_rows={inserted_rows} item_count={item_count} insert_failures={insert_failures} set_text_failures={set_text_failures}"
+        diagnostic_grid_refresh_message(
+            snapshot_rows,
+            inserted_rows,
+            item_count,
+            insert_failures,
+            set_text_failures,
         ),
     );
     layout_diagnostic_controls(window, app);
@@ -5174,6 +5190,16 @@ mod tests {
         assert_eq!(init.classes, ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES);
         assert_ne!(init.classes & ICC_LISTVIEW_CLASSES, 0);
         assert_ne!(init.classes & ICC_BAR_CLASSES, 0);
+    }
+
+    #[test]
+    fn diagnostic_grid_message_contract_uses_correct_native_messages_and_bounded_counts() {
+        assert_eq!(LVM_INSERTITEMW, LVM_FIRST + 77);
+        assert_eq!(LVM_SETITEMTEXTW, LVM_FIRST + 116);
+        assert_eq!(
+            diagnostic_grid_refresh_message(12, 11, 11, 1, 2),
+            "snapshot_rows=12 inserted_rows=11 item_count=11 insert_failures=1 set_text_failures=2"
+        );
     }
 
     #[test]

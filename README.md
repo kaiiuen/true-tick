@@ -24,6 +24,7 @@ cargo metadata --no-deps --format-version 1
 cargo check --workspace --all-targets
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+cargo build -p true-tick --bin true-tick
 py -3 ..\tools\true-tick-dev\check_live_timer_values.py
 ```
 
@@ -45,7 +46,17 @@ cargo run -p true-tick-launcher --bin Launcher
 
 Within `apps/true-tick`, `cargo run` defaults to the `true-tick` tray target.
 The workspace-root command remains explicit because both app targets are
-intended development targets. The commands above are not runtime validation of
+intended development targets. The exact non-running tray development build command is
+`cargo build -p true-tick --bin true-tick`. It selects the tray binary and does
+not launch the app.
+
+The diagnostic grid keeps `LVM_INSERTITEMW` at `LVM_FIRST + 77` and uses the
+corrected `LVM_SETITEMTEXTW` value `LVM_FIRST + 116`. Each refresh converts the
+bounded typed snapshot and records only snapshot row count, inserted row count,
+item count, insert failures, and set-text failures. Common Controls initialization
+remains explicit before the list and tooltip controls are created.
+
+The commands above are not runtime validation of
 tray behavior, startup registration, or launcher handoff.
 
 The v1 uses a narrow native timer adapter with raw status preservation, an
