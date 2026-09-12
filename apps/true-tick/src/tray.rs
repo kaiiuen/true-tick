@@ -48,6 +48,9 @@ const WM_MENUSELECT: u32 = 0x011F;
 const PBT_APMPOWERSTATUSCHANGE: usize = 0x000A;
 const HANDOFF_TIMER_ID: usize = 0x5449;
 const DURATION_TIMER_ID_BASE: usize = 0x6000;
+const POPUP_REFRESH_TIMER_ID: usize = 0x7000;
+/// Popup-only UI cadence for live countdown and status refresh.
+const POPUP_REFRESH_INTERVAL_MS: u32 = 500;
 const ID_START: usize = 1001;
 const ID_STOP: usize = 1002;
 const ID_QUIT: usize = 1004;
@@ -339,6 +342,13 @@ fn register_startup_target(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PopupMenuHandles {
+    root: *mut c_void,
+    duration: Option<*mut c_void>,
+    status: Option<*mut c_void>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PublicationKey {
     status: TrayStatus,
     ownership: OwnershipState,
@@ -364,6 +374,8 @@ struct App {
     diagnostics: Arc<DiagnosticStore>,
     diagnostic_window: Option<*mut c_void>,
     menu_active: bool,
+    popup_menus: Option<PopupMenuHandles>,
+    popup_refresh_timer_active: bool,
     handoff: Option<HandoffTracker>,
     menu_help: Option<*mut c_void>,
     menu_help_text: Vec<u16>,
@@ -527,6 +539,8 @@ pub fn run() {
             diagnostics,
             diagnostic_window: None,
             menu_active: false,
+            popup_menus: None,
+            popup_refresh_timer_active: false,
             handoff: None,
             menu_help: None,
             menu_help_text: Vec::new(),
@@ -1936,6 +1950,9 @@ impl App {
                 );
             }
         }
+        if self.menu_active {
+            unsafe { refresh_popup_menu(self) };
+        }
     }
 }
 
@@ -2284,7 +2301,7 @@ unsafe extern "system" fn window_proc(
     }
     if !app.is_null()
         && (*app).menu_active
-        && matches!(message, WM_TRAY | WM_COMMAND | WM_POWERBROADCAST)
+        && matches!(message, WM_TRAY | WM_COMMAND)
         && !menu_command_dispatch_allowed(true, false)
     {
         return 0;
@@ -2305,6 +2322,9 @@ unsafe extern "system" fn window_proc(
                     (w_param >> 16) as u32,
                     l_param as *mut c_void,
                 );
+            }
+            WM_TIMER if w_param == POPUP_REFRESH_TIMER_ID => {
+                refresh_popup_menu(app);
             }
             WM_TIMER if w_param == HANDOFF_TIMER_ID => {
                 handle_handoff_timer(app);
@@ -2358,6 +2378,11 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
             );
             break;
         }
+        app.popup_menus = Some(PopupMenuHandles {
+            root: menu,
+            duration: None,
+            status: None,
+        });
         let items = menu_items_with_duration(
             app.lifecycle_status(),
             app.config.startup_enabled,
@@ -2438,6 +2463,7 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
                 wide(&items[7].label).as_ptr(),
             );
         if !menu_ok {
+            app.popup_menus = None;
             if DestroyMenu(menu) == 0 {
                 app.record(
                     "native.DestroyMenu.error",
@@ -2447,6 +2473,7 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
             break;
         }
         let _ = create_menu_help(hwnd, app);
+        begin_popup_refresh_timer(app);
         if SetForegroundWindow(hwnd) == 0 {
             app.record(
                 "native.SetForegroundWindow.error",
@@ -2463,6 +2490,8 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
             std::ptr::null(),
         );
         destroy_menu_help(app);
+        kill_popup_refresh_timer(app);
+        app.popup_menus = None;
         if DestroyMenu(menu) == 0 {
             app.record(
                 "native.DestroyMenu.error",
@@ -2489,7 +2518,137 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
         }
     }
     destroy_menu_help(app);
+    kill_popup_refresh_timer(app);
+    app.popup_menus = None;
     app.menu_active = false;
+}
+
+fn begin_popup_refresh_timer(app: &mut App) {
+    if app.popup_refresh_timer_active {
+        return;
+    }
+    let Some(hwnd) = app.tray_icon.as_ref().map(|icon| icon.h_wnd) else {
+        return;
+    };
+    let result = unsafe {
+        SetTimer(
+            hwnd,
+            POPUP_REFRESH_TIMER_ID,
+            POPUP_REFRESH_INTERVAL_MS,
+            std::ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        app.record(
+            "native.SetTimer.popup_refresh.error",
+            format!("raw_status={}", unsafe { GetLastError() }),
+        );
+    } else {
+        app.popup_refresh_timer_active = true;
+    }
+}
+
+fn kill_popup_refresh_timer(app: &mut App) {
+    if !app.popup_refresh_timer_active {
+        return;
+    }
+    app.popup_refresh_timer_active = false;
+    if let Some(hwnd) = app.tray_icon.as_ref().map(|icon| icon.h_wnd) {
+        unsafe {
+            let _ = KillTimer(hwnd, POPUP_REFRESH_TIMER_ID);
+        }
+    }
+}
+
+unsafe fn refresh_popup_menu(app: &mut App) {
+    let Some(handles) = app.popup_menus else {
+        return;
+    };
+    let timing = app.timing_values();
+    let start_enabled = menu_command_is_enabled_with_pause(
+        ID_START,
+        app.lifecycle_status(),
+        app.config.startup_enabled,
+        app.config.automatic,
+        app.pause.pause_active(),
+    );
+    let stop_enabled = menu_command_is_enabled_with_pause(
+        ID_STOP,
+        app.lifecycle_status(),
+        app.config.startup_enabled,
+        app.config.automatic,
+        app.pause.pause_active(),
+    );
+    let _ = ModifyMenuW(
+        handles.root,
+        2,
+        MF_BYPOSITION | MF_STRING | if start_enabled { 0 } else { MF_GRAYED },
+        ID_START,
+        wide("Start").as_ptr(),
+    );
+    let _ = ModifyMenuW(
+        handles.root,
+        3,
+        MF_BYPOSITION | MF_STRING | if stop_enabled { 0 } else { MF_GRAYED },
+        ID_STOP,
+        wide("Stop").as_ptr(),
+    );
+    let startup_id = if app.config.startup_enabled {
+        ID_STARTUP_OFF
+    } else {
+        ID_STARTUP_ON
+    };
+    let automatic_id = if app.config.automatic {
+        ID_AUTOMATIC_OFF
+    } else {
+        ID_AUTOMATIC_ON
+    };
+    let _ = ModifyMenuW(
+        handles.root,
+        6,
+        MF_BYPOSITION | MF_STRING,
+        startup_id,
+        wide(crate::tray_surface::auto_start_label(
+            app.config.startup_enabled,
+        ))
+        .as_ptr(),
+    );
+    let _ = ModifyMenuW(
+        handles.root,
+        7,
+        MF_BYPOSITION | MF_STRING,
+        automatic_id,
+        wide(crate::tray_surface::automatic_label(app.config.automatic)).as_ptr(),
+    );
+    if let Some(duration) = handles.duration {
+        let cancel_enabled = app.pause.current().is_some();
+        let _ = ModifyMenuW(
+            duration,
+            3,
+            MF_BYPOSITION | MF_STRING | if cancel_enabled { 0 } else { MF_GRAYED },
+            CANCEL_SCHEDULED_COMMAND_ID,
+            wide("Cancel scheduled action").as_ptr(),
+        );
+    }
+    if let Some(status_menu) = handles.status {
+        let items = status_menu_items(
+            app.lifecycle_status(),
+            timing,
+            app.controller.ownership(),
+            app.pause.current(),
+            app.running_duration(),
+            std::time::Instant::now(),
+        );
+        for (index, item) in items.iter().enumerate() {
+            let _ = ModifyMenuW(
+                status_menu,
+                index,
+                MF_BYPOSITION | MF_STRING | MF_GRAYED,
+                0,
+                wide(&item.label).as_ptr(),
+            );
+        }
+    }
 }
 
 unsafe fn append_duration_choice_submenu(
@@ -2599,6 +2758,9 @@ unsafe fn append_duration_submenu(app: &mut App, menu: *mut c_void) -> bool {
         DestroyMenu(submenu);
         return false;
     }
+    if let Some(handles) = app.popup_menus.as_mut() {
+        handles.duration = Some(submenu);
+    }
     true
 }
 
@@ -2665,6 +2827,9 @@ unsafe fn append_status_submenu(app: &mut App, menu: *mut c_void) -> bool {
     ) {
         DestroyMenu(submenu);
         return false;
+    }
+    if let Some(handles) = app.popup_menus.as_mut() {
+        handles.status = Some(submenu);
     }
     true
 }
@@ -3733,6 +3898,13 @@ extern "system" {
         flags: u32,
     ) -> i32;
     fn AppendMenuW(menu: *mut c_void, flags: u32, id: usize, text: *const u16) -> i32;
+    fn ModifyMenuW(
+        menu: *mut c_void,
+        item: usize,
+        flags: u32,
+        new_item: usize,
+        text: *const u16,
+    ) -> i32;
     fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
     fn TrackPopupMenu(
         menu: *mut c_void,

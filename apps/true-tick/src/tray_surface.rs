@@ -493,7 +493,17 @@ fn state_label(status: TrayStatus) -> &'static str {
 }
 
 fn format_duration(duration: Duration) -> String {
-    let seconds = duration.as_secs();
+    format_duration_seconds(duration.as_secs())
+}
+
+pub(crate) fn format_remaining_duration(duration: Duration) -> String {
+    let seconds = duration
+        .as_secs()
+        .saturating_add(u64::from(!duration.subsec_nanos().eq(&0)));
+    format_duration_seconds(seconds)
+}
+
+fn format_duration_seconds(seconds: u64) -> String {
     let hours = seconds / 3_600;
     let minutes = (seconds % 3_600) / 60;
     let seconds = seconds % 60;
@@ -528,7 +538,7 @@ fn next_action_label(scheduled: Option<ScheduledAction>, now: Instant) -> String
             format!(
                 "{} in {}",
                 action.action.label(),
-                format_duration(action.remaining(now))
+                format_remaining_duration(action.remaining(now))
             )
         },
     )
@@ -769,6 +779,16 @@ mod tests {
         assert_eq!(status[0].label, "State: Running");
         assert_eq!(status[1].label, "Timing: 0.497 ms");
         assert_eq!(status[2].label, "Running for: 4m 12s");
+    }
+
+    #[test]
+    fn remaining_duration_rounds_positive_fractional_seconds_up() {
+        assert_eq!(format_remaining_duration(Duration::from_secs(300)), "5m 0s");
+        assert_eq!(
+            format_remaining_duration(Duration::from_millis(299_999)),
+            "5m 0s"
+        );
+        assert_eq!(format_duration(Duration::from_millis(299_999)), "4m 59s");
     }
 
     #[test]
