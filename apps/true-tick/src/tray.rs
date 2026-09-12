@@ -1,4 +1,7 @@
 use crate::config;
+use crate::pause::{
+    timer_interval_ms, PauseController, PauseDuration, PauseRequest, PauseTimerEvent,
+};
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
@@ -19,10 +22,12 @@ use crate::shutdown::{
 };
 use crate::tray_surface::{
     dpi_to_icon_canvas, icon_pixel_color, menu_action_keeps_open, menu_command_dispatch_allowed,
-    menu_command_is_enabled, menu_description, menu_items, power_reconciliation,
-    release_needs_handoff, tooltip, tray_notification_opens_menu, HandoffProgress, HandoffTracker,
-    PowerReconciliation, TimingValues, TrayStatus, GITHUB_COMMAND_ID, GITHUB_URL,
-    HANDOFF_POLL_INTERVAL_MS, LOGS_COMMAND_ID,
+    menu_command_is_enabled_with_pause, menu_description, menu_items_with_pause,
+    pause_command_duration, pause_submenu_items, power_reconciliation, release_needs_handoff,
+    tooltip, tray_notification_opens_menu, HandoffProgress, HandoffTracker, PowerReconciliation,
+    TimingValues, TrayStatus, GITHUB_COMMAND_ID, GITHUB_URL, HANDOFF_POLL_INTERVAL_MS,
+    LOGS_COMMAND_ID, PAUSE_15_COMMAND_ID, PAUSE_30_COMMAND_ID, PAUSE_5_COMMAND_ID,
+    PAUSE_60_COMMAND_ID, RESUME_COMMAND_ID,
 };
 
 const WM_APP: u32 = 0x8000;
@@ -35,6 +40,7 @@ const WM_TIMER: u32 = 0x0113;
 const WM_MENUSELECT: u32 = 0x011F;
 const PBT_APMPOWERSTATUSCHANGE: usize = 0x000A;
 const HANDOFF_TIMER_ID: usize = 0x5449;
+const PAUSE_TIMER_ID_BASE: usize = 0x6000;
 const ID_START: usize = 1001;
 const ID_STOP: usize = 1002;
 const ID_QUIT: usize = 1004;
@@ -76,6 +82,7 @@ const TPM_RETURNCMD: u32 = 0x0100;
 const MF_STRING: u32 = 0x0000;
 const MF_SEPARATOR: u32 = 0x0800;
 const MF_GRAYED: u32 = 0x0001;
+const MF_POPUP: u32 = 0x0010;
 
 const NIF_MESSAGE: u32 = 0x0001;
 const NIF_ICON: u32 = 0x0002;
@@ -342,6 +349,9 @@ struct App {
     handoff: Option<HandoffTracker>,
     menu_help: Option<*mut c_void>,
     menu_help_text: Vec<u16>,
+    pause: PauseController,
+    pause_timer_id: Option<usize>,
+    pause_timer_generation: Option<u64>,
     shutdown_gate: ShutdownGate,
 }
 
@@ -495,6 +505,9 @@ pub fn run() {
             handoff: None,
             menu_help: None,
             menu_help_text: Vec::new(),
+            pause: PauseController::new(),
+            pause_timer_id: None,
+            pause_timer_generation: None,
             shutdown_gate: ShutdownGate::new(),
         });
         let app_ptr = Box::into_raw(app);
@@ -822,7 +835,13 @@ fn apply_policy(app: &mut App) {
             decision.status, decision.reason
         ),
     );
-    let intent = if app.config.automatic && decision.status == tick_core::Status::Requested {
+    let intent = if app.pause.active() {
+        app.record(
+            "policy.pause_suppressed",
+            format!("requested_status={:?} reason=pause_active", decision.status),
+        );
+        DesiredIntent::Release
+    } else if app.config.automatic && decision.status == tick_core::Status::Requested {
         DesiredIntent::Acquire
     } else {
         DesiredIntent::Release
@@ -843,7 +862,11 @@ fn queue_intent(app: &mut App, intent: DesiredIntent, source: impl AsRef<str>) {
         format!("intent={intent:?} source={}", source.as_ref()),
     );
     if app.handoff.is_some() {
-        app.tray_status = TrayStatus::Stopping;
+        app.tray_status = if app.pause.active() {
+            TrayStatus::Pausing
+        } else {
+            TrayStatus::Stopping
+        };
         app.publish();
         return;
     }
@@ -852,7 +875,11 @@ fn queue_intent(app: &mut App, intent: DesiredIntent, source: impl AsRef<str>) {
 
 fn process_desired_intent(app: &mut App) {
     if app.handoff.is_some() {
-        app.tray_status = TrayStatus::Stopping;
+        app.tray_status = if app.pause.active() {
+            TrayStatus::Pausing
+        } else {
+            TrayStatus::Stopping
+        };
         app.publish();
         return;
     }
@@ -861,6 +888,18 @@ fn process_desired_intent(app: &mut App) {
     };
     match intent {
         DesiredIntent::Acquire => {
+            if app.pause.active() {
+                app.record(
+                    "lifecycle.acquire.suppressed",
+                    "reason=pause_active result=suppressed",
+                );
+                if app.controller.ownership() == OwnershipState::Released {
+                    app.tray_status = TrayStatus::Paused;
+                    app.publish();
+                    arm_pause_timer(app);
+                }
+                return;
+            }
             let power = app.observation.power().state;
             let decision = decide(PolicyInput {
                 enabled: true,
@@ -884,10 +923,26 @@ fn process_desired_intent(app: &mut App) {
                 app.controller.ownership(),
                 OwnershipState::Owned | OwnershipState::Uncertain
             ) {
-                let _ = guarded_release(app, "desired intent", TrayStatus::Stopped);
+                let _ = guarded_release(
+                    app,
+                    "desired intent",
+                    if app.pause.active() {
+                        TrayStatus::Paused
+                    } else {
+                        TrayStatus::Stopped
+                    },
+                );
             } else {
-                app.tray_status = TrayStatus::Stopped;
+                app.tray_status = if app.pause.active() && app.tray_status != TrayStatus::Unverified
+                {
+                    TrayStatus::Paused
+                } else {
+                    TrayStatus::Stopped
+                };
                 app.publish();
+                if app.pause.active() {
+                    arm_pause_timer(app);
+                }
             }
         }
     }
@@ -977,7 +1032,11 @@ fn guarded_release(
         format!("source={}", source.as_ref()),
     );
     app.external_timing = false;
-    app.tray_status = TrayStatus::Stopping;
+    app.tray_status = if app.pause.active() {
+        TrayStatus::Pausing
+    } else {
+        TrayStatus::Stopping
+    };
     app.publish();
     let stop_result = app.controller.stop();
     app.sync_timing_snapshot();
@@ -991,7 +1050,15 @@ fn guarded_release(
             let boundary = app.timing_snapshot.requested;
             if released && boundary.is_some_and(|value| release_needs_handoff(value, effective)) {
                 let boundary = boundary.expect("boundary checked above");
-                if begin_handoff(app, boundary, TrayStatus::Stopped) {
+                if begin_handoff(
+                    app,
+                    boundary,
+                    if app.pause.active() {
+                        TrayStatus::Paused
+                    } else {
+                        TrayStatus::Stopped
+                    },
+                ) {
                     return Ok(released);
                 }
             }
@@ -1003,6 +1070,9 @@ fn guarded_release(
             app.sync_timing_snapshot();
             app.tray_status = released_status;
             app.publish();
+            if app.pause.active() {
+                arm_pause_timer(app);
+            }
             Ok(released)
         }
         Err(error) => {
@@ -1026,6 +1096,162 @@ fn manual_stop(app: &mut App) {
     queue_intent(app, DesiredIntent::Release, "manual");
 }
 
+fn pause_for_duration(app: &mut App, duration: PauseDuration) {
+    app.record(
+        "tray.command",
+        format!("command=pause duration_minutes={}", duration.minutes()),
+    );
+    match app.pause.request(duration, std::time::Instant::now()) {
+        PauseRequest::Repeated {
+            generation,
+            deadline,
+        } => {
+            app.record(
+                "pause.request",
+                format!(
+                    "result=ignored reason=already_paused generation={generation} remaining_ms={}",
+                    deadline
+                        .saturating_duration_since(std::time::Instant::now())
+                        .as_millis()
+                ),
+            );
+        }
+        PauseRequest::Started {
+            generation,
+            deadline,
+        } => {
+            app.record(
+                "pause.request",
+                format!(
+                    "result=started duration_minutes={} generation={generation} deadline_monotonic_ms={}",
+                    duration.minutes(),
+                    deadline.elapsed().as_millis()
+                ),
+            );
+            app.tray_status = TrayStatus::Pausing;
+            app.publish();
+            if arm_pause_timer(app) {
+                queue_intent(app, DesiredIntent::Release, "pause");
+            }
+        }
+    }
+}
+
+fn resume_now(app: &mut App) {
+    app.record("tray.command", "command=resume");
+    if app.pause.resume() {
+        cancel_pause_timer(app);
+        app.record("pause.resume", "result=cleared source=tray");
+        reconcile(app);
+    } else {
+        app.record("pause.resume", "result=ignored reason=not_paused");
+    }
+}
+
+fn pause_timer_id(generation: u64) -> usize {
+    PAUSE_TIMER_ID_BASE.saturating_add(generation as usize)
+}
+
+fn cancel_pause_timer(app: &mut App) {
+    let Some(timer_id) = app.pause_timer_id.take() else {
+        app.pause_timer_generation = None;
+        return;
+    };
+    app.pause_timer_generation = None;
+    if let Some(hwnd) = app.tray_icon.as_ref().map(|icon| icon.h_wnd) {
+        if unsafe { KillTimer(hwnd, timer_id) } == 0 {
+            app.record(
+                "native.KillTimer.pause.error",
+                format!("timer_id={timer_id} raw_status={}", unsafe {
+                    GetLastError()
+                }),
+            );
+        }
+    }
+}
+
+fn arm_pause_timer(app: &mut App) -> bool {
+    let Some(deadline) = app.pause.deadline() else {
+        return false;
+    };
+    let Some(hwnd) = app.tray_icon.as_ref().map(|icon| icon.h_wnd) else {
+        app.record(
+            "pause.timer",
+            "result=unavailable reason=tray_window_missing",
+        );
+        return false;
+    };
+    let generation = app.pause.generation();
+    let timer_id = pause_timer_id(generation);
+    if app.pause_timer_id != Some(timer_id) {
+        cancel_pause_timer(app);
+    }
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    let result = unsafe {
+        SetTimer(
+            hwnd,
+            timer_id,
+            timer_interval_ms(remaining),
+            std::ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        app.record(
+            "native.SetTimer.pause.error",
+            format!("generation={generation} raw_status={}", unsafe {
+                GetLastError()
+            }),
+        );
+        app.pause.resume();
+        app.pause_timer_id = None;
+        app.pause_timer_generation = None;
+        app.tray_status = TrayStatus::Error;
+        app.publish();
+        return false;
+    }
+    app.pause_timer_id = Some(timer_id);
+    app.pause_timer_generation = Some(generation);
+    true
+}
+
+fn handle_pause_timer(app: &mut App, timer_id: usize) {
+    if app.pause_timer_id != Some(timer_id) {
+        app.record(
+            "pause.timer",
+            format!("result=ignored reason=stale_timer timer_id={timer_id}"),
+        );
+        return;
+    }
+    let generation = app.pause_timer_generation.unwrap_or_default();
+    match app.pause.timer_event(generation, std::time::Instant::now()) {
+        PauseTimerEvent::Early { remaining, .. } => {
+            app.record(
+                "pause.timer",
+                format!(
+                    "result=early generation={generation} remaining_ms={}",
+                    remaining.as_millis()
+                ),
+            );
+            arm_pause_timer(app);
+        }
+        PauseTimerEvent::Expired { .. } => {
+            cancel_pause_timer(app);
+            app.pause.resume();
+            app.record(
+                "pause.timeout",
+                format!("result=expired generation={generation}"),
+            );
+            reconcile(app);
+        }
+        PauseTimerEvent::Stale => {
+            app.record(
+                "pause.timer",
+                format!("result=ignored reason=stale_generation generation={generation}"),
+            );
+        }
+    }
+}
+
 fn release_for_power_change(app: &mut App) {
     app.record(
         "power.transition",
@@ -1036,6 +1262,14 @@ fn release_for_power_change(app: &mut App) {
 }
 
 fn apply_power_reconciliation(app: &mut App) {
+    if app.pause.active() {
+        app.record(
+            "policy.power_reconciliation.suppressed",
+            "reason=pause_active result=release_only",
+        );
+        queue_intent(app, DesiredIntent::Release, "pause power reconciliation");
+        return;
+    }
     let power = app.observation.power().state;
     let action = power_reconciliation(app.config.automatic, power, app.controller.ownership());
     app.record(
@@ -1061,11 +1295,16 @@ fn apply_power_reconciliation(app: &mut App) {
 
 fn show_ownership_status(app: &mut App, released_status: TrayStatus) {
     if app.handoff.is_some() {
-        app.tray_status = TrayStatus::Stopping;
+        app.tray_status = if app.pause.active() {
+            TrayStatus::Pausing
+        } else {
+            TrayStatus::Stopping
+        };
         app.publish();
         return;
     }
     app.tray_status = match app.controller.ownership() {
+        OwnershipState::Released if app.pause.active() => TrayStatus::Paused,
         OwnershipState::Released => released_status,
         OwnershipState::Owned => TrayStatus::Running,
         OwnershipState::Uncertain => TrayStatus::Unverified,
@@ -1101,6 +1340,11 @@ impl App {
         if self.shutdown_gate.verified() {
             return Ok(());
         }
+        if self.pause.active() {
+            self.pause.resume();
+            self.record("pause.cleared", "reason=shutdown");
+        }
+        cancel_pause_timer(self);
         self.record(
             "shutdown.cleanup",
             format!(
@@ -1213,6 +1457,7 @@ fn refresh_timing_observation(app: &mut App) -> Option<TimerObservation> {
 
 fn begin_handoff(app: &mut App, boundary: tick_core::Hns, released_status: TrayStatus) -> bool {
     let tracker = HandoffTracker::new(boundary, released_status);
+    cancel_pause_timer(app);
     let Some(hwnd) = app.tray_icon.as_ref().map(|icon| icon.h_wnd) else {
         app.record(
             "handoff.timeout",
@@ -1221,9 +1466,16 @@ fn begin_handoff(app: &mut App, boundary: tick_core::Hns, released_status: TrayS
         app.external_timing = true;
         app.controller.clear_release_boundary();
         app.sync_timing_snapshot();
-        app.tray_status = TrayStatus::Stopped;
+        app.tray_status = if released_status == TrayStatus::Paused {
+            TrayStatus::Unverified
+        } else {
+            TrayStatus::Stopped
+        };
         app.publish();
         process_desired_intent(app);
+        if app.pause.active() {
+            arm_pause_timer(app);
+        }
         return false;
     };
     let timer = unsafe {
@@ -1250,13 +1502,24 @@ fn begin_handoff(app: &mut App, boundary: tick_core::Hns, released_status: TrayS
         app.external_timing = true;
         app.controller.clear_release_boundary();
         app.sync_timing_snapshot();
-        app.tray_status = TrayStatus::Stopped;
+        app.tray_status = if released_status == TrayStatus::Paused {
+            TrayStatus::Unverified
+        } else {
+            TrayStatus::Stopped
+        };
         app.publish();
         process_desired_intent(app);
+        if app.pause.active() {
+            arm_pause_timer(app);
+        }
         return false;
     }
     app.handoff = Some(tracker);
-    app.tray_status = TrayStatus::Stopping;
+    app.tray_status = if released_status == TrayStatus::Paused {
+        TrayStatus::Pausing
+    } else {
+        TrayStatus::Stopping
+    };
     app.record(
         "handoff.started",
         format!(
@@ -1327,7 +1590,11 @@ fn handle_handoff_timer(app: &mut App) {
     match progress {
         HandoffProgress::Pending => {
             app.handoff = Some(tracker);
-            app.tray_status = TrayStatus::Stopping;
+            app.tray_status = if tracker.released_status() == TrayStatus::Paused {
+                TrayStatus::Pausing
+            } else {
+                TrayStatus::Stopping
+            };
             app.publish();
         }
         HandoffProgress::Completed => {
@@ -1347,10 +1614,13 @@ fn handle_handoff_timer(app: &mut App) {
             );
             app.controller.clear_release_boundary();
             app.sync_timing_snapshot();
-            app.tray_status = TrayStatus::Stopped;
+            app.tray_status = tracker.released_status();
             app.external_timing = false;
             app.publish();
             process_desired_intent(app);
+            if app.pause.active() {
+                arm_pause_timer(app);
+            }
         }
         HandoffProgress::TimedOut => {
             finish_handoff_timer(app);
@@ -1368,10 +1638,17 @@ fn handle_handoff_timer(app: &mut App) {
             );
             app.controller.clear_release_boundary();
             app.sync_timing_snapshot();
-            app.tray_status = TrayStatus::Stopped;
+            app.tray_status = if tracker.released_status() == TrayStatus::Paused {
+                TrayStatus::Unverified
+            } else {
+                TrayStatus::Stopped
+            };
             app.external_timing = true;
             app.publish();
             process_desired_intent(app);
+            if app.pause.active() {
+                arm_pause_timer(app);
+            }
         }
     }
 }
@@ -1498,6 +1775,9 @@ unsafe extern "system" fn window_proc(
             WM_TIMER if w_param == HANDOFF_TIMER_ID => {
                 handle_handoff_timer(app);
             }
+            WM_TIMER if app.pause_timer_id == Some(w_param) => {
+                handle_pause_timer(app, w_param);
+            }
             WM_POWERBROADCAST if w_param == PBT_APMPOWERSTATUSCHANGE => {
                 app.record("power.broadcast", "event=APMPOWERSTATUSCHANGE");
                 let previous = app.observation.power().state;
@@ -1542,11 +1822,12 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
             );
             break;
         }
-        let items = menu_items(
+        let items = menu_items_with_pause(
             app.lifecycle_status(),
             app.config.startup_enabled,
             app.config.automatic,
             app.timing_values(),
+            app.pause.active(),
         );
         let header_flags = if items[0].enabled {
             MF_STRING
@@ -1587,6 +1868,7 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
                 ID_START,
                 wide(&items[1].label).as_ptr(),
             )
+            && append_pause_submenu(app, menu)
             && append_menu_checked(
                 app,
                 menu,
@@ -1685,6 +1967,59 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
     }
     destroy_menu_help(app);
     app.menu_active = false;
+}
+
+unsafe fn append_pause_submenu(app: &mut App, menu: *mut c_void) -> bool {
+    let submenu = CreatePopupMenu();
+    if submenu.is_null() {
+        app.record(
+            "native.CreatePopupMenu.pause.error",
+            format!("raw_status={}", GetLastError()),
+        );
+        return false;
+    }
+    let paused = app.pause.active();
+    let items = pause_submenu_items(paused);
+    let choices = [
+        (crate::tray_surface::PAUSE_5_COMMAND_ID, &items[0]),
+        (crate::tray_surface::PAUSE_15_COMMAND_ID, &items[1]),
+        (crate::tray_surface::PAUSE_30_COMMAND_ID, &items[2]),
+        (crate::tray_surface::PAUSE_60_COMMAND_ID, &items[3]),
+    ];
+    let mut ok = true;
+    if paused {
+        ok = append_menu_checked(
+            app,
+            submenu,
+            MF_STRING,
+            RESUME_COMMAND_ID,
+            wide(&items[4].label).as_ptr(),
+        );
+    } else {
+        for (command, item) in choices {
+            let flags = if item.enabled {
+                MF_STRING
+            } else {
+                MF_STRING | MF_GRAYED
+            };
+            ok &= append_menu_checked(app, submenu, flags, command, wide(&item.label).as_ptr());
+        }
+    }
+    if !ok {
+        DestroyMenu(submenu);
+        return false;
+    }
+    if !append_menu_checked(
+        app,
+        menu,
+        MF_STRING | MF_POPUP,
+        submenu as usize,
+        wide("Pause").as_ptr(),
+    ) {
+        DestroyMenu(submenu);
+        return false;
+    }
+    true
 }
 
 unsafe fn create_menu_help(hwnd: *mut c_void, app: &mut App) -> bool {
@@ -1868,11 +2203,12 @@ unsafe fn append_menu_checked(
 }
 
 unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) -> bool {
-    if !menu_command_is_enabled(
+    if !menu_command_is_enabled_with_pause(
         command,
         app.lifecycle_status(),
         app.config.startup_enabled,
         app.config.automatic,
+        app.pause.active(),
     ) {
         app.record(
             "tray.command.rejected",
@@ -1889,6 +2225,12 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
             open_diagnostic_window(app);
         }
         GITHUB_COMMAND_ID => open_github_page(hwnd, app),
+        PAUSE_5_COMMAND_ID | PAUSE_15_COMMAND_ID | PAUSE_30_COMMAND_ID | PAUSE_60_COMMAND_ID => {
+            if let Some(duration) = pause_command_duration(command) {
+                pause_for_duration(app, duration);
+            }
+        }
+        RESUME_COMMAND_ID => resume_now(app),
         ID_STARTUP_ON => set_startup(app, true),
         ID_STARTUP_OFF => set_startup(app, false),
         ID_AUTOMATIC_ON => set_automatic(app, true),

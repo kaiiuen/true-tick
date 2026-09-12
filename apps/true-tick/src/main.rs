@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 mod config;
+mod pause;
 mod portable;
 mod shutdown;
 mod tray_surface;

@@ -1,3 +1,4 @@
+use crate::pause::PauseDuration;
 use tick_core::Hns;
 use tick_ownership::{OwnershipState, TimingSnapshot};
 use tick_policy::PowerState;
@@ -6,7 +7,9 @@ use tick_policy::PowerState;
 pub(crate) enum TrayStatus {
     Running,
     Starting,
+    Pausing,
     Stopping,
+    Paused,
     #[allow(dead_code)]
     Pending,
     Degraded,
@@ -61,7 +64,10 @@ pub(crate) fn power_reconciliation(
 
 pub(crate) const fn lifecycle_status(status: TrayStatus, handoff_active: bool) -> TrayStatus {
     if handoff_active {
-        TrayStatus::Stopping
+        match status {
+            TrayStatus::Pausing => TrayStatus::Pausing,
+            _ => TrayStatus::Stopping,
+        }
     } else {
         status
     }
@@ -71,9 +77,13 @@ impl TrayStatus {
     pub(crate) const fn icon_color(self) -> IconColor {
         match self {
             Self::Running => IconColor::Green,
-            Self::Starting | Self::Stopping | Self::Pending | Self::Degraded | Self::Unverified => {
-                IconColor::Yellow
-            }
+            Self::Starting
+            | Self::Pausing
+            | Self::Stopping
+            | Self::Paused
+            | Self::Pending
+            | Self::Degraded
+            | Self::Unverified => IconColor::Yellow,
             Self::Stopped | Self::Blocked | Self::Unsupported | Self::Error => IconColor::Red,
         }
     }
@@ -208,7 +218,10 @@ pub(crate) fn tooltip(status: TrayStatus, timing: TimingValues) -> String {
             || "Starting, verifying".to_owned(),
             |requested| format!("Starting {} ms, verifying", format_ms(requested)),
         ),
+        TrayStatus::Pausing if timing.handoff_pending => "Pausing, handoff pending".to_owned(),
+        TrayStatus::Pausing => "Pausing".to_owned(),
         TrayStatus::Stopping if timing.handoff_pending => "Stopping, handoff pending".to_owned(),
+        TrayStatus::Paused => "Paused".to_owned(),
         TrayStatus::Stopping => "Stopping".to_owned(),
         TrayStatus::Error => "Error".to_owned(),
         TrayStatus::Pending
@@ -237,7 +250,10 @@ pub(crate) fn status_label(status: TrayStatus, timing: TimingValues) -> String {
             || concise.to_owned(),
             |value| format!("Starting ({} ms, verifying)", format_ms(value)),
         ),
+        TrayStatus::Pausing if timing.handoff_pending => "Pausing (handoff pending)".to_owned(),
+        TrayStatus::Pausing => "Pausing".to_owned(),
         TrayStatus::Stopping if timing.handoff_pending => "Stopping (handoff pending)".to_owned(),
+        TrayStatus::Paused => "Paused".to_owned(),
         TrayStatus::Stopping if timing.external => "Stopped (external timing)".to_owned(),
         TrayStatus::Error if timing.invalid_interval => "Error (invalid interval)".to_owned(),
         TrayStatus::Error => "Error (operation failed)".to_owned(),
@@ -248,7 +264,47 @@ pub(crate) fn status_label(status: TrayStatus, timing: TimingValues) -> String {
 
 pub(crate) const LOGS_COMMAND_ID: usize = 1009;
 pub(crate) const GITHUB_COMMAND_ID: usize = 1010;
+pub(crate) const PAUSE_5_COMMAND_ID: usize = 1011;
+pub(crate) const PAUSE_15_COMMAND_ID: usize = 1012;
+pub(crate) const PAUSE_30_COMMAND_ID: usize = 1013;
+pub(crate) const PAUSE_60_COMMAND_ID: usize = 1014;
+pub(crate) const RESUME_COMMAND_ID: usize = 1015;
 pub(crate) const GITHUB_URL: &str = "https://github.com/kaiiuen/true-tick";
+
+pub(crate) const fn pause_command_duration(command_id: usize) -> Option<PauseDuration> {
+    match command_id {
+        PAUSE_5_COMMAND_ID => Some(PauseDuration::Five),
+        PAUSE_15_COMMAND_ID => Some(PauseDuration::Fifteen),
+        PAUSE_30_COMMAND_ID => Some(PauseDuration::Thirty),
+        PAUSE_60_COMMAND_ID => Some(PauseDuration::Sixty),
+        _ => None,
+    }
+}
+
+pub(crate) fn pause_submenu_items(paused: bool) -> [MenuItem; 5] {
+    [
+        MenuItem {
+            label: PauseDuration::Five.label().to_owned(),
+            enabled: !paused,
+        },
+        MenuItem {
+            label: PauseDuration::Fifteen.label().to_owned(),
+            enabled: !paused,
+        },
+        MenuItem {
+            label: PauseDuration::Thirty.label().to_owned(),
+            enabled: !paused,
+        },
+        MenuItem {
+            label: PauseDuration::Sixty.label().to_owned(),
+            enabled: !paused,
+        },
+        MenuItem {
+            label: "Resume now".to_owned(),
+            enabled: paused,
+        },
+    ]
+}
 
 pub(crate) const fn menu_description(command_id: usize) -> Option<&'static str> {
     match command_id {
@@ -258,6 +314,11 @@ pub(crate) const fn menu_description(command_id: usize) -> Option<&'static str> 
         1007 | 1008 => Some("Request timing automatically on AC power"),
         LOGS_COMMAND_ID => Some("Open status and session logs"),
         GITHUB_COMMAND_ID => Some("Open True Tick on GitHub"),
+        PAUSE_5_COMMAND_ID => Some("Pause for 5 minutes"),
+        PAUSE_15_COMMAND_ID => Some("Pause for 15 minutes"),
+        PAUSE_30_COMMAND_ID => Some("Pause for 30 minutes"),
+        PAUSE_60_COMMAND_ID => Some("Pause for 60 minutes"),
+        RESUME_COMMAND_ID => Some("Resume timing now"),
         1004 => Some("Stop safely and quit"),
         _ => None,
     }
@@ -299,7 +360,16 @@ pub(crate) const fn tray_click_action(notification: usize) -> Option<TrayClickAc
 }
 
 pub(crate) const fn menu_action_keeps_open(command_id: usize) -> bool {
-    matches!(command_id, 1001 | 1002 | 1005..=1008)
+    matches!(
+        command_id,
+        1001 | 1002 | 1005
+            ..=1008
+                | PAUSE_5_COMMAND_ID
+                | PAUSE_15_COMMAND_ID
+                | PAUSE_30_COMMAND_ID
+                | PAUSE_60_COMMAND_ID
+                | RESUME_COMMAND_ID
+    )
 }
 
 pub(crate) const fn tray_notification_opens_menu(notification: usize, menu_active: bool) -> bool {
@@ -317,33 +387,63 @@ pub(crate) const fn menu_command_dispatch_allowed(
     from_popup_return || !menu_active
 }
 
+#[allow(dead_code)]
 pub(crate) const fn menu_command_is_enabled(
     command_id: usize,
     status: TrayStatus,
     startup_enabled: bool,
     automatic: bool,
 ) -> bool {
+    menu_command_is_enabled_with_pause(command_id, status, startup_enabled, automatic, false)
+}
+
+pub(crate) const fn menu_command_is_enabled_with_pause(
+    command_id: usize,
+    status: TrayStatus,
+    startup_enabled: bool,
+    automatic: bool,
+    paused: bool,
+) -> bool {
     match command_id {
         1001 => !matches!(
             status,
             TrayStatus::Running | TrayStatus::Starting | TrayStatus::Stopping
         ),
-        1002 => !matches!(status, TrayStatus::Stopped | TrayStatus::Stopping),
+        1002 => !matches!(
+            status,
+            TrayStatus::Stopped | TrayStatus::Pausing | TrayStatus::Stopping | TrayStatus::Paused
+        ),
         1005 => !startup_enabled,
         1006 => startup_enabled,
         1007 => !automatic,
         1008 => automatic,
         LOGS_COMMAND_ID | GITHUB_COMMAND_ID | 1004 => true,
+        PAUSE_5_COMMAND_ID | PAUSE_15_COMMAND_ID | PAUSE_30_COMMAND_ID | PAUSE_60_COMMAND_ID => {
+            !paused
+        }
+        RESUME_COMMAND_ID => paused,
         _ => false,
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn menu_items(
     status: TrayStatus,
     startup_enabled: bool,
     automatic: bool,
     timing: TimingValues,
 ) -> [MenuItem; 8] {
+    menu_items_with_pause(status, startup_enabled, automatic, timing, false)
+}
+
+pub(crate) fn menu_items_with_pause(
+    status: TrayStatus,
+    startup_enabled: bool,
+    automatic: bool,
+    timing: TimingValues,
+    paused: bool,
+) -> [MenuItem; 8] {
+    let _ = paused;
     [
         MenuItem {
             label: version_header(),
@@ -355,7 +455,11 @@ pub(crate) fn menu_items(
         },
         MenuItem {
             label: "Stop".to_owned(),
-            enabled: !matches!(status, TrayStatus::Stopped | TrayStatus::Stopping),
+            enabled: !paused
+                && !matches!(
+                    status,
+                    TrayStatus::Stopped | TrayStatus::Pausing | TrayStatus::Stopping
+                ),
         },
         MenuItem {
             label: auto_start_label(startup_enabled).to_owned(),
