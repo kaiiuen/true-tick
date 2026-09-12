@@ -22,6 +22,7 @@ pub trait ObservationSource {
 #[derive(Debug)]
 pub struct WindowsObservation {
     power: PowerSnapshot,
+    power_error: Option<CoreError>,
 }
 
 impl Default for WindowsObservation {
@@ -31,6 +32,7 @@ impl Default for WindowsObservation {
                 state: PowerState::Unknown,
                 battery_saver: None,
             },
+            power_error: None,
         }
     }
 }
@@ -45,14 +47,43 @@ impl ObservationSource for WindowsObservation {
     }
 
     fn refresh_power(&mut self) -> Result<PowerSnapshot, CoreError> {
-        #[cfg(windows)]
-        {
-            self.power = query_power()?;
-            Ok(self.power)
-        }
-        #[cfg(not(windows))]
-        {
-            Err(CoreError::Unsupported)
+        let result = {
+            #[cfg(windows)]
+            {
+                query_power()
+            }
+            #[cfg(not(windows))]
+            {
+                Err(CoreError::Unsupported)
+            }
+        };
+        self.apply_power_query_result(result)
+    }
+}
+
+impl WindowsObservation {
+    pub fn power_error(&self) -> Option<CoreError> {
+        self.power_error
+    }
+
+    fn apply_power_query_result(
+        &mut self,
+        result: Result<PowerSnapshot, CoreError>,
+    ) -> Result<PowerSnapshot, CoreError> {
+        match result {
+            Ok(snapshot) => {
+                self.power = snapshot;
+                self.power_error = None;
+                Ok(snapshot)
+            }
+            Err(error) => {
+                self.power = PowerSnapshot {
+                    state: PowerState::Unknown,
+                    battery_saver: None,
+                };
+                self.power_error = Some(error);
+                Err(error)
+            }
         }
     }
 }
@@ -110,15 +141,61 @@ extern "system" {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(windows))]
     use super::*;
 
     #[test]
-    fn non_windows_power_is_explicitly_unsupported() {
-        #[cfg(not(windows))]
+    fn query_failure_after_ac_clears_stale_power_and_records_error() {
+        let mut observation = WindowsObservation::default();
+        observation
+            .apply_power_query_result(Ok(PowerSnapshot {
+                state: PowerState::Ac,
+                battery_saver: Some(false),
+            }))
+            .unwrap();
+        let error = CoreError::ObservationFailed { raw_status: 31 };
+        assert_eq!(observation.apply_power_query_result(Err(error)), Err(error));
+        assert_eq!(observation.power().state, PowerState::Unknown);
+        assert_eq!(observation.power().battery_saver, None);
+        assert_eq!(observation.power_error(), Some(error));
+    }
+
+    #[test]
+    fn query_failure_after_battery_clears_stale_power_and_records_error() {
+        let mut observation = WindowsObservation::default();
+        observation
+            .apply_power_query_result(Ok(PowerSnapshot {
+                state: PowerState::Battery,
+                battery_saver: Some(false),
+            }))
+            .unwrap();
+        let error = CoreError::ObservationFailed { raw_status: 32 };
+        assert_eq!(observation.apply_power_query_result(Err(error)), Err(error));
+        assert_eq!(observation.power().state, PowerState::Unknown);
+        assert_eq!(observation.power_error(), Some(error));
+    }
+
+    #[test]
+    fn successful_query_clears_a_previous_power_error() {
+        let mut observation = WindowsObservation::default();
+        let error = CoreError::ObservationFailed { raw_status: 33 };
+        let _ = observation.apply_power_query_result(Err(error));
+        let snapshot = PowerSnapshot {
+            state: PowerState::Ac,
+            battery_saver: Some(false),
+        };
         assert_eq!(
-            WindowsObservation::default().refresh_power(),
-            Err(CoreError::Unsupported)
+            observation.apply_power_query_result(Ok(snapshot)),
+            Ok(snapshot)
         );
+        assert_eq!(observation.power_error(), None);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_power_is_explicitly_unsupported() {
+        let mut observation = WindowsObservation::default();
+        assert_eq!(observation.refresh_power(), Err(CoreError::Unsupported));
+        assert_eq!(observation.power().state, PowerState::Unknown);
+        assert_eq!(observation.power_error(), Some(CoreError::Unsupported));
     }
 }
