@@ -177,6 +177,7 @@ const BS_PUSHBUTTON: u32 = 0x00000000;
 const SS_LEFT: u32 = 0x00000000;
 
 const WM_SIZE: u32 = 0x0005;
+const WM_SETREDRAW: u32 = 0x000B;
 const WM_PAINT: u32 = 0x000F;
 const WM_CLOSE: u32 = 0x0010;
 const WM_ERASEBKGND: u32 = 0x0014;
@@ -200,6 +201,7 @@ const SW_RESTORE: i32 = 9;
 const DIAGNOSTIC_MIN_WIDTH: i32 = 820;
 const DIAGNOSTIC_MIN_HEIGHT: i32 = 260;
 const DIAGNOSTIC_WINDOW_TITLE: &str = "True™ Tick Status and Diagnostics";
+const DIAGNOSTIC_LOADING_SUMMARY: &str = "Loading True™ Tick diagnostics...";
 const MAX_STARTUP_STATUS_BYTES: usize = 512;
 const DIAGNOSTIC_WINDOW_PARENT: *mut c_void = std::ptr::null_mut();
 const DIAGNOSTIC_SUMMARY_HEIGHT: i32 = 148;
@@ -213,12 +215,15 @@ const DIAGNOSTIC_DEFAULT_HEIGHT: i32 = 600;
 const COLOR_WINDOW: i32 = 5;
 const COLOR_WINDOWTEXT: i32 = 8;
 const DEFAULT_GUI_FONT: i32 = 17;
-const SW_HIDE: i32 = 0;
 const DIAGNOSTIC_RANGE_INPUT_LIMIT: usize = 64;
 const WS_CHILD: u32 = 0x40000000;
 const WS_HSCROLL: u32 = 0x00100000;
 const WS_VSCROLL: u32 = 0x00200000;
 const WS_EX_CLIENTEDGE: u32 = 0x00000200;
+const SWP_NOZORDER: u32 = 0x0004;
+const SWP_NOACTIVATE: u32 = 0x0010;
+const SWP_NOSENDCHANGING: u32 = 0x0400;
+const SB_HORZ: i32 = 0;
 
 const ES_MULTILINE: u32 = 0x0004;
 const ES_READONLY: u32 = 0x0800;
@@ -567,6 +572,10 @@ struct App {
     diagnostic_message_text: String,
     diagnostic_refresh_pending: bool,
     diagnostic_refreshing: bool,
+    diagnostic_layout_stable: bool,
+    diagnostic_snapshot_key: Option<(usize, u64)>,
+    diagnostic_snapshot_generation: u64,
+    diagnostic_auto_fit_generation: Option<u64>,
     menu_active: bool,
     popup_menus: Option<PopupMenuHandles>,
     popup_refresh_timer_active: bool,
@@ -754,6 +763,10 @@ pub fn run() {
             diagnostic_message_text: String::new(),
             diagnostic_refresh_pending: false,
             diagnostic_refreshing: false,
+            diagnostic_layout_stable: false,
+            diagnostic_snapshot_key: None,
+            diagnostic_snapshot_generation: 0,
+            diagnostic_auto_fit_generation: None,
             menu_active: false,
             popup_menus: None,
             popup_refresh_timer_active: false,
@@ -3637,7 +3650,7 @@ unsafe fn open_diagnostic_window(app: &mut App) {
             }
             UpdateWindow(window);
             SetForegroundWindow(window);
-            refresh_diagnostic_window(window, app);
+            request_diagnostic_refresh(app);
             return;
         }
     }
@@ -3671,10 +3684,11 @@ unsafe fn open_diagnostic_window(app: &mut App) {
             DestroyWindow(window);
             return;
         }
+        app.diagnostic_window = Some(window);
+        layout_diagnostic_controls(window, app);
         ShowWindow(window, SW_SHOWNORMAL);
         UpdateWindow(window);
         SetForegroundWindow(window);
-        app.diagnostic_window = Some(window);
         let style = GetWindowLongPtrW(window, GWL_STYLE) as u32;
         let extended_style = GetWindowLongPtrW(window, GWL_EXSTYLE) as u32;
         app.record(
@@ -3687,7 +3701,7 @@ unsafe fn open_diagnostic_window(app: &mut App) {
             ),
         );
         app.record("diagnostic.window.result", "result=opened");
-        refresh_diagnostic_window(window, app);
+        request_diagnostic_refresh(app);
     }
 }
 
@@ -4024,59 +4038,127 @@ unsafe fn layout_diagnostic_controls(window: *mut c_void, app: &App) {
         .min(height.saturating_sub(summary_height).max(0));
     let toolbar_top = summary_height;
     let list_top = summary_height.saturating_add(toolbar_height);
-    if let Some(summary) = app.diagnostic_summary {
-        let _ = MoveWindow(summary, 0, 0, width, summary_height, 1);
-    }
-
     let row_height = scale_logical(26, dpi);
     let row_top = toolbar_top.saturating_add((toolbar_height - row_height).max(0) / 2);
     let y_label = row_top.saturating_add(scale_logical(1, dpi));
     let position = |logical: i32| scale_logical(logical, dpi);
-    if let Some(label) = app.diagnostic_display_label {
-        let _ = MoveWindow(label, position(8), y_label, position(68), row_height, 1);
+    let message_left = position(796);
+    let message_width = width.saturating_sub(message_left).max(0);
+    let controls = [
+        (app.diagnostic_summary, (0, 0, width, summary_height)),
+        (
+            app.diagnostic_display_label,
+            (position(8), y_label, position(68), row_height),
+        ),
+        (
+            app.diagnostic_display_input,
+            (position(84), row_top, position(52), row_height),
+        ),
+        (
+            app.diagnostic_show_all_button,
+            (position(144), row_top, position(72), row_height),
+        ),
+        (
+            app.diagnostic_toolbar_label,
+            (position(228), y_label, position(132), row_height),
+        ),
+        (
+            app.diagnostic_range_input,
+            (position(368), row_top, position(88), row_height),
+        ),
+        (
+            app.diagnostic_selection_summary,
+            (position(464), y_label, position(180), row_height),
+        ),
+        (
+            app.diagnostic_copy_button,
+            (position(652), row_top, position(64), row_height),
+        ),
+        (
+            app.diagnostic_export_button,
+            (position(724), row_top, position(64), row_height),
+        ),
+        (
+            app.diagnostic_message,
+            (message_left, y_label, message_width, row_height),
+        ),
+        (
+            app.diagnostic_list,
+            (0, list_top, width, height.saturating_sub(list_top)),
+        ),
+    ];
+    let mut defer = BeginDeferWindowPos(controls.len() as i32);
+    if defer.is_null() {
+        return;
     }
-    if let Some(input) = app.diagnostic_display_input {
-        let _ = MoveWindow(input, position(84), row_top, position(52), row_height, 1);
-    }
-    if let Some(button) = app.diagnostic_show_all_button {
-        let _ = MoveWindow(button, position(144), row_top, position(72), row_height, 1);
-    }
-    if let Some(label) = app.diagnostic_toolbar_label {
-        let _ = MoveWindow(label, position(228), y_label, position(132), row_height, 1);
-    }
-    if let Some(input) = app.diagnostic_range_input {
-        let _ = MoveWindow(input, position(368), row_top, position(88), row_height, 1);
-    }
-    if let Some(summary) = app.diagnostic_selection_summary {
-        let _ = MoveWindow(
-            summary,
-            position(464),
-            y_label,
-            position(180),
-            row_height,
-            1,
+    for (control, (x, y, control_width, control_height)) in controls {
+        let Some(control) = control else {
+            continue;
+        };
+        let next = DeferWindowPos(
+            defer,
+            control,
+            std::ptr::null_mut(),
+            x,
+            y,
+            control_width,
+            control_height,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
         );
-    }
-    if let Some(copy) = app.diagnostic_copy_button {
-        let _ = MoveWindow(copy, position(652), row_top, position(64), row_height, 1);
-    }
-    if let Some(export) = app.diagnostic_export_button {
-        let _ = MoveWindow(export, position(724), row_top, position(64), row_height, 1);
-    }
-    if let Some(message) = app.diagnostic_message {
-        let message_left = position(796);
-        let message_width = width.saturating_sub(message_left).max(0);
-        if message_width > 0 {
-            ShowWindow(message, SW_SHOWNORMAL);
-        } else {
-            ShowWindow(message, SW_HIDE);
+        if next.is_null() {
+            return;
         }
-        let _ = MoveWindow(message, message_left, y_label, message_width, row_height, 1);
+        defer = next;
     }
-    if let Some(list) = app.diagnostic_list {
-        let _ = MoveWindow(list, 0, list_top, width, height.saturating_sub(list_top), 1);
-        auto_fit_diagnostic_columns(list, width, dpi);
-    }
+    let _ = EndDeferWindowPos(defer);
+    let _ = InvalidateRect(window, std::ptr::null(), 1);
+}
+
+fn diagnostic_snapshot_key(events: &[tick_diagnostics::DiagnosticEvent]) -> Option<(usize, u64)> {
+    events.last().map(|event| (events.len(), event.sequence))
+}
+
+fn diagnostic_data_snapshot_changed(
+    previous: Option<(usize, u64)>,
+    current: Option<(usize, u64)>,
+) -> bool {
+    previous != current
+}
+
+fn diagnostic_auto_fit_once(
+    layout_stable: bool,
+    snapshot_changed: bool,
+    generation: u64,
+    fitted_generation: Option<u64>,
+) -> bool {
+    !layout_stable || (snapshot_changed && fitted_generation != Some(generation))
+}
+
+fn diagnostic_refresh_is_coalesced(pending: bool, refreshing: bool) -> bool {
+    pending || refreshing
+}
+
+#[cfg(test)]
+fn diagnostic_auto_fit_reason_allows(reason: DiagnosticRefreshReason) -> bool {
+    matches!(
+        reason,
+        DiagnosticRefreshReason::Initial | DiagnosticRefreshReason::Data
+    )
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiagnosticRefreshReason {
+    Initial,
+    Data,
+    View,
+    Resize,
+    Scroll,
+}
+
+#[cfg(test)]
+fn diagnostic_loading_summary_is_nonblank() -> bool {
+    !DIAGNOSTIC_LOADING_SUMMARY.trim().is_empty()
 }
 
 unsafe fn auto_fit_diagnostic_columns(list: *mut c_void, client_width: i32, dpi: u32) {
@@ -4157,6 +4239,40 @@ unsafe fn initialize_diagnostic_list(list: *mut c_void) -> Result<(), u32> {
     Ok(())
 }
 
+unsafe fn set_diagnostic_redraw(app: &App, enabled: bool) {
+    let redraw = usize::from(enabled);
+    if let Some(window) = app.diagnostic_window {
+        let _ = SendMessageW(window, WM_SETREDRAW, redraw, 0);
+    }
+    for control in [
+        app.diagnostic_summary,
+        app.diagnostic_display_label,
+        app.diagnostic_display_input,
+        app.diagnostic_show_all_button,
+        app.diagnostic_toolbar_label,
+        app.diagnostic_selection_summary,
+        app.diagnostic_range_input,
+        app.diagnostic_copy_button,
+        app.diagnostic_export_button,
+        app.diagnostic_message,
+        app.diagnostic_list,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let _ = SendMessageW(control, WM_SETREDRAW, redraw, 0);
+    }
+}
+
+unsafe fn finish_diagnostic_redraw(window: *mut c_void, app: &App) {
+    set_diagnostic_redraw(app, true);
+    if let Some(list) = app.diagnostic_list {
+        let _ = InvalidateRect(list, std::ptr::null(), 1);
+    }
+    let _ = InvalidateRect(window, std::ptr::null(), 1);
+    let _ = UpdateWindow(window);
+}
+
 fn diagnostic_grid_refresh_message(
     snapshot_rows: usize,
     inserted_rows: usize,
@@ -4174,30 +4290,45 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
         return;
     }
     app.diagnostic_refreshing = true;
+    set_diagnostic_redraw(app, false);
     let events = app.diagnostics.snapshot();
     let retained_rows = events.len();
+    let snapshot_key = diagnostic_snapshot_key(&events);
+    let snapshot_changed =
+        diagnostic_data_snapshot_changed(app.diagnostic_snapshot_key, snapshot_key);
+    if snapshot_changed {
+        app.diagnostic_snapshot_generation = app.diagnostic_snapshot_generation.saturating_add(1);
+        app.diagnostic_snapshot_key = snapshot_key;
+    }
+    let auto_fit = diagnostic_auto_fit_once(
+        app.diagnostic_layout_stable,
+        snapshot_changed,
+        app.diagnostic_snapshot_generation,
+        app.diagnostic_auto_fit_generation,
+    );
+    if auto_fit {
+        app.diagnostic_auto_fit_generation = Some(app.diagnostic_snapshot_generation);
+    }
+    let horizontal_scroll = app
+        .diagnostic_layout_stable
+        .then(|| app.diagnostic_list.map(|list| GetScrollPos(list, SB_HORZ)))
+        .flatten();
     preserve_diagnostic_grid_selection(app, &events);
     refresh_diagnostic_controls(app, &events, true);
-    if let Some(summary) = app.diagnostic_summary {
-        let text = wide(&diagnostic_summary_text(app, retained_rows));
-        let _ = SetWindowTextW(summary, text.as_ptr());
-    }
     let Some(list) = app.diagnostic_list else {
         app.diagnostics
             .record("diagnostic.grid.refresh.error", "list_handle_null");
-        app.diagnostic_refreshing = false;
+        finish_diagnostic_redraw(window, app);
+        finish_diagnostic_refresh(app);
         return;
     };
     let snapshot_rows = events.len();
     let _ = SendMessageW(list, LVM_DELETEALLITEMS, 0, 0);
+    let rows = diagnostic_grid_rows(&events, diagnostic_visible_selection(app, snapshot_rows));
     let mut inserted_rows = 0usize;
     let mut insert_failures = 0usize;
     let mut set_text_failures = 0usize;
-    for (row_index, row) in
-        diagnostic_grid_rows(&events, diagnostic_visible_selection(app, snapshot_rows))
-            .into_iter()
-            .enumerate()
-    {
+    for (row_index, row) in rows.into_iter().enumerate() {
         let mut first = wide(&row.cells[0]);
         let item = ListViewItem {
             mask: LVIF_TEXT,
@@ -4283,8 +4414,31 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
             set_text_failures,
         ),
     );
-    layout_diagnostic_controls(window, app);
-    app.diagnostic_refreshing = false;
+    if auto_fit {
+        let mut client = Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if GetClientRect(list, &mut client) != 0 {
+            auto_fit_diagnostic_columns(
+                list,
+                (client.right - client.left).max(0),
+                GetDpiForWindow(window).max(96),
+            );
+        }
+    }
+    if let Some(position) = horizontal_scroll {
+        let _ = SetScrollPos(list, SB_HORZ, position, 0);
+    }
+    if let Some(summary) = app.diagnostic_summary {
+        let text = wide(&diagnostic_summary_text(app, retained_rows));
+        let _ = SetWindowTextW(summary, text.as_ptr());
+    }
+    app.diagnostic_layout_stable = true;
+    finish_diagnostic_redraw(window, app);
+    finish_diagnostic_refresh(app);
 }
 
 #[repr(C)]
@@ -4851,20 +5005,28 @@ fn diagnostic_show_all(app: &mut App) {
 }
 
 fn request_diagnostic_refresh(app: &mut App) {
-    if app.diagnostic_refreshing {
+    if diagnostic_refresh_is_coalesced(app.diagnostic_refresh_pending, app.diagnostic_refreshing) {
+        if app.diagnostic_refreshing {
+            app.diagnostic_refresh_pending = true;
+        }
         return;
     }
     let Some(window) = app.diagnostic_window else {
         return;
     };
-    if app.diagnostic_refresh_pending {
-        return;
-    }
     app.diagnostic_refresh_pending = true;
     unsafe {
         if PostMessageW(window, WM_DIAGNOSTIC_REFRESH, 0, 0) == 0 {
             app.diagnostic_refresh_pending = false;
         }
+    }
+}
+
+fn finish_diagnostic_refresh(app: &mut App) {
+    app.diagnostic_refreshing = false;
+    if app.diagnostic_refresh_pending {
+        app.diagnostic_refresh_pending = false;
+        request_diagnostic_refresh(app);
     }
 }
 
@@ -4960,7 +5122,7 @@ unsafe extern "system" fn diagnostic_window_proc(
         let summary = CreateWindowExW(
             0,
             edit_class.as_ptr(),
-            std::ptr::null(),
+            wide(DIAGNOSTIC_LOADING_SUMMARY).as_ptr(),
             WS_CHILD
                 | WS_VISIBLE
                 | WS_VSCROLL
@@ -5246,7 +5408,6 @@ unsafe extern "system" fn diagnostic_window_proc(
             (*app).diagnostic_message = Some(message);
             (*app).diagnostic_list = Some(list);
             layout_diagnostic_controls(hwnd, &*app);
-            refresh_diagnostic_window(hwnd, &mut *app);
         }
         return 0;
     }
@@ -5357,6 +5518,10 @@ unsafe extern "system" fn diagnostic_window_proc(
             (*app).diagnostic_message_text.clear();
             (*app).diagnostic_refresh_pending = false;
             (*app).diagnostic_refreshing = false;
+            (*app).diagnostic_layout_stable = false;
+            (*app).diagnostic_snapshot_key = None;
+            (*app).diagnostic_snapshot_generation = 0;
+            (*app).diagnostic_auto_fit_generation = None;
         }
     }
     DefWindowProcW(hwnd, message, w_param, l_param)
@@ -5806,14 +5971,21 @@ extern "system" {
     fn EnableWindow(window: *mut c_void, enable: i32) -> i32;
     fn GetClientRect(window: *mut c_void, rect: *mut Rect) -> i32;
     fn SendMessageW(hwnd: *mut c_void, message: u32, w: usize, l: isize) -> isize;
-    fn MoveWindow(
+    fn BeginDeferWindowPos(number: i32) -> *mut c_void;
+    fn DeferWindowPos(
+        defer: *mut c_void,
         window: *mut c_void,
+        insert_after: *mut c_void,
         x: i32,
         y: i32,
         width: i32,
         height: i32,
-        repaint: i32,
-    ) -> i32;
+        flags: u32,
+    ) -> *mut c_void;
+    fn EndDeferWindowPos(defer: *mut c_void) -> i32;
+    fn InvalidateRect(window: *mut c_void, rect: *const Rect, erase: i32) -> i32;
+    fn GetScrollPos(window: *mut c_void, bar: i32) -> i32;
+    fn SetScrollPos(window: *mut c_void, bar: i32, position: i32, redraw: i32) -> i32;
     fn GetCursorPos(point: *mut Point) -> i32;
     fn LoadIconW(instance: *mut c_void, name: *const u16) -> *mut c_void;
     fn GetModuleHandleW(name: *const u16) -> *mut c_void;
@@ -6196,6 +6368,62 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn diagnostic_initialization_phase_has_visible_loading_before_deferred_render() {
+        assert!(diagnostic_loading_summary_is_nonblank());
+        assert_eq!(diagnostic_window_style() & WS_VISIBLE, 0);
+        assert_eq!(WM_DIAGNOSTIC_REFRESH, WM_APP + 2);
+    }
+
+    #[test]
+    fn diagnostic_auto_fit_is_one_time_per_snapshot_generation() {
+        assert!(diagnostic_auto_fit_once(false, false, 0, None));
+        assert!(diagnostic_auto_fit_once(true, true, 3, None));
+        assert!(!diagnostic_auto_fit_once(true, true, 3, Some(3)));
+        assert!(!diagnostic_auto_fit_once(true, false, 4, Some(3)));
+    }
+
+    #[test]
+    fn diagnostic_auto_fit_is_not_allowed_for_resize_or_scroll() {
+        assert!(diagnostic_auto_fit_reason_allows(
+            DiagnosticRefreshReason::Initial
+        ));
+        assert!(diagnostic_auto_fit_reason_allows(
+            DiagnosticRefreshReason::Data
+        ));
+        for reason in [
+            DiagnosticRefreshReason::View,
+            DiagnosticRefreshReason::Resize,
+            DiagnosticRefreshReason::Scroll,
+        ] {
+            assert!(!diagnostic_auto_fit_reason_allows(reason));
+        }
+    }
+
+    #[test]
+    fn diagnostic_refreshes_coalesce_and_redraw_is_batched() {
+        assert!(diagnostic_refresh_is_coalesced(true, false));
+        assert!(diagnostic_refresh_is_coalesced(false, true));
+        assert!(!diagnostic_refresh_is_coalesced(false, false));
+        assert_eq!(WM_SETREDRAW, 0x000B);
+        assert_ne!(SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING, 0);
+    }
+
+    #[test]
+    fn diagnostic_row_conversion_stays_within_the_retention_bound() {
+        let store = DiagnosticStore::new(DEFAULT_MAX_EVENTS);
+        for sequence in 0..(DEFAULT_MAX_EVENTS + 16) {
+            store.record("bounded.test", sequence.to_string());
+        }
+        let events = store.snapshot();
+        assert!(events.len() <= DEFAULT_MAX_EVENTS);
+        let rows = diagnostic_grid_rows(&events, RowSelection::all(events.len()));
+        assert!(rows.len() <= DEFAULT_MAX_EVENTS);
+        assert!(rows
+            .iter()
+            .all(|row| row.cells.len() == REPORT_COLUMNS.len()));
     }
 
     #[test]
