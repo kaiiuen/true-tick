@@ -4,7 +4,7 @@ use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tick_diagnostics::{format_event, DiagnosticStore, DEFAULT_MAX_EVENTS};
+use tick_diagnostics::{format_event, truncate_utf8, DiagnosticStore, DEFAULT_MAX_EVENTS};
 use tick_observation_windows::{ObservationSource, WindowsObservation};
 use tick_ownership::{OwnershipState, TimerController, Verification};
 use tick_platform_windows::{TimerObservation, WindowsTimerPlatform};
@@ -56,6 +56,8 @@ const SW_RESTORE: i32 = 9;
 const DIAGNOSTIC_MIN_WIDTH: i32 = 420;
 const DIAGNOSTIC_MIN_HEIGHT: i32 = 260;
 const DIAGNOSTIC_WINDOW_TITLE: &str = "True Tick Status and Diagnostics";
+const MAX_STARTUP_STATUS_BYTES: usize = 512;
+const MAX_DIAGNOSTIC_TEXT_BYTES: usize = 64 * 1024;
 const DIAGNOSTIC_WINDOW_PARENT: *mut c_void = std::ptr::null_mut();
 const WS_CHILD: u32 = 0x40000000;
 const WS_VSCROLL: u32 = 0x00200000;
@@ -389,6 +391,7 @@ pub fn run() {
                 Some(error)
             }
         };
+        let startup_status = bounded_startup_status(startup_status);
         let app = Box::new(App {
             controller: TimerController::new(
                 WindowsTimerPlatform::with_diagnostics(diagnostics.clone()),
@@ -597,6 +600,10 @@ unsafe fn show_shutdown_warning(hwnd: *mut c_void, message: &str) {
     let text = wide(message);
     let title = wide("True Tick shutdown warning");
     MessageBoxW(hwnd, text.as_ptr(), title.as_ptr(), MB_ICONWARNING);
+}
+
+fn bounded_startup_status(value: impl AsRef<str>) -> String {
+    truncate_utf8(value.as_ref(), MAX_STARTUP_STATUS_BYTES)
 }
 
 fn reconcile(app: &mut App) {
@@ -1236,6 +1243,7 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &App) {
         text.push_str(&format_event(&event));
         text.push_str("\r\n");
     }
+    let text = truncate_utf8(&text, MAX_DIAGNOSTIC_TEXT_BYTES);
     let text = wide(&text);
     SetWindowTextW(edit, text.as_ptr());
 }
@@ -1385,8 +1393,9 @@ fn set_startup(app: &mut App, enabled: bool) {
                             app.config.startup_enabled
                         ),
                     );
-                    app.startup_status =
-                        "startup registration unavailable and config persistence failed".into();
+                    app.startup_status = bounded_startup_status(
+                        "startup registration unavailable and config persistence failed",
+                    );
                 } else {
                     app.record(
                         "config.save.result",
@@ -1397,9 +1406,9 @@ fn set_startup(app: &mut App, enabled: bool) {
                         "toggle.result",
                         "setting=startup_enabled value=true result=applied",
                     );
-                    app.startup_status = format!(
+                    app.startup_status = bounded_startup_status(format!(
                         "auto-start enabled in config, current-user registration unavailable: {error}"
-                    );
+                    ));
                 }
                 app.tray_status = TrayStatus::Error;
                 app.publish();
@@ -1430,7 +1439,7 @@ fn set_startup(app: &mut App, enabled: bool) {
                 app.config.startup_enabled
             ),
         );
-        app.startup_status = "startup registration error".into();
+        app.startup_status = bounded_startup_status("startup registration error");
         app.tray_status = TrayStatus::Error;
         app.publish();
         return;
@@ -1463,11 +1472,11 @@ fn set_startup(app: &mut App, enabled: bool) {
                 app.config.startup_enabled
             ),
         );
-        app.startup_status = if rollback.is_ok() {
-            "startup config persistence failed, registry change rolled back".into()
+        app.startup_status = bounded_startup_status(if rollback.is_ok() {
+            "startup config persistence failed, registry change rolled back"
         } else {
-            "startup config persistence failed, repair required".into()
-        };
+            "startup config persistence failed, repair required"
+        });
         app.tray_status = if rollback.is_ok() {
             TrayStatus::Error
         } else {
@@ -1492,14 +1501,14 @@ fn set_startup(app: &mut App, enabled: bool) {
         "startup.registration.result",
         format!("result=success enabled={enabled}"),
     );
-    app.startup_status = if let Some(target) = target {
+    app.startup_status = bounded_startup_status(if let Some(target) = target {
         format!(
             "boot startup registered for current-user {}",
             target.description()
         )
     } else {
-        "boot startup registration disabled by config".into()
-    };
+        "boot startup registration disabled by config".to_owned()
+    });
     app.publish();
 }
 

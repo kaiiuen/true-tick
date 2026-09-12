@@ -10,7 +10,24 @@ use std::time::{Duration, Instant};
 use tick_core::Status;
 
 pub const DEFAULT_MAX_EVENTS: usize = 512;
-const MAX_FIELD_LENGTH: usize = 160;
+pub const MAX_FIELD_LENGTH: usize = 160;
+
+pub fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
+    if value.len() <= maximum_bytes {
+        return value.to_owned();
+    }
+    let end = value
+        .char_indices()
+        .take_while(|(index, character)| {
+            index.saturating_add(character.len_utf8()) <= maximum_bytes
+        })
+        .map(|(index, character)| index + character.len_utf8())
+        .last()
+        .unwrap_or(0);
+    let mut truncated = value[..end].to_owned();
+    truncated.push_str("...");
+    truncated
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Evidence {
@@ -158,7 +175,7 @@ impl Default for DiagnosticStore {
 }
 
 pub fn sanitize(value: &str) -> String {
-    let mut sanitized = value
+    let sanitized = value
         .chars()
         .map(|character| match character {
             '\r' | '\n' | '\t' => ' ',
@@ -166,11 +183,7 @@ pub fn sanitize(value: &str) -> String {
             _ => character,
         })
         .collect::<String>();
-    if sanitized.len() > MAX_FIELD_LENGTH {
-        sanitized.truncate(MAX_FIELD_LENGTH);
-        sanitized.push_str("...");
-    }
-    sanitized
+    truncate_utf8(&sanitized, MAX_FIELD_LENGTH)
 }
 
 #[cfg(test)]
@@ -232,6 +245,28 @@ mod tests {
         let input = format!("secret\n{}", "x".repeat(300));
         let output = sanitize(&input);
         assert!(!output.contains('\n'));
+        assert!(output.ends_with("..."));
+        assert!(output.len() <= MAX_FIELD_LENGTH + 3);
+    }
+
+    #[test]
+    fn truncation_stops_at_a_valid_unicode_boundary() {
+        let input = "aé界🙂z";
+        let output = truncate_utf8(input, 4);
+        assert_eq!(output, "aé...");
+        assert!(std::str::from_utf8(output.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn invalid_utf8_is_replaced_before_sanitization() {
+        let input = String::from_utf8_lossy(b"ok\xff\xfe");
+        let output = sanitize(&input);
+        assert_eq!(output, "ok��");
+    }
+
+    #[test]
+    fn huge_ascii_is_bounded_without_panicking() {
+        let output = sanitize(&"x".repeat(10_000));
         assert!(output.ends_with("..."));
         assert!(output.len() <= MAX_FIELD_LENGTH + 3);
     }
