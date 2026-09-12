@@ -1,4 +1,5 @@
-use crate::pause::PauseDuration;
+use crate::pause::{DurationAction, DurationChoice, ScheduledAction};
+use std::time::{Duration, Instant};
 use tick_core::Hns;
 use tick_ownership::{OwnershipState, TimingSnapshot};
 use tick_policy::PowerState;
@@ -112,6 +113,7 @@ pub(crate) struct TimingValues {
     pub(crate) external: bool,
     pub(crate) handoff_pending: bool,
     pub(crate) invalid_interval: bool,
+    pub(crate) valid: bool,
 }
 
 impl TimingValues {
@@ -120,6 +122,7 @@ impl TimingValues {
         handoff_pending: bool,
         external: bool,
         invalid_interval: bool,
+        valid: bool,
     ) -> Self {
         Self {
             requested: snapshot.requested,
@@ -127,6 +130,7 @@ impl TimingValues {
             external,
             handoff_pending,
             invalid_interval,
+            valid,
         }
     }
 }
@@ -199,21 +203,23 @@ pub(crate) fn version_header() -> String {
     format!("True™ Tick v{}", env!("CARGO_PKG_VERSION"))
 }
 
-pub(crate) fn strip_status_branding(value: &str) -> &str {
-    value.strip_prefix("True™ Tick: ").unwrap_or(value)
-}
-
 pub(crate) fn tooltip(status: TrayStatus, timing: TimingValues) -> String {
     let summary = match status {
-        TrayStatus::Running => timing.effective.map_or_else(
-            || "Running".to_owned(),
-            |value| format!("Running {} ms", format_ms(value)),
-        ),
+        TrayStatus::Running if timing.valid && !timing.invalid_interval => {
+            timing.effective.map_or_else(
+                || "Running".to_owned(),
+                |value| format!("Running {} ms", format_ms(value)),
+            )
+        }
+        TrayStatus::Running => "Running".to_owned(),
         TrayStatus::Stopped if timing.external => "Stopped, external timing".to_owned(),
-        TrayStatus::Stopped => timing.effective.map_or_else(
-            || "Stopped".to_owned(),
-            |value| format!("Stopped {} ms", format_ms(value)),
-        ),
+        TrayStatus::Stopped if timing.valid && !timing.invalid_interval => {
+            timing.effective.map_or_else(
+                || "Stopped".to_owned(),
+                |value| format!("Stopped {} ms", format_ms(value)),
+            )
+        }
+        TrayStatus::Stopped => "Stopped".to_owned(),
         TrayStatus::Starting => timing.requested.map_or_else(
             || "Starting, verifying".to_owned(),
             |requested| format!("Starting {} ms, verifying", format_ms(requested)),
@@ -233,75 +239,83 @@ pub(crate) fn tooltip(status: TrayStatus, timing: TimingValues) -> String {
     format!("True™ Tick: {summary}")
 }
 
-pub(crate) fn status_label(status: TrayStatus, timing: TimingValues) -> String {
-    let tooltip_text = tooltip(status, timing);
-    let concise = strip_status_branding(&tooltip_text);
-    let concise = match status {
-        TrayStatus::Running => timing.effective.map_or_else(
-            || concise.to_owned(),
-            |value| format!("Running ({} ms)", format_ms(value)),
-        ),
-        TrayStatus::Stopped if timing.external => "Stopped (external timing)".to_owned(),
-        TrayStatus::Stopped => timing.effective.map_or_else(
-            || concise.to_owned(),
-            |value| format!("Stopped ({} ms)", format_ms(value)),
-        ),
-        TrayStatus::Starting => timing.requested.map_or_else(
-            || concise.to_owned(),
-            |value| format!("Starting ({} ms, verifying)", format_ms(value)),
-        ),
-        TrayStatus::Pausing if timing.handoff_pending => "Pausing (handoff pending)".to_owned(),
-        TrayStatus::Pausing => "Pausing".to_owned(),
-        TrayStatus::Stopping if timing.handoff_pending => "Stopping (handoff pending)".to_owned(),
-        TrayStatus::Paused => "Paused".to_owned(),
-        TrayStatus::Stopping if timing.external => "Stopped (external timing)".to_owned(),
-        TrayStatus::Error if timing.invalid_interval => "Error (invalid interval)".to_owned(),
-        TrayStatus::Error => "Error (operation failed)".to_owned(),
-        _ => concise.to_owned(),
-    };
-    format!("Status: {concise}")
-}
-
 pub(crate) const LOGS_COMMAND_ID: usize = 1009;
 pub(crate) const GITHUB_COMMAND_ID: usize = 1010;
-pub(crate) const PAUSE_5_COMMAND_ID: usize = 1011;
-pub(crate) const PAUSE_15_COMMAND_ID: usize = 1012;
-pub(crate) const PAUSE_30_COMMAND_ID: usize = 1013;
-pub(crate) const PAUSE_60_COMMAND_ID: usize = 1014;
-pub(crate) const RESUME_COMMAND_ID: usize = 1015;
+pub(crate) const START_IN_1_COMMAND_ID: usize = 1011;
+pub(crate) const START_IN_5_COMMAND_ID: usize = 1012;
+pub(crate) const START_IN_15_COMMAND_ID: usize = 1013;
+pub(crate) const START_IN_30_COMMAND_ID: usize = 1014;
+pub(crate) const START_IN_60_COMMAND_ID: usize = 1015;
+pub(crate) const STOP_IN_1_COMMAND_ID: usize = 1016;
+pub(crate) const STOP_IN_5_COMMAND_ID: usize = 1017;
+pub(crate) const STOP_IN_15_COMMAND_ID: usize = 1018;
+pub(crate) const STOP_IN_30_COMMAND_ID: usize = 1019;
+pub(crate) const STOP_IN_60_COMMAND_ID: usize = 1020;
+pub(crate) const PAUSE_FOR_5_COMMAND_ID: usize = 1021;
+pub(crate) const PAUSE_FOR_15_COMMAND_ID: usize = 1022;
+pub(crate) const PAUSE_FOR_30_COMMAND_ID: usize = 1023;
+pub(crate) const PAUSE_FOR_60_COMMAND_ID: usize = 1024;
+pub(crate) const CANCEL_SCHEDULED_COMMAND_ID: usize = 1025;
+pub(crate) const DURATION_MENU_COMMAND_ID: usize = 1101;
+pub(crate) const START_IN_MENU_COMMAND_ID: usize = 1102;
+pub(crate) const STOP_IN_MENU_COMMAND_ID: usize = 1103;
+pub(crate) const PAUSE_FOR_MENU_COMMAND_ID: usize = 1104;
+pub(crate) const STATUS_MENU_COMMAND_ID: usize = 1105;
 pub(crate) const GITHUB_URL: &str = "https://github.com/kaiiuen/true-tick";
 
-pub(crate) const fn pause_command_duration(command_id: usize) -> Option<PauseDuration> {
+pub(crate) const fn duration_command(
+    command_id: usize,
+) -> Option<(DurationAction, DurationChoice)> {
     match command_id {
-        PAUSE_5_COMMAND_ID => Some(PauseDuration::Five),
-        PAUSE_15_COMMAND_ID => Some(PauseDuration::Fifteen),
-        PAUSE_30_COMMAND_ID => Some(PauseDuration::Thirty),
-        PAUSE_60_COMMAND_ID => Some(PauseDuration::Sixty),
+        START_IN_1_COMMAND_ID => Some((DurationAction::Start, DurationChoice::OneMinute)),
+        START_IN_5_COMMAND_ID => Some((DurationAction::Start, DurationChoice::FiveMinutes)),
+        START_IN_15_COMMAND_ID => Some((DurationAction::Start, DurationChoice::FifteenMinutes)),
+        START_IN_30_COMMAND_ID => Some((DurationAction::Start, DurationChoice::ThirtyMinutes)),
+        START_IN_60_COMMAND_ID => Some((DurationAction::Start, DurationChoice::OneHour)),
+        STOP_IN_1_COMMAND_ID => Some((DurationAction::Stop, DurationChoice::OneMinute)),
+        STOP_IN_5_COMMAND_ID => Some((DurationAction::Stop, DurationChoice::FiveMinutes)),
+        STOP_IN_15_COMMAND_ID => Some((DurationAction::Stop, DurationChoice::FifteenMinutes)),
+        STOP_IN_30_COMMAND_ID => Some((DurationAction::Stop, DurationChoice::ThirtyMinutes)),
+        STOP_IN_60_COMMAND_ID => Some((DurationAction::Stop, DurationChoice::OneHour)),
+        PAUSE_FOR_5_COMMAND_ID => Some((DurationAction::Pause, DurationChoice::FiveMinutes)),
+        PAUSE_FOR_15_COMMAND_ID => Some((DurationAction::Pause, DurationChoice::FifteenMinutes)),
+        PAUSE_FOR_30_COMMAND_ID => Some((DurationAction::Pause, DurationChoice::ThirtyMinutes)),
+        PAUSE_FOR_60_COMMAND_ID => Some((DurationAction::Pause, DurationChoice::OneHour)),
         _ => None,
     }
 }
 
-pub(crate) fn pause_submenu_items(paused: bool) -> [MenuItem; 5] {
-    [
+pub(crate) fn duration_choices(action: DurationAction) -> Vec<MenuItem> {
+    let choices = match action {
+        DurationAction::Start | DurationAction::Stop => DurationChoice::all().to_vec(),
+        DurationAction::Pause => DurationChoice::pause_choices().to_vec(),
+    };
+    choices
+        .into_iter()
+        .map(|duration| MenuItem {
+            label: duration.label().to_owned(),
+            enabled: true,
+        })
+        .collect()
+}
+
+pub(crate) fn duration_menu_items(scheduled: Option<ScheduledAction>) -> Vec<MenuItem> {
+    vec![
         MenuItem {
-            label: PauseDuration::Five.label().to_owned(),
-            enabled: !paused,
+            label: "Start in >".to_owned(),
+            enabled: true,
         },
         MenuItem {
-            label: PauseDuration::Fifteen.label().to_owned(),
-            enabled: !paused,
+            label: "Stop in >".to_owned(),
+            enabled: true,
         },
         MenuItem {
-            label: PauseDuration::Thirty.label().to_owned(),
-            enabled: !paused,
+            label: "Pause for >".to_owned(),
+            enabled: true,
         },
         MenuItem {
-            label: PauseDuration::Sixty.label().to_owned(),
-            enabled: !paused,
-        },
-        MenuItem {
-            label: "Resume now".to_owned(),
-            enabled: paused,
+            label: "Cancel scheduled action".to_owned(),
+            enabled: scheduled.is_some(),
         },
     ]
 }
@@ -309,16 +323,31 @@ pub(crate) fn pause_submenu_items(paused: bool) -> [MenuItem; 5] {
 pub(crate) const fn menu_description(command_id: usize) -> Option<&'static str> {
     match command_id {
         1001 => Some("Request the best supported timing"),
-        1002 => Some("Release True Tick timing"),
-        1005 | 1006 => Some("Launch True Tick when you sign in"),
+        1002 => Some("Release True™ Tick timing"),
+        1005 | 1006 => Some("Launch True™ Tick when you sign in"),
         1007 | 1008 => Some("Request timing automatically on AC power"),
         LOGS_COMMAND_ID => Some("Open status and session logs"),
-        GITHUB_COMMAND_ID => Some("Open True Tick on GitHub"),
-        PAUSE_5_COMMAND_ID => Some("Pause for 5 minutes"),
-        PAUSE_15_COMMAND_ID => Some("Pause for 15 minutes"),
-        PAUSE_30_COMMAND_ID => Some("Pause for 30 minutes"),
-        PAUSE_60_COMMAND_ID => Some("Pause for 60 minutes"),
-        RESUME_COMMAND_ID => Some("Resume timing now"),
+        GITHUB_COMMAND_ID => Some("Open True™ Tick on GitHub"),
+        DURATION_MENU_COMMAND_ID => Some("Schedule a bounded timing action"),
+        START_IN_MENU_COMMAND_ID => Some("Schedule a future guarded acquire"),
+        STOP_IN_MENU_COMMAND_ID => Some("Schedule a future guarded release"),
+        PAUSE_FOR_MENU_COMMAND_ID => Some("Suppress acquisition for a fixed duration"),
+        CANCEL_SCHEDULED_COMMAND_ID => Some("Clear the current scheduled action"),
+        STATUS_MENU_COMMAND_ID => Some("View read-only lifecycle details"),
+        START_IN_1_COMMAND_ID => Some("Start in 1 minute"),
+        START_IN_5_COMMAND_ID => Some("Start in 5 minutes"),
+        START_IN_15_COMMAND_ID => Some("Start in 15 minutes"),
+        START_IN_30_COMMAND_ID => Some("Start in 30 minutes"),
+        START_IN_60_COMMAND_ID => Some("Start in 1 hour"),
+        STOP_IN_1_COMMAND_ID => Some("Stop in 1 minute"),
+        STOP_IN_5_COMMAND_ID => Some("Stop in 5 minutes"),
+        STOP_IN_15_COMMAND_ID => Some("Stop in 15 minutes"),
+        STOP_IN_30_COMMAND_ID => Some("Stop in 30 minutes"),
+        STOP_IN_60_COMMAND_ID => Some("Stop in 1 hour"),
+        PAUSE_FOR_5_COMMAND_ID => Some("Pause for 5 minutes"),
+        PAUSE_FOR_15_COMMAND_ID => Some("Pause for 15 minutes"),
+        PAUSE_FOR_30_COMMAND_ID => Some("Pause for 30 minutes"),
+        PAUSE_FOR_60_COMMAND_ID => Some("Pause for 1 hour"),
         1004 => Some("Stop safely and quit"),
         _ => None,
     }
@@ -364,11 +393,21 @@ pub(crate) const fn menu_action_keeps_open(command_id: usize) -> bool {
         command_id,
         1001 | 1002 | 1005
             ..=1008
-                | PAUSE_5_COMMAND_ID
-                | PAUSE_15_COMMAND_ID
-                | PAUSE_30_COMMAND_ID
-                | PAUSE_60_COMMAND_ID
-                | RESUME_COMMAND_ID
+                | START_IN_1_COMMAND_ID
+                | START_IN_5_COMMAND_ID
+                | START_IN_15_COMMAND_ID
+                | START_IN_30_COMMAND_ID
+                | START_IN_60_COMMAND_ID
+                | STOP_IN_1_COMMAND_ID
+                | STOP_IN_5_COMMAND_ID
+                | STOP_IN_15_COMMAND_ID
+                | STOP_IN_30_COMMAND_ID
+                | STOP_IN_60_COMMAND_ID
+                | PAUSE_FOR_5_COMMAND_ID
+                | PAUSE_FOR_15_COMMAND_ID
+                | PAUSE_FOR_30_COMMAND_ID
+                | PAUSE_FOR_60_COMMAND_ID
+                | CANCEL_SCHEDULED_COMMAND_ID
     )
 }
 
@@ -418,12 +457,126 @@ pub(crate) const fn menu_command_is_enabled_with_pause(
         1007 => !automatic,
         1008 => automatic,
         LOGS_COMMAND_ID | GITHUB_COMMAND_ID | 1004 => true,
-        PAUSE_5_COMMAND_ID | PAUSE_15_COMMAND_ID | PAUSE_30_COMMAND_ID | PAUSE_60_COMMAND_ID => {
-            !paused
-        }
-        RESUME_COMMAND_ID => paused,
+        START_IN_1_COMMAND_ID
+        | START_IN_5_COMMAND_ID
+        | START_IN_15_COMMAND_ID
+        | START_IN_30_COMMAND_ID
+        | START_IN_60_COMMAND_ID
+        | STOP_IN_1_COMMAND_ID
+        | STOP_IN_5_COMMAND_ID
+        | STOP_IN_15_COMMAND_ID
+        | STOP_IN_30_COMMAND_ID
+        | STOP_IN_60_COMMAND_ID
+        | PAUSE_FOR_5_COMMAND_ID
+        | PAUSE_FOR_15_COMMAND_ID
+        | PAUSE_FOR_30_COMMAND_ID
+        | PAUSE_FOR_60_COMMAND_ID => true,
+        CANCEL_SCHEDULED_COMMAND_ID => paused,
         _ => false,
     }
+}
+
+fn state_label(status: TrayStatus) -> &'static str {
+    match status {
+        TrayStatus::Running => "Running",
+        TrayStatus::Stopped => "Stopped",
+        TrayStatus::Starting => "Starting",
+        TrayStatus::Stopping | TrayStatus::Pausing => "Stopping",
+        TrayStatus::Paused => "Paused",
+        TrayStatus::Blocked => "Blocked",
+        TrayStatus::Error
+        | TrayStatus::Unsupported
+        | TrayStatus::Pending
+        | TrayStatus::Degraded
+        | TrayStatus::Unverified => "Error",
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let hours = seconds / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn effective_timing_label(timing: TimingValues) -> String {
+    if timing.valid && !timing.invalid_interval {
+        timing.effective.map_or_else(
+            || "Unknown".to_owned(),
+            |value| format!("{} ms", format_ms(value)),
+        )
+    } else {
+        "Unknown".to_owned()
+    }
+}
+
+fn running_for_label(running_for: Option<Duration>) -> String {
+    running_for.map_or_else(|| "Not running".to_owned(), format_duration)
+}
+
+fn next_action_label(scheduled: Option<ScheduledAction>, now: Instant) -> String {
+    scheduled.map_or_else(
+        || "none".to_owned(),
+        |action| {
+            format!(
+                "{} in {}",
+                action.action.label(),
+                format_duration(action.remaining(now))
+            )
+        },
+    )
+}
+
+fn ownership_label(ownership: OwnershipState, timing: TimingValues) -> &'static str {
+    match ownership {
+        OwnershipState::Owned => "True™ Tick",
+        OwnershipState::Uncertain => "Uncertain",
+        OwnershipState::Released if timing.external => "External timing",
+        OwnershipState::Released => "Released",
+    }
+}
+
+pub(crate) fn status_menu_items(
+    status: TrayStatus,
+    timing: TimingValues,
+    ownership: OwnershipState,
+    scheduled: Option<ScheduledAction>,
+    running_for: Option<Duration>,
+    now: Instant,
+) -> Vec<MenuItem> {
+    vec![
+        MenuItem {
+            label: format!("State: {}", state_label(status)),
+            enabled: false,
+        },
+        MenuItem {
+            label: format!("Timing: {}", effective_timing_label(timing)),
+            enabled: false,
+        },
+        MenuItem {
+            label: format!("Running for: {}", running_for_label(running_for)),
+            enabled: false,
+        },
+        MenuItem {
+            label: format!("Next action: {}", next_action_label(scheduled, now)),
+            enabled: false,
+        },
+        MenuItem {
+            label: format!("Ownership: {}", ownership_label(ownership, timing)),
+            enabled: false,
+        },
+        MenuItem {
+            label: "Logs".to_owned(),
+            enabled: true,
+        },
+    ]
 }
 
 #[allow(dead_code)]
@@ -432,19 +585,18 @@ pub(crate) fn menu_items(
     startup_enabled: bool,
     automatic: bool,
     timing: TimingValues,
-) -> [MenuItem; 8] {
-    menu_items_with_pause(status, startup_enabled, automatic, timing, false)
+) -> Vec<MenuItem> {
+    menu_items_with_duration(status, startup_enabled, automatic, timing, false)
 }
 
-pub(crate) fn menu_items_with_pause(
+pub(crate) fn menu_items_with_duration(
     status: TrayStatus,
     startup_enabled: bool,
     automatic: bool,
-    timing: TimingValues,
+    _timing: TimingValues,
     paused: bool,
-) -> [MenuItem; 8] {
-    let _ = paused;
-    [
+) -> Vec<MenuItem> {
+    vec![
         MenuItem {
             label: version_header(),
             enabled: true,
@@ -462,6 +614,10 @@ pub(crate) fn menu_items_with_pause(
                 ),
         },
         MenuItem {
+            label: "Duration >".to_owned(),
+            enabled: true,
+        },
+        MenuItem {
             label: auto_start_label(startup_enabled).to_owned(),
             enabled: true,
         },
@@ -470,11 +626,7 @@ pub(crate) fn menu_items_with_pause(
             enabled: true,
         },
         MenuItem {
-            label: status_label(status, timing),
-            enabled: false,
-        },
-        MenuItem {
-            label: "Logs".to_owned(),
+            label: "Status >".to_owned(),
             enabled: true,
         },
         MenuItem {
@@ -489,30 +641,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pause_menu_exposes_only_fixed_choices_or_resume() {
-        let active = pause_submenu_items(false);
+    fn duration_menu_exposes_logical_fixed_submenus_and_all_choices() {
+        let duration = duration_menu_items(None);
         assert_eq!(
-            active
+            duration
                 .iter()
                 .map(|item| item.label.as_str())
                 .collect::<Vec<_>>(),
-            ["5 min", "15 min", "30 min", "60 min", "Resume now"]
+            [
+                "Start in >",
+                "Stop in >",
+                "Pause for >",
+                "Cancel scheduled action"
+            ]
         );
-        assert!(active[..4].iter().all(|item| item.enabled));
-        assert!(!active[4].enabled);
-
-        let paused = pause_submenu_items(true);
-        assert!(paused[..4].iter().all(|item| !item.enabled));
-        assert!(paused[4].enabled);
+        assert!(!duration[3].enabled);
         assert_eq!(
-            pause_command_duration(PAUSE_5_COMMAND_ID),
-            Some(PauseDuration::Five)
+            duration_choices(DurationAction::Start)
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "1 minute",
+                "5 minutes",
+                "15 minutes",
+                "30 minutes",
+                "1 hour"
+            ]
         );
         assert_eq!(
-            pause_command_duration(PAUSE_60_COMMAND_ID),
-            Some(PauseDuration::Sixty)
+            duration_choices(DurationAction::Pause)
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            ["5 minutes", "15 minutes", "30 minutes", "1 hour"]
         );
-        assert_eq!(pause_command_duration(9999), None);
+        assert_eq!(
+            duration_command(START_IN_1_COMMAND_ID),
+            Some((DurationAction::Start, DurationChoice::OneMinute))
+        );
+        assert_eq!(
+            duration_command(STOP_IN_60_COMMAND_ID),
+            Some((DurationAction::Stop, DurationChoice::OneHour))
+        );
+        assert_eq!(
+            duration_command(PAUSE_FOR_30_COMMAND_ID),
+            Some((DurationAction::Pause, DurationChoice::ThirtyMinutes))
+        );
+        assert_eq!(duration_command(9999), None);
     }
 
     #[test]
@@ -538,7 +714,7 @@ mod tests {
             true
         ));
         assert!(menu_command_is_enabled_with_pause(
-            RESUME_COMMAND_ID,
+            CANCEL_SCHEDULED_COMMAND_ID,
             TrayStatus::Paused,
             false,
             false,
@@ -577,15 +753,52 @@ mod tests {
             maximum_interval: Some(Hns::new(5_000)),
             raw_status: Some(0),
         };
-        let timing = TimingValues::from_snapshot(snapshot, false, false, false);
+        let timing = TimingValues::from_snapshot(snapshot, false, false, false, true);
         assert_eq!(
             tooltip(TrayStatus::Running, timing),
             "True™ Tick: Running 0.497 ms"
         );
-        assert_eq!(
-            menu_items(TrayStatus::Running, false, false, timing)[5].label,
-            "Status: Running (0.497 ms)"
+        let status = status_menu_items(
+            TrayStatus::Running,
+            timing,
+            OwnershipState::Owned,
+            None,
+            Some(Duration::from_secs(252)),
+            Instant::now(),
         );
+        assert_eq!(status[0].label, "State: Running");
+        assert_eq!(status[1].label, "Timing: 0.497 ms");
+        assert_eq!(status[2].label, "Running for: 4m 12s");
+    }
+
+    #[test]
+    fn status_submenu_uses_unknown_for_invalid_timing_and_exposes_the_next_action() {
+        let now = Instant::now();
+        let scheduled = ScheduledAction {
+            action: DurationAction::Stop,
+            duration: DurationChoice::FiveMinutes,
+            deadline: now + Duration::from_secs(252),
+            generation: 7,
+        };
+        let status = status_menu_items(
+            TrayStatus::Blocked,
+            TimingValues {
+                effective: Some(Hns::new(4_966)),
+                invalid_interval: true,
+                ..TimingValues::default()
+            },
+            OwnershipState::Released,
+            Some(scheduled),
+            None,
+            now,
+        );
+        assert_eq!(status[0].label, "State: Blocked");
+        assert_eq!(status[1].label, "Timing: Unknown");
+        assert_eq!(status[2].label, "Running for: Not running");
+        assert_eq!(status[3].label, "Next action: stop in 4m 12s");
+        assert_eq!(status[4].label, "Ownership: Released");
+        assert!(status[5].enabled);
+        assert!(status[..5].iter().all(|item| !item.enabled));
     }
 
     #[test]
@@ -597,57 +810,49 @@ mod tests {
     }
 
     #[test]
-    fn status_label_strips_branding_and_keeps_the_row_short() {
-        assert_eq!(
-            strip_status_branding("True™ Tick: Running 0.497 ms"),
-            "Running 0.497 ms"
-        );
-        assert_eq!(
-            status_label(
-                TrayStatus::Stopping,
-                TimingValues {
-                    external: true,
-                    handoff_pending: true,
-                    ..TimingValues::default()
-                }
-            ),
-            "Status: Stopping (handoff pending)"
-        );
-        assert_eq!(
-            status_label(
-                TrayStatus::Error,
-                TimingValues {
-                    invalid_interval: true,
-                    ..TimingValues::default()
-                }
-            ),
-            "Status: Error (invalid interval)"
-        );
-    }
-
-    #[test]
-    fn logs_command_remains_clickable_below_the_disabled_summary() {
+    fn logs_command_remains_clickable_inside_read_only_status() {
         assert_eq!(LOGS_COMMAND_ID, 1009);
         assert_eq!(GITHUB_COMMAND_ID, 1010);
         assert_eq!(GITHUB_URL, "https://github.com/kaiiuen/true-tick");
-        let items = menu_items(TrayStatus::Stopped, false, false, TimingValues::default());
-        assert!(items[0].enabled);
-        assert!(!items[5].enabled);
-        assert_eq!(items[6].label, "Logs");
-        assert!(items[6].enabled);
+        let items = status_menu_items(
+            TrayStatus::Stopped,
+            TimingValues::default(),
+            OwnershipState::Released,
+            None,
+            None,
+            Instant::now(),
+        );
+        assert!(items[..5].iter().all(|item| !item.enabled));
+        assert_eq!(items[5].label, "Logs");
+        assert!(items[5].enabled);
     }
 
     #[test]
     fn every_menu_command_has_its_short_hover_description() {
         let descriptions = [
             (1001, "Request the best supported timing"),
-            (1002, "Release True Tick timing"),
-            (1005, "Launch True Tick when you sign in"),
-            (1006, "Launch True Tick when you sign in"),
+            (1002, "Release True™ Tick timing"),
+            (1005, "Launch True™ Tick when you sign in"),
+            (1006, "Launch True™ Tick when you sign in"),
             (1007, "Request timing automatically on AC power"),
             (1008, "Request timing automatically on AC power"),
             (LOGS_COMMAND_ID, "Open status and session logs"),
-            (GITHUB_COMMAND_ID, "Open True Tick on GitHub"),
+            (GITHUB_COMMAND_ID, "Open True™ Tick on GitHub"),
+            (DURATION_MENU_COMMAND_ID, "Schedule a bounded timing action"),
+            (
+                START_IN_MENU_COMMAND_ID,
+                "Schedule a future guarded acquire",
+            ),
+            (STOP_IN_MENU_COMMAND_ID, "Schedule a future guarded release"),
+            (
+                PAUSE_FOR_MENU_COMMAND_ID,
+                "Suppress acquisition for a fixed duration",
+            ),
+            (
+                CANCEL_SCHEDULED_COMMAND_ID,
+                "Clear the current scheduled action",
+            ),
+            (STATUS_MENU_COMMAND_ID, "View read-only lifecycle details"),
             (1004, "Stop safely and quit"),
         ];
         for (command_id, expected) in descriptions {
@@ -697,6 +902,7 @@ mod tests {
                     external: true,
                     handoff_pending: false,
                     invalid_interval: false,
+                    valid: true,
                 },
             ),
             "True™ Tick: Stopped, external timing"
@@ -936,15 +1142,15 @@ mod tests {
                 version_header().as_str(),
                 "Start",
                 "Stop",
+                "Duration >",
                 "Auto-start: On",
                 "Auto-time: Off",
-                "Status: Running (0.497 ms)",
-                "Logs",
+                "Status >",
                 "Quit"
             ]
         );
         assert!(items[0].enabled);
-        assert!(!items[5].enabled);
+        assert!(items[3].enabled);
         assert!(!items[1].enabled);
         assert!(items[2].enabled);
         assert!(items[6].enabled);
@@ -959,6 +1165,7 @@ mod tests {
             external: false,
             handoff_pending: false,
             invalid_interval: false,
+            valid: true,
         };
         let finer = TimingValues {
             requested: Some(Hns::new(5_000)),
@@ -966,6 +1173,7 @@ mod tests {
             external: false,
             handoff_pending: false,
             invalid_interval: false,
+            valid: true,
         };
         assert_eq!(
             tooltip(TrayStatus::Running, exact),
