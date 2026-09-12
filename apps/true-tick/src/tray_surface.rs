@@ -92,7 +92,65 @@ pub(crate) struct TimingValues {
     pub(crate) requested: Option<Hns>,
     pub(crate) effective: Option<Hns>,
     pub(crate) external: bool,
+    pub(crate) handoff_pending: bool,
     pub(crate) invalid_interval: bool,
+}
+
+pub(crate) const HANDOFF_POLL_INTERVAL_MS: u32 = 250;
+pub(crate) const HANDOFF_MAX_POLLS: u8 = 12;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HandoffProgress {
+    Pending,
+    Completed,
+    TimedOut,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct HandoffTracker {
+    boundary: Hns,
+    released_status: TrayStatus,
+    polls: u8,
+    max_polls: u8,
+}
+
+impl HandoffTracker {
+    pub(crate) const fn new(boundary: Hns, released_status: TrayStatus) -> Self {
+        Self {
+            boundary,
+            released_status,
+            polls: 0,
+            max_polls: HANDOFF_MAX_POLLS,
+        }
+    }
+
+    pub(crate) const fn boundary(self) -> Hns {
+        self.boundary
+    }
+
+    pub(crate) const fn released_status(self) -> TrayStatus {
+        self.released_status
+    }
+
+    pub(crate) const fn polls(self) -> u8 {
+        self.polls
+    }
+
+    pub(crate) fn observe(&mut self, effective: Option<Hns>) -> HandoffProgress {
+        if effective.is_some_and(|value| value >= self.boundary) {
+            return HandoffProgress::Completed;
+        }
+        self.polls = self.polls.saturating_add(1);
+        if self.polls >= self.max_polls {
+            HandoffProgress::TimedOut
+        } else {
+            HandoffProgress::Pending
+        }
+    }
+}
+
+pub(crate) fn release_needs_handoff(boundary: Hns, effective: Option<Hns>) -> bool {
+    matches!(effective, Some(value) if value < boundary)
 }
 
 fn format_ms(value: Hns) -> String {
@@ -110,11 +168,11 @@ fn current_label(prefix: &str, effective: Option<Hns>, external: bool) -> String
             }
         },
         |value| {
-            let external_label = if external { ", external" } else { "" };
-            format!(
-                "{prefix} (current: {} ms{external_label})",
-                format_ms(value)
-            )
+            if external {
+                format!("{prefix} (external: {} ms)", format_ms(value))
+            } else {
+                format!("{prefix} (current: {} ms)", format_ms(value))
+            }
         },
     )
 }
@@ -137,6 +195,9 @@ pub(crate) fn tooltip(status: TrayStatus, timing: TimingValues) -> String {
             || "Starting (unknown)".to_owned(),
             |requested| format!("Starting ({} ms)", format_ms(requested)),
         ),
+        TrayStatus::Stopping if timing.handoff_pending => {
+            "Stopping (waiting for handoff)".to_owned()
+        }
         TrayStatus::Stopping => current_label("Stopping", timing.effective, timing.external),
         TrayStatus::Pending => "Pending (timing unknown)".to_owned(),
         TrayStatus::Degraded => current_label("Degraded", timing.effective, timing.external),
@@ -207,7 +268,10 @@ pub(crate) const fn menu_command_is_enabled(
     automatic: bool,
 ) -> bool {
     match command_id {
-        1001 => !matches!(status, TrayStatus::Running | TrayStatus::Starting),
+        1001 => !matches!(
+            status,
+            TrayStatus::Running | TrayStatus::Starting | TrayStatus::Stopping
+        ),
         1002 => !matches!(status, TrayStatus::Stopped | TrayStatus::Stopping),
         1005 => !startup_enabled,
         1006 => startup_enabled,
@@ -292,6 +356,7 @@ mod tests {
                     requested: None,
                     effective: None,
                     external: false,
+                    handoff_pending: false,
                     invalid_interval: false,
                 },
             ),
@@ -308,10 +373,11 @@ mod tests {
                     requested: Some(Hns::new(5_000)),
                     effective: Some(Hns::new(4_966)),
                     external: true,
+                    handoff_pending: false,
                     invalid_interval: false,
                 },
             ),
-            "Stopped (current: 0.497 ms, external)"
+            "Stopped (external: 0.497 ms)"
         );
     }
 
@@ -553,12 +619,14 @@ mod tests {
             requested: Some(Hns::new(5_000)),
             effective: Some(Hns::new(5_000)),
             external: false,
+            handoff_pending: false,
             invalid_interval: false,
         };
         let finer = TimingValues {
             requested: Some(Hns::new(5_000)),
             effective: Some(Hns::new(4_966)),
             external: false,
+            handoff_pending: false,
             invalid_interval: false,
         };
         assert_eq!(tooltip(TrayStatus::Running, exact), "Running (0.500 ms)");
@@ -583,6 +651,17 @@ mod tests {
         assert_eq!(
             tooltip(TrayStatus::Stopping, finer),
             "Stopping (current: 0.497 ms)"
+        );
+        assert_eq!(
+            tooltip(
+                TrayStatus::Stopping,
+                TimingValues {
+                    effective: Some(Hns::new(4_966)),
+                    handoff_pending: true,
+                    ..TimingValues::default()
+                }
+            ),
+            "Stopping (waiting for handoff)"
         );
         assert_eq!(
             tooltip(
@@ -616,6 +695,79 @@ mod tests {
         assert_eq!(format_ms(Hns::new(4_966)), "0.497");
         assert_eq!(format_ms(Hns::new(5_000)), "0.500");
         assert_eq!(format_ms(Hns::new(156_250)), "15.625");
+    }
+
+    #[test]
+    fn release_to_baseline_does_not_start_handoff() {
+        assert!(!release_needs_handoff(
+            Hns::new(5_000),
+            Some(Hns::new(5_000))
+        ));
+        let mut tracker = HandoffTracker::new(Hns::new(5_000), TrayStatus::Stopped);
+        assert_eq!(
+            tracker.observe(Some(Hns::new(5_000))),
+            HandoffProgress::Completed
+        );
+        assert_eq!(tracker.polls(), 0);
+    }
+
+    #[test]
+    fn finer_external_client_starts_a_pending_handoff() {
+        assert!(release_needs_handoff(
+            Hns::new(5_000),
+            Some(Hns::new(4_966))
+        ));
+        let mut tracker = HandoffTracker::new(Hns::new(5_000), TrayStatus::Stopped);
+        assert_eq!(
+            tracker.observe(Some(Hns::new(4_966))),
+            HandoffProgress::Pending
+        );
+        assert_eq!(tracker.polls(), 1);
+    }
+
+    #[test]
+    fn handoff_completes_when_effective_timing_reaches_boundary() {
+        let mut tracker = HandoffTracker::new(Hns::new(5_000), TrayStatus::Stopped);
+        assert_eq!(
+            tracker.observe(Some(Hns::new(4_966))),
+            HandoffProgress::Pending
+        );
+        assert_eq!(
+            tracker.observe(Some(Hns::new(9_966))),
+            HandoffProgress::Completed
+        );
+    }
+
+    #[test]
+    fn handoff_times_out_without_claiming_completion() {
+        let mut tracker = HandoffTracker::new(Hns::new(5_000), TrayStatus::Stopped);
+        for _ in 0..HANDOFF_MAX_POLLS.saturating_sub(1) {
+            assert_eq!(
+                tracker.observe(Some(Hns::new(4_966))),
+                HandoffProgress::Pending
+            );
+        }
+        assert_eq!(
+            tracker.observe(Some(Hns::new(4_966))),
+            HandoffProgress::TimedOut
+        );
+        assert_eq!(tracker.polls(), HANDOFF_MAX_POLLS);
+    }
+
+    #[test]
+    fn repeated_stop_is_disabled_while_handoff_is_pending() {
+        assert!(!menu_command_is_enabled(
+            1002,
+            TrayStatus::Stopping,
+            false,
+            false
+        ));
+        assert!(!menu_command_is_enabled(
+            1001,
+            TrayStatus::Stopping,
+            false,
+            false
+        ));
     }
 
     #[test]

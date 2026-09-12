@@ -18,8 +18,9 @@ use crate::shutdown::{
 };
 use crate::tray_surface::{
     dpi_to_icon_canvas, icon_pixel_color, menu_action_keeps_open, menu_command_dispatch_allowed,
-    menu_command_is_enabled, menu_items, power_reconciliation, tooltip,
-    tray_notification_opens_menu, PowerReconciliation, TimingValues, TrayStatus, STATUS_COMMAND_ID,
+    menu_command_is_enabled, menu_items, power_reconciliation, release_needs_handoff, tooltip,
+    tray_notification_opens_menu, HandoffProgress, HandoffTracker, PowerReconciliation,
+    TimingValues, TrayStatus, HANDOFF_POLL_INTERVAL_MS, STATUS_COMMAND_ID,
 };
 
 const WM_APP: u32 = 0x8000;
@@ -28,7 +29,9 @@ const WM_CREATE: u32 = 0x0001;
 const WM_COMMAND: u32 = 0x0111;
 const WM_DESTROY: u32 = 0x0002;
 const WM_POWERBROADCAST: u32 = 0x0218;
+const WM_TIMER: u32 = 0x0113;
 const PBT_APMPOWERSTATUSCHANGE: usize = 0x000A;
+const HANDOFF_TIMER_ID: usize = 0x5449;
 const ID_START: usize = 1001;
 const ID_STOP: usize = 1002;
 const ID_QUIT: usize = 1004;
@@ -299,6 +302,7 @@ struct App {
     diagnostics: Arc<DiagnosticStore>,
     diagnostic_window: Option<*mut c_void>,
     menu_active: bool,
+    handoff: Option<HandoffTracker>,
     shutdown_gate: ShutdownGate,
 }
 
@@ -446,6 +450,7 @@ pub fn run() {
             diagnostics,
             diagnostic_window: None,
             menu_active: false,
+            handoff: None,
             shutdown_gate: ShutdownGate::new(),
         });
         let app_ptr = Box::into_raw(app);
@@ -756,6 +761,13 @@ fn reconcile(app: &mut App) {
 }
 
 fn apply_policy(app: &mut App) {
+    if app.handoff.is_some() {
+        app.record(
+            "policy.recalculate.deferred",
+            "reason=handoff_pending ownership=released",
+        );
+        return;
+    }
     let power = app.observation.power().state;
     let decision = decide(PolicyInput {
         enabled: true,
@@ -821,6 +833,13 @@ fn guarded_release(
     source: impl AsRef<str>,
     released_status: TrayStatus,
 ) -> Result<bool, String> {
+    if app.handoff.is_some() {
+        app.record(
+            "ownership.release.repeated",
+            format!("source={} result=handoff_already_pending", source.as_ref()),
+        );
+        return Err("handoff already pending".to_owned());
+    }
     app.record(
         "ownership.release.request",
         format!("source={}", source.as_ref()),
@@ -834,6 +853,22 @@ fn guarded_release(
             app.record(
                 "ownership.changed",
                 format!("state=released changed={released}"),
+            );
+            let effective = app
+                .timing_observation
+                .map(|observation| observation.reported_current);
+            let boundary = app
+                .timing_observation
+                .map(|observation| observation.requested);
+            if released && boundary.is_some_and(|value| release_needs_handoff(value, effective)) {
+                let boundary = boundary.expect("boundary checked above");
+                if begin_handoff(app, boundary, released_status) {
+                    return Ok(released);
+                }
+            }
+            app.record(
+                "ownership.result",
+                format!("state=released effective_system={effective:?} handoff=not_required"),
             );
             app.tray_status = released_status;
             app.publish();
@@ -894,6 +929,11 @@ fn apply_power_reconciliation(app: &mut App) {
 }
 
 fn show_ownership_status(app: &mut App, released_status: TrayStatus) {
+    if app.handoff.is_some() {
+        app.tray_status = TrayStatus::Stopping;
+        app.publish();
+        return;
+    }
     app.tray_status = match app.controller.ownership() {
         OwnershipState::Released => released_status,
         OwnershipState::Owned => TrayStatus::Running,
@@ -923,6 +963,7 @@ impl App {
             effective,
             external: self.controller.ownership() == OwnershipState::Released
                 && matches!((requested, effective), (Some(requested), Some(effective)) if effective < requested),
+            handoff_pending: self.handoff.is_some(),
             invalid_interval: self.invalid_interval,
         }
     }
@@ -939,6 +980,17 @@ impl App {
             ),
         );
         let result = guarded_release(self, "shutdown", TrayStatus::Stopped);
+        if result.is_ok() && self.handoff.is_some() {
+            let error = "handoff remains pending after ownership release".to_owned();
+            self.shutdown_gate
+                .attempt(|| Err::<(), String>(error.clone()))
+                .expect_err("pending handoff must remain unresolved");
+            self.record(
+                "shutdown.cleanup.result",
+                format!("result=handoff_pending error={error}"),
+            );
+            return Err(error);
+        }
         match result {
             Ok(released) => {
                 self.shutdown_gate
@@ -1001,7 +1053,7 @@ impl App {
     }
 }
 
-fn refresh_timing_observation(app: &mut App) {
+fn refresh_timing_observation(app: &mut App) -> Option<TimerObservation> {
     match app.controller.query() {
         Ok(observation) => {
             app.sync_timing_observation();
@@ -1015,8 +1067,135 @@ fn refresh_timing_observation(app: &mut App) {
                     observation.effective_relation()
                 ),
             );
+            Some(observation)
         }
-        Err(error) => app.record("timer.query.error", format!("error={error:?}")),
+        Err(error) => {
+            app.record("timer.query.error", format!("error={error:?}"));
+            None
+        }
+    }
+}
+
+fn begin_handoff(app: &mut App, boundary: tick_core::Hns, released_status: TrayStatus) -> bool {
+    let tracker = HandoffTracker::new(boundary, released_status);
+    let Some(hwnd) = app.tray_icon.as_ref().map(|icon| icon.h_wnd) else {
+        app.record(
+            "handoff.timeout",
+            "reason=watcher_unavailable ownership=released effective_system=finer",
+        );
+        app.tray_status = released_status;
+        app.publish();
+        return false;
+    };
+    let timer = unsafe {
+        SetTimer(
+            hwnd,
+            HANDOFF_TIMER_ID,
+            HANDOFF_POLL_INTERVAL_MS,
+            std::ptr::null_mut(),
+        )
+    };
+    if timer == 0 {
+        app.record(
+            "handoff.timeout",
+            format!(
+                "reason=watcher_start_failed ownership=released boundary_hns={} effective_system=finer raw_status={}",
+                boundary.value(),
+                unsafe { GetLastError() }
+            ),
+        );
+        app.record(
+            "ownership.result",
+            "state=released effective_system=finer due_to=external_or_unknown_client",
+        );
+        app.tray_status = released_status;
+        app.publish();
+        return false;
+    }
+    app.handoff = Some(tracker);
+    app.tray_status = TrayStatus::Stopping;
+    app.record(
+        "handoff.started",
+        format!(
+            "boundary_hns={} interval_ms={} max_polls={} ownership=released effective_system=finer",
+            boundary.value(),
+            HANDOFF_POLL_INTERVAL_MS,
+            crate::tray_surface::HANDOFF_MAX_POLLS
+        ),
+    );
+    app.publish();
+    true
+}
+
+fn finish_handoff_timer(app: &mut App) {
+    if let Some(hwnd) = app.tray_icon.as_ref().map(|icon| icon.h_wnd) {
+        let result = unsafe { KillTimer(hwnd, HANDOFF_TIMER_ID) };
+        if result == 0 {
+            app.record(
+                "native.KillTimer.handoff.error",
+                format!("raw_status={}", unsafe { GetLastError() }),
+            );
+        }
+    }
+}
+
+fn handle_handoff_timer(app: &mut App) {
+    let Some(mut tracker) = app.handoff.take() else {
+        return;
+    };
+    let observation = refresh_timing_observation(app);
+    let effective = observation.map(|value| value.reported_current);
+    let progress = tracker.observe(effective);
+    app.record(
+        "handoff.observation",
+        format!(
+            "boundary_hns={} effective_hns={} poll={} result={progress:?}",
+            tracker.boundary().value(),
+            effective.map_or_else(|| "unknown".to_owned(), |value| value.value().to_string()),
+            tracker.polls()
+        ),
+    );
+    match progress {
+        HandoffProgress::Pending => {
+            app.handoff = Some(tracker);
+            app.tray_status = TrayStatus::Stopping;
+            app.publish();
+        }
+        HandoffProgress::Completed => {
+            finish_handoff_timer(app);
+            app.record(
+                "handoff.completed",
+                format!(
+                    "boundary_hns={} effective_hns={} ownership=released",
+                    tracker.boundary().value(),
+                    effective
+                        .map_or_else(|| "unknown".to_owned(), |value| value.value().to_string())
+                ),
+            );
+            app.record(
+                "ownership.result",
+                "state=released effective_system=non_finer handoff=completed",
+            );
+            app.tray_status = tracker.released_status();
+            app.publish();
+        }
+        HandoffProgress::TimedOut => {
+            finish_handoff_timer(app);
+            app.record(
+                "handoff.timeout",
+                format!(
+                    "boundary_hns={} effective_hns={} ownership=released reason=external_or_unknown_client_remains_finer",
+                    tracker.boundary().value(),
+                    effective.map_or_else(|| "unknown".to_owned(), |value| value.value().to_string())
+                ),
+            );
+            app.record(
+                "ownership.result",
+                "state=released effective_system=finer due_to=external_or_unknown_client",
+            );
+            app.tray_status = tracker.released_status();
+            app.publish();
+        }
     }
 }
 
@@ -1135,6 +1314,9 @@ unsafe extern "system" fn window_proc(
             }
             WM_COMMAND => {
                 handle_menu_command(hwnd, app, w_param & 0xffff);
+            }
+            WM_TIMER if w_param == HANDOFF_TIMER_ID => {
+                handle_handoff_timer(app);
             }
             WM_POWERBROADCAST if w_param == PBT_APMPOWERSTATUSCHANGE => {
                 app.record("power.broadcast", "event=APMPOWERSTATUSCHANGE");
@@ -2081,6 +2263,13 @@ extern "system" {
     fn IsWindow(window: *mut c_void) -> i32;
     fn IsIconic(window: *mut c_void) -> i32;
     fn PostQuitMessage(code: i32);
+    fn SetTimer(
+        hwnd: *mut c_void,
+        event_id: usize,
+        interval_ms: u32,
+        callback: *mut c_void,
+    ) -> usize;
+    fn KillTimer(hwnd: *mut c_void, event_id: usize) -> i32;
     fn MessageBoxW(hwnd: *mut c_void, text: *const u16, title: *const u16, flags: u32) -> i32;
     fn CreatePopupMenu() -> *mut c_void;
     fn AppendMenuW(menu: *mut c_void, flags: u32, id: usize, text: *const u16) -> i32;
