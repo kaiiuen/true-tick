@@ -1,4 +1,6 @@
 use std::time::{Duration, Instant};
+use tick_core::Status;
+use tick_policy::{decide, PolicyInput, PowerState};
 
 pub const MAX_PAUSE_DURATION: Duration = Duration::from_secs(60 * 60);
 pub const MAX_TIMER_INTERVAL_MS: u32 = 60 * 60 * 1_000;
@@ -128,6 +130,18 @@ impl Default for PauseController {
     }
 }
 
+pub(crate) fn acquisition_is_allowed(paused: bool, automatic: bool, power: PowerState) -> bool {
+    !paused
+        && automatic
+        && decide(PolicyInput {
+            enabled: true,
+            eligible_profile: true,
+            power,
+        })
+        .status
+            == Status::Requested
+}
+
 pub(crate) fn timer_interval_ms(remaining: Duration) -> u32 {
     let milliseconds = remaining
         .as_millis()
@@ -241,6 +255,30 @@ mod tests {
             pause.timer_event(3, now + Duration::from_secs(1)),
             PauseTimerEvent::Early { generation: 3, .. }
         ));
+    }
+
+    #[test]
+    fn pause_suppresses_acquisition_for_all_power_states() {
+        for power in [
+            PowerState::Ac,
+            PowerState::Battery,
+            PowerState::BatterySaver,
+            PowerState::Unknown,
+        ] {
+            assert!(!acquisition_is_allowed(true, true, power));
+        }
+        assert!(acquisition_is_allowed(false, true, PowerState::Ac));
+        assert!(!acquisition_is_allowed(false, false, PowerState::Ac));
+        assert!(!acquisition_is_allowed(false, true, PowerState::Battery));
+    }
+
+    #[test]
+    fn shutdown_clears_a_session_pause_without_persisting_it() {
+        let now = start();
+        let mut pause = PauseController::new();
+        pause.request(PauseDuration::Five, now);
+        assert!(pause.resume());
+        assert!(!pause.active());
     }
 
     #[test]

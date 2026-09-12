@@ -489,6 +489,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pause_menu_exposes_only_fixed_choices_or_resume() {
+        let active = pause_submenu_items(false);
+        assert_eq!(
+            active
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            ["5 min", "15 min", "30 min", "60 min", "Resume now"]
+        );
+        assert!(active[..4].iter().all(|item| item.enabled));
+        assert!(!active[4].enabled);
+
+        let paused = pause_submenu_items(true);
+        assert!(paused[..4].iter().all(|item| !item.enabled));
+        assert!(paused[4].enabled);
+        assert_eq!(
+            pause_command_duration(PAUSE_5_COMMAND_ID),
+            Some(PauseDuration::Five)
+        );
+        assert_eq!(
+            pause_command_duration(PAUSE_60_COMMAND_ID),
+            Some(PauseDuration::Sixty)
+        );
+        assert_eq!(pause_command_duration(9999), None);
+    }
+
+    #[test]
+    fn paused_lifecycle_is_yellow_and_start_is_suppressed_by_command_policy() {
+        assert_eq!(TrayStatus::Pausing.icon_color(), IconColor::Yellow);
+        assert_eq!(TrayStatus::Paused.icon_color(), IconColor::Yellow);
+        assert_eq!(
+            lifecycle_status(TrayStatus::Pausing, true),
+            TrayStatus::Pausing
+        );
+        assert!(menu_command_is_enabled_with_pause(
+            1001,
+            TrayStatus::Paused,
+            false,
+            false,
+            true
+        ));
+        assert!(!menu_command_is_enabled_with_pause(
+            1002,
+            TrayStatus::Paused,
+            false,
+            false,
+            true
+        ));
+        assert!(menu_command_is_enabled_with_pause(
+            RESUME_COMMAND_ID,
+            TrayStatus::Paused,
+            false,
+            false,
+            true
+        ));
+        assert_eq!(
+            tooltip(TrayStatus::Paused, TimingValues::default()),
+            "True™ Tick: Paused"
+        );
+    }
+
+    #[test]
     fn handoff_is_authoritatively_yellow_even_when_an_unrelated_error_is_reported() {
         assert_eq!(
             lifecycle_status(TrayStatus::Error, true),

@@ -1,6 +1,7 @@
 use crate::config;
 use crate::pause::{
-    timer_interval_ms, PauseController, PauseDuration, PauseRequest, PauseTimerEvent,
+    acquisition_is_allowed, timer_interval_ms, PauseController, PauseDuration, PauseRequest,
+    PauseTimerEvent,
 };
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -841,7 +842,7 @@ fn apply_policy(app: &mut App) {
             format!("requested_status={:?} reason=pause_active", decision.status),
         );
         DesiredIntent::Release
-    } else if app.config.automatic && decision.status == tick_core::Status::Requested {
+    } else if acquisition_is_allowed(false, app.config.automatic, power) {
         DesiredIntent::Acquire
     } else {
         DesiredIntent::Release
@@ -1125,7 +1126,9 @@ fn pause_for_duration(app: &mut App, duration: PauseDuration) {
                 format!(
                     "result=started duration_minutes={} generation={generation} deadline_monotonic_ms={}",
                     duration.minutes(),
-                    deadline.elapsed().as_millis()
+                    deadline
+                        .saturating_duration_since(std::time::Instant::now())
+                        .as_millis()
                 ),
             );
             app.tray_status = TrayStatus::Pausing;
