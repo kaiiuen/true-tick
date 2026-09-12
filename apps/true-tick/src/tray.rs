@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 use tick_core::{DesiredIntent, DesiredIntentQueue};
 use tick_diagnostics::{
-    diagnostic_grid_rows, format_tsv, parse_row_selection, row_selection_for_sequences,
-    selected_event_sequences, truncate_utf8, DiagnosticOutcome, DiagnosticPhase, DiagnosticRecord,
-    DiagnosticSource, DiagnosticStore, NativeOutcome, OperationContext, RowSelection,
-    DEFAULT_MAX_EVENTS, REPORT_COLUMNS,
+    diagnostic_grid_rows, format_tsv, latest_row_selection, parse_display_limit,
+    parse_row_selection, row_selection_for_sequences, selected_event_sequences, truncate_utf8,
+    DiagnosticOutcome, DiagnosticPhase, DiagnosticRecord, DiagnosticSource, DiagnosticStore,
+    NativeOutcome, OperationContext, RowSelection, DEFAULT_MAX_EVENTS, REPORT_COLUMNS,
 };
 use tick_observation_windows::{ObservationSource, WindowsObservation};
 use tick_ownership::{OwnershipState, TimerController, TimingSnapshot, Verification};
@@ -67,6 +67,8 @@ const ID_AUTOMATIC_OFF: usize = 1008;
 const ID_DIAGNOSTIC_RANGE: usize = 1201;
 const ID_DIAGNOSTIC_COPY: usize = 1202;
 const ID_DIAGNOSTIC_EXPORT: usize = 1203;
+const ID_DIAGNOSTIC_DISPLAY_LIMIT: usize = 1204;
+const ID_DIAGNOSTIC_SHOW_ALL: usize = 1205;
 const EN_CHANGE: usize = 0x0300;
 const BN_CLICKED: usize = 0;
 const EM_LIMITTEXT: u32 = WM_USER + 1;
@@ -97,7 +99,7 @@ const DIAGNOSTIC_WINDOW_TITLE: &str = "True™ Tick Status and Diagnostics";
 const MAX_STARTUP_STATUS_BYTES: usize = 512;
 const DIAGNOSTIC_WINDOW_PARENT: *mut c_void = std::ptr::null_mut();
 const DIAGNOSTIC_SUMMARY_HEIGHT: i32 = 148;
-const DIAGNOSTIC_TOOLBAR_HEIGHT: i32 = 40;
+const DIAGNOSTIC_TOOLBAR_HEIGHT: i32 = 72;
 const DIAGNOSTIC_COLUMN_WIDTHS: [i32; 11] = [54, 70, 78, 78, 70, 86, 82, 90, 86, 160, 240];
 const DIAGNOSTIC_RANGE_INPUT_LIMIT: usize = 64;
 const WS_CHILD: u32 = 0x40000000;
@@ -470,6 +472,9 @@ struct App {
     diagnostics: Arc<DiagnosticStore>,
     diagnostic_window: Option<*mut c_void>,
     diagnostic_summary: Option<*mut c_void>,
+    diagnostic_display_label: Option<*mut c_void>,
+    diagnostic_display_input: Option<*mut c_void>,
+    diagnostic_show_all_button: Option<*mut c_void>,
     diagnostic_toolbar_label: Option<*mut c_void>,
     diagnostic_selection_summary: Option<*mut c_void>,
     diagnostic_range_input: Option<*mut c_void>,
@@ -480,8 +485,11 @@ struct App {
     diagnostic_selection: Option<RowSelection>,
     diagnostic_selection_sequences: Option<Vec<u64>>,
     diagnostic_selection_reset: bool,
+    diagnostic_display_limit: usize,
+    diagnostic_display_all: bool,
     diagnostic_message_text: String,
     diagnostic_refresh_pending: bool,
+    diagnostic_refreshing: bool,
     menu_active: bool,
     popup_menus: Option<PopupMenuHandles>,
     popup_refresh_timer_active: bool,
@@ -649,6 +657,9 @@ pub fn run() {
             diagnostics,
             diagnostic_window: None,
             diagnostic_summary: None,
+            diagnostic_display_label: None,
+            diagnostic_display_input: None,
+            diagnostic_show_all_button: None,
             diagnostic_toolbar_label: None,
             diagnostic_selection_summary: None,
             diagnostic_range_input: None,
@@ -659,8 +670,11 @@ pub fn run() {
             diagnostic_selection: None,
             diagnostic_selection_sequences: None,
             diagnostic_selection_reset: false,
+            diagnostic_display_limit: 100,
+            diagnostic_display_all: false,
             diagnostic_message_text: String::new(),
             diagnostic_refresh_pending: false,
+            diagnostic_refreshing: false,
             menu_active: false,
             popup_menus: None,
             popup_refresh_timer_active: false,
@@ -3578,6 +3592,14 @@ fn power_state_label(power: PowerState) -> &'static str {
     }
 }
 
+fn diagnostic_visible_selection(app: &App, retained_rows: usize) -> RowSelection {
+    if app.diagnostic_display_all {
+        RowSelection::all(retained_rows)
+    } else {
+        latest_row_selection(app.diagnostic_display_limit, retained_rows)
+    }
+}
+
 fn diagnostic_summary_text(app: &App, retained: usize) -> String {
     let status = status_menu_items(
         app.lifecycle_status(),
@@ -3587,22 +3609,35 @@ fn diagnostic_summary_text(app: &App, retained: usize) -> String {
         app.running_duration(),
         std::time::Instant::now(),
     );
+    let visible = diagnostic_visible_selection(app, retained).row_count();
     format!(
-        "{}\r\n{}\r\n{}\r\n{}\r\nPower: {}\r\nStartup: {}\r\nRetained events: {}/{}\r\nDiagnostics are session-local. Newest retained events are shown after the {}-event cap. Timing is current only when the latest observation is valid, otherwise it is Unknown.\r\n",
+        "{}\r\n{}\r\n{}\r\n{}\r\n{}\r\nPower: {}\r\nStartup: {}\r\nShowing {visible} of {retained} retained rows\r\nRetention cap: {} events. Newest retained events are shown in chronological order. Timing is current only when the latest observation is valid, otherwise it is Unknown.\r\n",
         status[0].label,
         status[1].label,
         status[2].label,
         status[3].label,
+        status[4].label,
         power_state_label(app.observation.power().state),
         app.startup_status,
-        retained,
-        app.diagnostics.maximum_events(),
         app.diagnostics.maximum_events(),
     )
 }
 
 fn scale_logical(value: i32, dpi: u32) -> i32 {
     value.saturating_mul(dpi as i32).saturating_add(95) / 96
+}
+
+unsafe fn diagnostic_display_text(app: &App) -> String {
+    let Some(input) = app.diagnostic_display_input else {
+        return String::new();
+    };
+    let length = GetWindowTextLengthW(input);
+    if length <= 0 {
+        return String::new();
+    }
+    let mut buffer = vec![0u16; length as usize + 1];
+    let copied = GetWindowTextW(input, buffer.as_mut_ptr(), buffer.len() as i32);
+    String::from_utf16_lossy(&buffer[..copied as usize])
 }
 
 unsafe fn diagnostic_range_text(app: &App) -> String {
@@ -3633,13 +3668,15 @@ unsafe fn set_diagnostic_message(app: &mut App, message: impl Into<String>) {
 
 fn diagnostic_selection_summary(selection: Option<RowSelection>, retained_rows: usize) -> String {
     match selection {
-        Some(selection) if selection.is_all(retained_rows) => format!("All rows {retained_rows}"),
+        Some(selection) if selection.is_all(retained_rows) => {
+            format!("Transfer: all {retained_rows} retained rows")
+        }
         Some(selection) => format!(
-            "Rows {}-{} of {retained_rows}",
+            "Transfer: rows {}-{} of {retained_rows} retained",
             selection.start(),
             selection.end()
         ),
-        None => "Selection unavailable".to_owned(),
+        None => "Transfer: selection unavailable".to_owned(),
     }
 }
 
@@ -3750,23 +3787,66 @@ unsafe fn layout_diagnostic_controls(window: *mut c_void, app: &App) {
     if let Some(summary) = app.diagnostic_summary {
         let _ = MoveWindow(summary, 0, 0, width, summary_height, 1);
     }
-    if let Some(label) = app.diagnostic_toolbar_label {
+    let row_one_top = toolbar_top.saturating_add(scale_logical(7, dpi));
+    let row_two_top = toolbar_top.saturating_add(scale_logical(39, dpi));
+    if let Some(label) = app.diagnostic_display_label {
         let _ = MoveWindow(
             label,
             scale_logical(8, dpi),
-            toolbar_top.saturating_add(scale_logical(10, dpi)),
-            scale_logical(38, dpi),
+            row_one_top.saturating_add(scale_logical(3, dpi)),
+            scale_logical(76, dpi),
             scale_logical(20, dpi),
             1,
         );
     }
-    let input_left = scale_logical(48, dpi);
+    if let Some(input) = app.diagnostic_display_input {
+        let _ = MoveWindow(
+            input,
+            scale_logical(88, dpi),
+            row_one_top,
+            scale_logical(64, dpi),
+            scale_logical(24, dpi),
+            1,
+        );
+    }
+    if let Some(button) = app.diagnostic_show_all_button {
+        let _ = MoveWindow(
+            button,
+            scale_logical(160, dpi),
+            row_one_top,
+            scale_logical(76, dpi),
+            scale_logical(24, dpi),
+            1,
+        );
+    }
+    if let Some(message) = app.diagnostic_message {
+        let message_left = scale_logical(244, dpi);
+        let message_width = width.saturating_sub(message_left).max(0);
+        let _ = MoveWindow(
+            message,
+            message_left,
+            row_one_top.saturating_add(scale_logical(3, dpi)),
+            message_width,
+            scale_logical(20, dpi),
+            1,
+        );
+    }
+    if let Some(label) = app.diagnostic_toolbar_label {
+        let _ = MoveWindow(
+            label,
+            scale_logical(8, dpi),
+            row_two_top.saturating_add(scale_logical(3, dpi)),
+            scale_logical(132, dpi),
+            scale_logical(20, dpi),
+            1,
+        );
+    }
     if let Some(input) = app.diagnostic_range_input {
         let _ = MoveWindow(
             input,
-            input_left,
-            toolbar_top.saturating_add(scale_logical(7, dpi)),
-            scale_logical(120, dpi),
+            scale_logical(145, dpi),
+            row_two_top,
+            scale_logical(90, dpi),
             scale_logical(24, dpi),
             1,
         );
@@ -3774,44 +3854,30 @@ unsafe fn layout_diagnostic_controls(window: *mut c_void, app: &App) {
     if let Some(summary) = app.diagnostic_selection_summary {
         let _ = MoveWindow(
             summary,
-            scale_logical(176, dpi),
-            toolbar_top.saturating_add(scale_logical(10, dpi)),
-            scale_logical(136, dpi),
+            scale_logical(243, dpi),
+            row_two_top.saturating_add(scale_logical(3, dpi)),
+            scale_logical(148, dpi),
             scale_logical(20, dpi),
             1,
         );
     }
-    let copy_left = scale_logical(320, dpi);
     if let Some(copy) = app.diagnostic_copy_button {
         let _ = MoveWindow(
             copy,
-            copy_left,
-            toolbar_top.saturating_add(scale_logical(7, dpi)),
+            scale_logical(400, dpi),
+            row_two_top,
             scale_logical(68, dpi),
             scale_logical(24, dpi),
             1,
         );
     }
-    let export_left = scale_logical(396, dpi);
     if let Some(export) = app.diagnostic_export_button {
         let _ = MoveWindow(
             export,
-            export_left,
-            toolbar_top.saturating_add(scale_logical(7, dpi)),
+            scale_logical(476, dpi),
+            row_two_top,
             scale_logical(68, dpi),
             scale_logical(24, dpi),
-            1,
-        );
-    }
-    if let Some(message) = app.diagnostic_message {
-        let message_left = scale_logical(472, dpi);
-        let message_width = width.saturating_sub(message_left).max(0);
-        let _ = MoveWindow(
-            message,
-            message_left,
-            toolbar_top.saturating_add(scale_logical(10, dpi)),
-            message_width,
-            scale_logical(20, dpi),
             1,
         );
     }
@@ -3880,6 +3946,10 @@ fn diagnostic_grid_refresh_message(
 }
 
 unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
+    if app.diagnostic_refreshing {
+        return;
+    }
+    app.diagnostic_refreshing = true;
     let events = app.diagnostics.snapshot();
     let retained_rows = events.len();
     refresh_diagnostic_controls(app, &events, true);
@@ -3890,6 +3960,7 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
     let Some(list) = app.diagnostic_list else {
         app.diagnostics
             .record("diagnostic.grid.refresh.error", "list_handle_null");
+        app.diagnostic_refreshing = false;
         return;
     };
     let snapshot_rows = events.len();
@@ -3897,9 +3968,10 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
     let mut inserted_rows = 0usize;
     let mut insert_failures = 0usize;
     let mut set_text_failures = 0usize;
-    for (row_index, row) in diagnostic_grid_rows(&events, RowSelection::all(snapshot_rows))
-        .into_iter()
-        .enumerate()
+    for (row_index, row) in
+        diagnostic_grid_rows(&events, diagnostic_visible_selection(app, snapshot_rows))
+            .into_iter()
+            .enumerate()
     {
         let mut first = wide(&row.cells[0]);
         let item = ListViewItem {
@@ -3986,6 +4058,7 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
         ),
     );
     layout_diagnostic_controls(window, app);
+    app.diagnostic_refreshing = false;
 }
 
 #[repr(C)]
@@ -4417,7 +4490,73 @@ fn diagnostic_range_changed(app: &mut App) {
     }
 }
 
+fn diagnostic_display_changed(app: &mut App) {
+    let input = unsafe { diagnostic_display_text(app) };
+    let Ok(limit) = parse_display_limit(&input) else {
+        app.begin_operation(DiagnosticSource::Diagnostic);
+        app.record(
+            "diagnostic.display_limit.validation",
+            format!(
+                "result=invalid input_bytes={} retained_cap={}",
+                input.len(),
+                app.diagnostics.maximum_events()
+            ),
+        );
+        unsafe {
+            set_diagnostic_message(
+                app,
+                format!(
+                    "Invalid Show rows value: {}",
+                    parse_display_limit(&input).unwrap_err()
+                ),
+            );
+        }
+        app.finish_operation(DiagnosticOutcome::Failed);
+        return;
+    };
+    app.diagnostic_display_limit = limit;
+    app.diagnostic_display_all = false;
+    app.begin_operation(DiagnosticSource::Diagnostic);
+    app.record(
+        "diagnostic.display_limit.changed",
+        format!("result=success limit={limit} override=none"),
+    );
+    unsafe {
+        if app
+            .diagnostic_message_text
+            .starts_with("Invalid Show rows value:")
+        {
+            set_diagnostic_message(app, "");
+        }
+    }
+    app.finish_operation(DiagnosticOutcome::Completed);
+}
+
+fn diagnostic_show_all(app: &mut App) {
+    app.diagnostic_display_all = true;
+    app.begin_operation(DiagnosticSource::Diagnostic);
+    app.record(
+        "diagnostic.display_limit.override",
+        format!(
+            "result=success mode=all retained_cap={}",
+            app.diagnostics.maximum_events()
+        ),
+    );
+    unsafe {
+        if app
+            .diagnostic_message_text
+            .starts_with("Invalid Show rows value:")
+        {
+            set_diagnostic_message(app, "");
+        }
+    }
+    app.finish_operation(DiagnosticOutcome::Completed);
+}
+
 fn request_diagnostic_refresh(app: &mut App) {
+    if app.diagnostic_refreshing {
+        return;
+    }
     let Some(window) = app.diagnostic_window else {
         return;
     };
@@ -4468,14 +4607,59 @@ unsafe extern "system" fn diagnostic_window_proc(
         );
         let summary_error = if summary.is_null() { GetLastError() } else { 0 };
         let static_class = wide("STATIC");
-        let label = CreateWindowExW(
+        let display_label = CreateWindowExW(
             0,
             static_class.as_ptr(),
-            wide("Rows:").as_ptr(),
+            wide("Show rows:").as_ptr(),
             WS_CHILD | WS_VISIBLE | SS_LEFT,
             0,
             0,
-            40,
+            76,
+            24,
+            hwnd,
+            ID_DIAGNOSTIC_DISPLAY_LIMIT as *mut c_void,
+            GetModuleHandleW(std::ptr::null()),
+            std::ptr::null_mut(),
+        );
+        let display_input = CreateWindowExW(
+            0,
+            wide("EDIT").as_ptr(),
+            wide("100").as_ptr(),
+            WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
+            0,
+            0,
+            64,
+            24,
+            hwnd,
+            ID_DIAGNOSTIC_DISPLAY_LIMIT as *mut c_void,
+            GetModuleHandleW(std::ptr::null()),
+            std::ptr::null_mut(),
+        );
+        if !display_input.is_null() {
+            SendMessageW(display_input, EM_LIMITTEXT, DIAGNOSTIC_RANGE_INPUT_LIMIT, 0);
+        }
+        let show_all_button = CreateWindowExW(
+            0,
+            wide("BUTTON").as_ptr(),
+            wide("Show all").as_ptr(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            0,
+            0,
+            76,
+            24,
+            hwnd,
+            ID_DIAGNOSTIC_SHOW_ALL as *mut c_void,
+            GetModuleHandleW(std::ptr::null()),
+            std::ptr::null_mut(),
+        );
+        let label = CreateWindowExW(
+            0,
+            static_class.as_ptr(),
+            wide("Rows to copy/export:").as_ptr(),
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            0,
+            0,
+            132,
             24,
             hwnd,
             ID_DIAGNOSTIC_RANGE as *mut c_void,
@@ -4585,6 +4769,9 @@ unsafe extern "system" fn diagnostic_window_proc(
                 0
             }
         };
+        let display_label_error = control_error(display_label);
+        let display_input_error = control_error(display_input);
+        let show_all_error = control_error(show_all_button);
         let label_error = control_error(label);
         let selection_summary_error = control_error(selection_summary);
         let range_error = control_error(range_input);
@@ -4593,6 +4780,9 @@ unsafe extern "system" fn diagnostic_window_proc(
         let message_error = control_error(message);
         let list_error = control_error(list);
         if summary.is_null()
+            || display_label.is_null()
+            || display_input.is_null()
+            || show_all_button.is_null()
             || label.is_null()
             || selection_summary.is_null()
             || range_input.is_null()
@@ -4605,9 +4795,15 @@ unsafe extern "system" fn diagnostic_window_proc(
                 (*(app_ptr as *mut App)).diagnostics.record(
                     "native.CreateWindowExW.diagnostic_control.error",
                     format!(
-                        "summary_null={} summary_raw_status={} label_null={} label_raw_status={} selection_summary_null={} selection_summary_raw_status={} range_null={} range_raw_status={} copy_null={} copy_raw_status={} export_null={} export_raw_status={} message_null={} message_raw_status={} list_null={} list_raw_status={}",
+                        "summary_null={} summary_raw_status={} display_label_null={} display_label_raw_status={} display_input_null={} display_input_raw_status={} show_all_null={} show_all_raw_status={} label_null={} label_raw_status={} selection_summary_null={} selection_summary_raw_status={} range_null={} range_raw_status={} copy_null={} copy_raw_status={} export_null={} export_raw_status={} message_null={} message_raw_status={} list_null={} list_raw_status={}",
                         summary.is_null(),
                         summary_error,
+                        display_label.is_null(),
+                        display_label_error,
+                        display_input.is_null(),
+                        display_input_error,
+                        show_all_button.is_null(),
+                        show_all_error,
                         label.is_null(),
                         label_error,
                         selection_summary.is_null(),
@@ -4627,6 +4823,9 @@ unsafe extern "system" fn diagnostic_window_proc(
             }
             for control in [
                 summary,
+                display_label,
+                display_input,
+                show_all_button,
                 label,
                 selection_summary,
                 range_input,
@@ -4654,6 +4853,9 @@ unsafe extern "system" fn diagnostic_window_proc(
         }
         if !app_ptr.is_null() {
             (*app).diagnostic_summary = Some(summary);
+            (*app).diagnostic_display_label = Some(display_label);
+            (*app).diagnostic_display_input = Some(display_input);
+            (*app).diagnostic_show_all_button = Some(show_all_button);
             (*app).diagnostic_toolbar_label = Some(label);
             (*app).diagnostic_selection_summary = Some(selection_summary);
             (*app).diagnostic_range_input = Some(range_input);
@@ -4670,6 +4872,14 @@ unsafe extern "system" fn diagnostic_window_proc(
         if message == WM_COMMAND {
             let command = w_param & 0xffff;
             let notification = (w_param >> 16) & 0xffff;
+            if command == ID_DIAGNOSTIC_DISPLAY_LIMIT && notification == EN_CHANGE {
+                diagnostic_display_changed(&mut *app);
+                return 0;
+            }
+            if command == ID_DIAGNOSTIC_SHOW_ALL && notification == BN_CLICKED {
+                diagnostic_show_all(&mut *app);
+                return 0;
+            }
             if command == ID_DIAGNOSTIC_RANGE && notification == EN_CHANGE {
                 diagnostic_range_changed(&mut *app);
                 return 0;
@@ -4703,6 +4913,9 @@ unsafe extern "system" fn diagnostic_window_proc(
         } else if message == WM_NCDESTROY {
             (*app).diagnostic_window = None;
             (*app).diagnostic_summary = None;
+            (*app).diagnostic_display_label = None;
+            (*app).diagnostic_display_input = None;
+            (*app).diagnostic_show_all_button = None;
             (*app).diagnostic_toolbar_label = None;
             (*app).diagnostic_selection_summary = None;
             (*app).diagnostic_range_input = None;
@@ -4715,6 +4928,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             (*app).diagnostic_selection_reset = false;
             (*app).diagnostic_message_text.clear();
             (*app).diagnostic_refresh_pending = false;
+            (*app).diagnostic_refreshing = false;
         }
     }
     DefWindowProcW(hwnd, message, w_param, l_param)

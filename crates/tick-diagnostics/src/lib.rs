@@ -239,9 +239,69 @@ pub const MAX_TSV_BYTES: usize =
     REPORT_COLUMNS.len() * (MAX_FIELD_LENGTH + 3) * MAX_TSV_ROWS + MAX_TSV_ROWS * 2 + 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DisplayLimitError {
+    Empty,
+    Negative,
+    Zero,
+    Malformed,
+    OutOfRange,
+    TooLong,
+}
+
+impl fmt::Display for DisplayLimitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => formatter.write_str("enter a positive row count"),
+            Self::Negative => formatter.write_str("negative rows are not allowed"),
+            Self::Zero => formatter.write_str("row count must be positive"),
+            Self::Malformed => formatter.write_str("use a positive whole number"),
+            Self::OutOfRange => write!(formatter, "row count must be at most {HARD_MAX_EVENTS}"),
+            Self::TooLong => formatter.write_str("the row count is too long"),
+        }
+    }
+}
+
+pub fn parse_display_limit(input: &str) -> Result<usize, DisplayLimitError> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(DisplayLimitError::Empty);
+    }
+    if input.len() > 64 {
+        return Err(DisplayLimitError::TooLong);
+    }
+    if input.starts_with('-') {
+        return Err(DisplayLimitError::Negative);
+    }
+    if !input.chars().all(|character| character.is_ascii_digit()) {
+        return Err(DisplayLimitError::Malformed);
+    }
+    let limit = input
+        .parse::<usize>()
+        .map_err(|_| DisplayLimitError::Malformed)?;
+    if limit == 0 {
+        return Err(DisplayLimitError::Zero);
+    }
+    if limit > HARD_MAX_EVENTS {
+        return Err(DisplayLimitError::OutOfRange);
+    }
+    Ok(limit)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RowSelection {
     start: usize,
     end: usize,
+}
+
+pub fn latest_row_selection(display_limit: usize, retained_rows: usize) -> RowSelection {
+    if retained_rows == 0 {
+        return RowSelection::all(0);
+    }
+    let visible_rows = display_limit.clamp(1, HARD_MAX_EVENTS).min(retained_rows);
+    RowSelection::new(
+        retained_rows.saturating_sub(visible_rows).saturating_add(1),
+        retained_rows,
+    )
 }
 
 impl RowSelection {
@@ -717,6 +777,48 @@ mod tests {
         assert_eq!(
             format_status(record),
             "status=Unsupported, evidence=Unsupported"
+        );
+    }
+
+    #[test]
+    fn display_limit_parser_accepts_positive_counts_and_rejects_invalid_input() {
+        assert_eq!(parse_display_limit("100"), Ok(100));
+        assert_eq!(parse_display_limit(" 200 "), Ok(200));
+        assert_eq!(parse_display_limit(""), Err(DisplayLimitError::Empty));
+        assert_eq!(
+            parse_display_limit("all"),
+            Err(DisplayLimitError::Malformed)
+        );
+        assert_eq!(parse_display_limit("0"), Err(DisplayLimitError::Zero));
+        assert_eq!(parse_display_limit("-1"), Err(DisplayLimitError::Negative));
+        assert_eq!(
+            parse_display_limit("12.5"),
+            Err(DisplayLimitError::Malformed)
+        );
+        assert_eq!(
+            parse_display_limit("513"),
+            Err(DisplayLimitError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn latest_row_slice_keeps_newest_retained_rows_in_chronological_order() {
+        assert_eq!(latest_row_selection(3, 10), RowSelection::new(8, 10));
+        assert_eq!(latest_row_selection(100, 4), RowSelection::all(4));
+        assert_eq!(latest_row_selection(3, 0), RowSelection::all(0));
+        let events = (1..=10).map(test_event).collect::<Vec<_>>();
+        let rows = diagnostic_grid_rows(&events, latest_row_selection(3, events.len()));
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.cells[0].as_str())
+                .collect::<Vec<_>>(),
+            ["8", "9", "10"]
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.cells[1].as_str())
+                .collect::<Vec<_>>(),
+            ["8", "9", "10"]
         );
     }
 
