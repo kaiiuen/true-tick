@@ -1417,13 +1417,14 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
             app.tray_status,
             app.config.startup_enabled,
             app.config.automatic,
+            app.timing_values(),
         );
-        let start_flags = if items[0].enabled {
+        let start_flags = if items[1].enabled {
             MF_STRING
         } else {
             MF_STRING | MF_GRAYED
         };
-        let stop_flags = if items[1].enabled {
+        let stop_flags = if items[2].enabled {
             MF_STRING
         } else {
             MF_STRING | MF_GRAYED
@@ -1441,44 +1442,62 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
         let menu_ok = append_menu_checked(
             app,
             menu,
-            start_flags,
-            ID_START,
-            wide(items[0].label).as_ptr(),
-        ) && append_menu_checked(
-            app,
-            menu,
-            stop_flags,
-            ID_STOP,
-            wide(items[1].label).as_ptr(),
+            MF_STRING | MF_GRAYED,
+            0,
+            wide(&items[0].label).as_ptr(),
         ) && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
+            && append_menu_checked(
+                app,
+                menu,
+                start_flags,
+                ID_START,
+                wide(&items[1].label).as_ptr(),
+            )
+            && append_menu_checked(
+                app,
+                menu,
+                stop_flags,
+                ID_STOP,
+                wide(&items[2].label).as_ptr(),
+            )
+            && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
             && append_menu_checked(
                 app,
                 menu,
                 MF_STRING,
                 startup_id,
-                wide(items[2].label).as_ptr(),
+                wide(&items[3].label).as_ptr(),
             )
             && append_menu_checked(
                 app,
                 menu,
                 MF_STRING,
                 automatic_id,
-                wide(items[3].label).as_ptr(),
+                wide(&items[4].label).as_ptr(),
+            )
+            && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
+            && append_menu_checked(
+                app,
+                menu,
+                MF_STRING | MF_GRAYED,
+                0,
+                wide(&items[5].label).as_ptr(),
+            )
+            && append_menu_checked(
+                app,
+                menu,
+                MF_STRING,
+                STATUS_COMMAND_ID,
+                wide(&items[6].label).as_ptr(),
             )
             && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
             && append_menu_checked(
                 app,
                 menu,
                 MF_STRING,
-                STATUS_COMMAND_ID,
-                wide(&format!(
-                    "Status: {}",
-                    tooltip(app.tray_status, app.timing_values())
-                ))
-                .as_ptr(),
-            )
-            && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
-            && append_menu_checked(app, menu, MF_STRING, ID_QUIT, wide(items[5].label).as_ptr());
+                ID_QUIT,
+                wide(&items[7].label).as_ptr(),
+            );
         if !menu_ok {
             if DestroyMenu(menu) == 0 {
                 app.record(

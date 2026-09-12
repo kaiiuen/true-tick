@@ -24,9 +24,9 @@ pub(crate) enum IconColor {
     Red,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MenuItem {
-    pub(crate) label: &'static str,
+    pub(crate) label: String,
     pub(crate) enabled: bool,
 }
 
@@ -158,52 +158,63 @@ fn format_ms(value: Hns) -> String {
     format!("{}.{:03}", thousandths / 1_000, thousandths % 1_000)
 }
 
-fn current_label(prefix: &str, effective: Option<Hns>, external: bool) -> String {
-    effective.map_or_else(
-        || {
-            if prefix == "Stopped" {
-                format!("{prefix} (timing unknown)")
-            } else {
-                format!("{prefix} (unknown)")
-            }
-        },
-        |value| {
-            if external {
-                format!("{prefix} (external: {} ms)", format_ms(value))
-            } else {
-                format!("{prefix} (current: {} ms)", format_ms(value))
-            }
-        },
-    )
+pub(crate) fn version_header() -> String {
+    format!("True™ Tick v{}", env!("CARGO_PKG_VERSION"))
+}
+
+pub(crate) fn strip_status_branding(value: &str) -> &str {
+    value.strip_prefix("True™ Tick: ").unwrap_or(value)
 }
 
 pub(crate) fn tooltip(status: TrayStatus, timing: TimingValues) -> String {
     let summary = match status {
-        TrayStatus::Running => match (timing.requested, timing.effective) {
-            (Some(requested), Some(effective)) if effective < requested => {
-                format!("Running ({} ms, finer)", format_ms(effective))
-            }
-            (_, Some(effective)) => format!("Running ({} ms)", format_ms(effective)),
-            (_, None) => "Running (unknown)".to_owned(),
-        },
-        TrayStatus::Stopped => current_label("Stopped", timing.effective, timing.external),
-        TrayStatus::Blocked => current_label("Blocked", timing.effective, timing.external),
-        TrayStatus::Unsupported => "Unsupported (timing unavailable)".to_owned(),
-        TrayStatus::Error if timing.invalid_interval => "Error (invalid interval)".to_owned(),
-        TrayStatus::Error => current_label("Error", timing.effective, timing.external),
-        TrayStatus::Starting => timing.requested.map_or_else(
-            || "Starting (unknown)".to_owned(),
-            |requested| format!("Starting ({} ms)", format_ms(requested)),
+        TrayStatus::Running => timing.effective.map_or_else(
+            || "Running".to_owned(),
+            |value| format!("Running {} ms", format_ms(value)),
         ),
-        TrayStatus::Stopping if timing.handoff_pending => {
-            "Stopping (waiting for handoff)".to_owned()
-        }
-        TrayStatus::Stopping => current_label("Stopping", timing.effective, timing.external),
-        TrayStatus::Pending => "Pending (timing unknown)".to_owned(),
-        TrayStatus::Degraded => current_label("Degraded", timing.effective, timing.external),
-        TrayStatus::Unverified => current_label("Unverified", timing.effective, timing.external),
+        TrayStatus::Stopped => timing.effective.map_or_else(
+            || "Stopped".to_owned(),
+            |value| format!("Stopped {} ms", format_ms(value)),
+        ),
+        TrayStatus::Starting => timing.requested.map_or_else(
+            || "Starting".to_owned(),
+            |requested| format!("Starting {} ms", format_ms(requested)),
+        ),
+        TrayStatus::Stopping => "Stopping".to_owned(),
+        TrayStatus::Error => "Error".to_owned(),
+        TrayStatus::Pending
+        | TrayStatus::Degraded
+        | TrayStatus::Unverified
+        | TrayStatus::Blocked
+        | TrayStatus::Unsupported => "Warning".to_owned(),
     };
     format!("True™ Tick: {summary}")
+}
+
+pub(crate) fn status_label(status: TrayStatus, timing: TimingValues) -> String {
+    let tooltip_text = tooltip(status, timing);
+    let concise = strip_status_branding(&tooltip_text);
+    let concise = match status {
+        TrayStatus::Running => timing.effective.map_or_else(
+            || concise.to_owned(),
+            |value| format!("Running ({} ms)", format_ms(value)),
+        ),
+        TrayStatus::Stopped => timing.effective.map_or_else(
+            || concise.to_owned(),
+            |value| format!("Stopped ({} ms)", format_ms(value)),
+        ),
+        TrayStatus::Starting => timing.requested.map_or_else(
+            || concise.to_owned(),
+            |value| format!("Starting ({} ms)", format_ms(value)),
+        ),
+        TrayStatus::Stopping if timing.handoff_pending || timing.external => {
+            "Stopping (external timing)".to_owned()
+        }
+        TrayStatus::Error if timing.invalid_interval => "Error (invalid interval)".to_owned(),
+        TrayStatus::Error => "Error (operation failed)".to_owned(),
+        _ => concise.to_owned(),
+    };
+    format!("Status: {concise}")
 }
 
 pub(crate) const STATUS_COMMAND_ID: usize = 1009;
@@ -299,30 +310,39 @@ pub(crate) fn menu_items(
     status: TrayStatus,
     startup_enabled: bool,
     automatic: bool,
-) -> [MenuItem; 6] {
+    timing: TimingValues,
+) -> [MenuItem; 8] {
     [
         MenuItem {
-            label: "Start",
+            label: version_header(),
+            enabled: false,
+        },
+        MenuItem {
+            label: "Start".to_owned(),
             enabled: !matches!(status, TrayStatus::Running | TrayStatus::Starting),
         },
         MenuItem {
-            label: "Stop",
+            label: "Stop".to_owned(),
             enabled: !matches!(status, TrayStatus::Stopped | TrayStatus::Stopping),
         },
         MenuItem {
-            label: auto_start_label(startup_enabled),
+            label: auto_start_label(startup_enabled).to_owned(),
             enabled: true,
         },
         MenuItem {
-            label: automatic_label(automatic),
+            label: automatic_label(automatic).to_owned(),
             enabled: true,
         },
         MenuItem {
-            label: "Status",
+            label: status_label(status, timing),
+            enabled: false,
+        },
+        MenuItem {
+            label: "Status".to_owned(),
             enabled: true,
         },
         MenuItem {
-            label: "Quit",
+            label: "Quit".to_owned(),
             enabled: true,
         },
     ]
@@ -333,9 +353,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn status_row_maps_to_diagnostic_command() {
+    fn version_header_uses_the_package_version() {
+        assert_eq!(
+            version_header(),
+            "True™ Tick v".to_owned() + env!("CARGO_PKG_VERSION")
+        );
+    }
+
+    #[test]
+    fn status_label_strips_branding_and_keeps_the_row_short() {
+        assert_eq!(
+            strip_status_branding("True™ Tick: Running 0.497 ms"),
+            "Running 0.497 ms"
+        );
+        assert_eq!(
+            status_label(
+                TrayStatus::Stopping,
+                TimingValues {
+                    external: true,
+                    handoff_pending: true,
+                    ..TimingValues::default()
+                }
+            ),
+            "Status: Stopping (external timing)"
+        );
+        assert_eq!(
+            status_label(
+                TrayStatus::Error,
+                TimingValues {
+                    invalid_interval: true,
+                    ..TimingValues::default()
+                }
+            ),
+            "Status: Error (invalid interval)"
+        );
+    }
+
+    #[test]
+    fn status_command_remains_clickable_below_the_disabled_summary() {
         assert_eq!(STATUS_COMMAND_ID, 1009);
-        assert!(menu_items(TrayStatus::Stopped, false, false)[4].enabled);
+        let items = menu_items(TrayStatus::Stopped, false, false, TimingValues::default());
+        assert!(!items[0].enabled);
+        assert!(!items[5].enabled);
+        assert!(items[6].enabled);
     }
 
     #[test]
@@ -379,19 +439,10 @@ mod tests {
     }
 
     #[test]
-    fn stopped_status_reports_unknown_timing_without_a_claimed_value() {
+    fn stopped_status_omits_unknown_timing_from_the_hover_text() {
         assert_eq!(
-            tooltip(
-                TrayStatus::Stopped,
-                TimingValues {
-                    requested: None,
-                    effective: None,
-                    external: false,
-                    handoff_pending: false,
-                    invalid_interval: false,
-                },
-            ),
-            "True™ Tick: Stopped (timing unknown)"
+            tooltip(TrayStatus::Stopped, TimingValues::default()),
+            "True™ Tick: Stopped"
         );
     }
 
@@ -408,7 +459,7 @@ mod tests {
                     invalid_interval: false,
                 },
             ),
-            "True™ Tick: Stopped (external: 0.497 ms)"
+            "True™ Tick: Stopped 0.497 ms"
         );
     }
 
@@ -626,22 +677,38 @@ mod tests {
     }
 
     #[test]
-    fn compact_menu_contains_manual_controls_and_toggles() {
-        let items = menu_items(TrayStatus::Running, true, false);
+    fn compact_menu_has_the_expected_order_and_clickability() {
+        let items = menu_items(
+            TrayStatus::Running,
+            true,
+            false,
+            TimingValues {
+                effective: Some(Hns::new(4_966)),
+                ..TimingValues::default()
+            },
+        );
         assert_eq!(
-            items.map(|item| item.label),
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
             [
+                version_header().as_str(),
                 "Start",
                 "Stop",
                 "Auto-start: On",
                 "Auto-time: Off",
+                "Status: Running (0.497 ms)",
                 "Status",
                 "Quit"
             ]
         );
         assert!(!items[0].enabled);
-        assert!(items[1].enabled);
-        assert!(items[4].enabled);
+        assert!(!items[5].enabled);
+        assert!(!items[1].enabled);
+        assert!(items[2].enabled);
+        assert!(items[6].enabled);
+        assert!(items[7].enabled);
     }
 
     #[test]
@@ -662,15 +729,15 @@ mod tests {
         };
         assert_eq!(
             tooltip(TrayStatus::Running, exact),
-            "True™ Tick: Running (0.500 ms)"
+            "True™ Tick: Running 0.500 ms"
         );
         assert_eq!(
             tooltip(TrayStatus::Running, finer),
-            "True™ Tick: Running (0.497 ms, finer)"
+            "True™ Tick: Running 0.497 ms"
         );
         assert_eq!(
             tooltip(TrayStatus::Stopped, finer),
-            "True™ Tick: Stopped (current: 0.497 ms)"
+            "True™ Tick: Stopped 0.497 ms"
         );
         assert_eq!(
             tooltip(
@@ -680,12 +747,9 @@ mod tests {
                     ..TimingValues::default()
                 }
             ),
-            "True™ Tick: Starting (0.500 ms)"
+            "True™ Tick: Starting 0.500 ms"
         );
-        assert_eq!(
-            tooltip(TrayStatus::Stopping, finer),
-            "True™ Tick: Stopping (current: 0.497 ms)"
-        );
+        assert_eq!(tooltip(TrayStatus::Stopping, finer), "True™ Tick: Stopping");
         assert_eq!(
             tooltip(
                 TrayStatus::Stopping,
@@ -695,7 +759,7 @@ mod tests {
                     ..TimingValues::default()
                 }
             ),
-            "True™ Tick: Stopping (waiting for handoff)"
+            "True™ Tick: Stopping"
         );
         assert_eq!(
             tooltip(
@@ -705,23 +769,30 @@ mod tests {
                     ..TimingValues::default()
                 }
             ),
-            "True™ Tick: Error (invalid interval)"
+            "True™ Tick: Error"
         );
     }
 
     #[test]
-    fn unknown_timing_is_explicit_and_short() {
+    fn shortened_tooltips_keep_branding_without_full_reports() {
         for status in [
             TrayStatus::Running,
             TrayStatus::Stopped,
             TrayStatus::Starting,
+            TrayStatus::Stopping,
+            TrayStatus::Pending,
+            TrayStatus::Error,
         ] {
             let text = tooltip(status, TimingValues::default());
-            assert!(text.contains("unknown"));
             assert!(text.starts_with("True™ Tick: "));
             assert!(!text.contains("HNS"));
             assert!(!text.contains('\\'));
+            assert!(text.len() < 64);
         }
+        assert_eq!(
+            tooltip(TrayStatus::Pending, TimingValues::default()),
+            "True™ Tick: Warning"
+        );
     }
 
     #[test]

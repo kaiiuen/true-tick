@@ -18,18 +18,37 @@ executable when no portable launcher path is available. Registration is distinct
 from automatic timer activation after the application has launched. Secure
 signatures and rollback are not implemented.
 
-The tray has compact `Start` and `Stop` manual controls, `Auto-start: On/Off` and
-`Auto-time: On/Off` items, one clickable short status item, and Quit. Auto-start
-launches the app at Windows login. Auto-time controls automatic timing acquisition
-and defaults to off. Both tray left-button-up and right-button-up notifications open
-the same compact menu. Button-down and double-click notifications are ignored to
-avoid duplicate menus. The status row opens a normal taskbar diagnostic window titled `True™ Tick Status and Diagnostics` without changing timer state. It uses a normal overlapped style, `WS_EX_APPWINDOW`, no `WS_EX_TOOLWINDOW`, no child style, no owner, standard title-bar controls, a resizable read-only status and session log view, and a fresh snapshot each time it is reopened. Reopening restores and activates the existing window. The native menu keeps Start, Stop, and both setting toggles open after successful or failed handling. Reopening after any persistent command reuses the original popup anchor POINT, and the returned `TPM_RETURNCMD` ID is dispatched once. Status closes the menu when it opens diagnostics. Highlighting a command uses `WM_MENUSELECT` to show a standard Windows tooltip with `Request the best supported timing`, `Release True Tick timing`, `Launch True Tick when you sign in`, `Request timing automatically on AC power`, `Open status and session logs`, or `Stop safely and quit`. The tooltip is destroyed when the popup closes and does not change timer state. Cancel keeps the Quit command loop available, while successful Quit closes it.
+The tray starts with a disabled `True™ Tick v<version>` header sourced from Cargo
+package metadata. It has compact `Start` and `Stop` manual controls, `Auto-start:
+On/Off` and `Auto-time: On/Off` items, a disabled concise status summary, a
+clickable `Status` command, and Quit. Auto-start launches the app at Windows login.
+Auto-time controls automatic timing acquisition and defaults to off. Both tray
+left-button-up and right-button-up notifications open the same compact menu.
+Button-down and double-click notifications are ignored to avoid duplicate menus.
+The summary row does not dispatch a command. The `Status` command opens a normal
+taskbar diagnostic window titled `True™ Tick Status and Diagnostics` without
+changing timer state. It uses a normal overlapped style, `WS_EX_APPWINDOW`, no
+`WS_EX_TOOLWINDOW`, no child style, no owner, standard title-bar controls, a
+resizable read-only status and session log view, and a fresh snapshot each time it
+is reopened. Reopening restores and activates the existing window. The native menu
+keeps Start, Stop, and both setting toggles open after successful or failed
+handling. Reopening after any persistent command reuses the original popup anchor
+POINT, and the returned `TPM_RETURNCMD` ID is dispatched once. Status closes the
+menu when it opens diagnostics. Highlighting a command uses `WM_MENUSELECT` to
+show a standard Windows tooltip with `Request the best supported timing`, `Release
+True Tick timing`, `Launch True Tick when you sign in`, `Request timing automatically
+on AC power`, `Open status and session logs`, or `Stop safely and quit`. The tooltip
+is destroyed when the popup closes and does not change timer state. Cancel keeps the
+Quit command loop available, while successful Quit closes it.
 Start and Stop use the same guarded policy and ownership lifecycle as automatic
-activation. Start remains yellow through query, request, and verification, then turns green only after a verified request. The tray tooltip and status menu use actual concise timing values such
-as `True™ Tick: Running (0.500 ms)`, `True™ Tick: Running (0.497 ms, finer)`,
-`True™ Tick: Stopped (current: 0.497 ms)`, `True™ Tick: Starting (0.500 ms)`,
-`True™ Tick: Stopping (waiting for handoff)`, and `True™ Tick: Error (invalid interval)`. They use
-`unknown` when no observation exists. After a successful request, the returned
+activation. Start remains yellow through query, request, and verification, then
+turns green only after a verified request. The tray tooltip uses actual concise
+values such as `True™ Tick: Running 0.497 ms`, `True™ Tick: Stopped 0.997 ms`,
+`True™ Tick: Starting 0.500 ms`, `True™ Tick: Stopping`, `True™ Tick: Warning`,
+and `True™ Tick: Error`. The disabled status summary uses labels such as
+`Status: Running (0.497 ms)`, `Status: Stopped (0.997 ms)`,
+`Status: Starting (0.500 ms)`, `Status: Stopping (external timing)`, or
+`Status: Error (invalid interval)`. It uses `unknown` when no observation exists. After a successful request, the returned
 verified effective observation replaces the preflight current value in the
 controller and app snapshot. Release observations update that same snapshot. A
 remaining finer or different value is displayed as external effective state and

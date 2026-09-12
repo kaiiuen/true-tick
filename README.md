@@ -45,8 +45,7 @@ numerically smallest supported boundary. It does not use a universal fixed
 and `maximum_hns=5000` select `5000 HNS`, or `0.500 ms`, when that boundary is
 reported by the current system. The adapter retains raw boundary values and
 selected HNS in diagnostics, then validates the selected value before requesting
-it. The compact tray
-menu exposes `Start`, `Stop`, `Auto-start: On/Off`, `Auto-time: On/Off`, a clickable short status item, and `Quit`. Auto-start controls launch at Windows login. Auto-time controls automatic timer acquisition after launch. The current defaults are `startup_enabled = true` and `automatic = false`, so login launch does not acquire timing until the user manually starts it. Status opens a normal taskbar
+it. The compact tray menu starts with a disabled `True™ Tick v<version>` header sourced from Cargo package metadata. It then exposes `Start`, `Stop`, `Auto-start: On/Off`, `Auto-time: On/Off`, a disabled concise status summary, a clickable `Status` command, and `Quit`. Auto-start controls launch at Windows login. Auto-time controls automatic timer acquisition after launch. The current defaults are `startup_enabled = true` and `automatic = false`, so login launch does not acquire timing until the user manually starts it. The summary row does not dispatch commands. `Status` opens a normal taskbar
 diagnostic window titled `True™ Tick Status and Diagnostics` without changing timer
 state. It is a normal taskbar window with standard title-bar controls, a resizable
 read-only status and session log view, and snapshot refresh on reopen. The native
@@ -77,10 +76,13 @@ retained Task Dialog implementation is explicitly secondary and is not invoked b
 the reliable MessageBox path. If no warning is shown, the menu is closed rather than
 silently reopened.
 It excludes raw pointers, private tokens, credentials, arbitrary secrets, and
-unbounded sensitive paths. The branded tooltip and status menu use short runtime timing values such as
-`True™ Tick: Running (0.500 ms)`, `True™ Tick: Running (0.497 ms, finer)`,
-`True™ Tick: Stopped (current: 0.497 ms)`, `True™ Tick: Starting (0.500 ms)`,
-`True™ Tick: Stopping (waiting for handoff)`, or `True™ Tick: Error (invalid interval)`. Values use the selected request and the latest verified effective
+unbounded sensitive paths. The branded tooltip uses short runtime values such as
+`True™ Tick: Running 0.497 ms`, `True™ Tick: Stopped 0.997 ms`,
+`True™ Tick: Starting 0.500 ms`, `True™ Tick: Stopping`, `True™ Tick: Warning`,
+and `True™ Tick: Error`. The disabled menu summary uses concise labels such as
+`Status: Running (0.497 ms)`, `Status: Stopped (0.997 ms)`,
+`Status: Starting (0.500 ms)`, `Status: Stopping (external timing)`, or
+`Status: Error (invalid interval)`. Values use the selected request and the latest verified effective
 observation as distinct fields, and another platform boundary is allowed. After a
 successful request, the returned effective observation replaces the preflight
 current value in controller and app state. After release, the returned current
