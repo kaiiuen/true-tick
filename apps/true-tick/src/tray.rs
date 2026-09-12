@@ -4719,16 +4719,19 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
     }
     apply_diagnostic_grid_selection(app, list, &events);
     let item_count = SendMessageW(list, LVM_GETITEMCOUNT, 0, 0);
-    app.diagnostics.record(
-        "diagnostic.grid.refresh",
-        diagnostic_grid_refresh_message(
-            snapshot_rows,
-            inserted_rows,
-            item_count,
-            insert_failures,
-            set_text_failures,
-        ),
-    );
+    if !follow_up_refresh {
+        record_diagnostic_refresh_event(
+            app,
+            "diagnostic.grid.refresh",
+            diagnostic_grid_refresh_message(
+                snapshot_rows,
+                inserted_rows,
+                item_count,
+                insert_failures,
+                set_text_failures,
+            ),
+        );
+    }
     if auto_fit {
         let mut client = Rect {
             left: 0,

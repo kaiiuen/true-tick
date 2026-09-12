@@ -85,6 +85,12 @@ columns are bounded and Details absorbs remaining width. Normal refresh restores
 horizontal scroll position when Windows permits it. Reopening reuses the existing
 window and posts one refresh rather than rebuilding synchronously.
 
+The status summary is a read-only `STATIC` control. It has no `WS_VSCROLL`, `ES_AUTOVSCROLL`, or multiline edit style. Its stable wrapped region uses a 220 logical pixel base height and is sized from the current DPI and minimum client height. The toolbar is a computed flow row. At 96 DPI its fixed controls, eight gaps, margins, and 140 pixel flexible message minimum require a 916 pixel client width. The toolbar never wraps or stacks.
+
+Layout failure handling records `BeginDeferWindowPos`, every failed `DeferWindowPos`, and `EndDeferWindowPos`. It then positions every child with individual `SetWindowPos` calls. Child creation returns `-1` after every partial child set is destroyed. Reuse verifies the parent and every required child before showing the window.
+
+`WM_SIZE` performs layout and Details viewport fitting only. `WM_DPICHANGED` applies the suggested parent rectangle, reapplies the system GUI font, recalculates layout, and preserves horizontal scroll when possible. Content auto-fit is limited to initial data load or a material snapshot generation. A refresh uses one snapshot and permits at most one follow-up pass for records written during that refresh. The retained session remains capped at 512 events.
+
 The rendering contract is source-tested. Actual first-open paint timing, interactive
 resize behavior, horizontal scroll appearance, and native taskbar window behavior
 remain runtime-required checks because validation does not launch the app.
