@@ -935,6 +935,30 @@ mod tests {
     }
 
     #[test]
+    fn refresh_updates_latest_display_slice_while_transfer_rows_keep_their_mapping() {
+        let first = (1..=5).map(test_event).collect::<Vec<_>>();
+        let second = (2..=6).map(test_event).collect::<Vec<_>>();
+        let first_visible = diagnostic_grid_rows(&first, latest_row_selection(3, first.len()));
+        let second_visible = diagnostic_grid_rows(&second, latest_row_selection(3, second.len()));
+        let transfer = parse_row_selection("1-2", second.len()).expect("transfer range");
+        assert_eq!(
+            first_visible
+                .iter()
+                .map(|row| row.cells[1].as_str())
+                .collect::<Vec<_>>(),
+            ["3", "4", "5"]
+        );
+        assert_eq!(
+            second_visible
+                .iter()
+                .map(|row| row.cells[1].as_str())
+                .collect::<Vec<_>>(),
+            ["4", "5", "6"]
+        );
+        assert_eq!(selected_event_sequences(&second, transfer), [2, 3]);
+    }
+
+    #[test]
     fn transfer_selection_is_independent_and_can_include_hidden_retained_rows() {
         let events = (1..=10).map(test_event).collect::<Vec<_>>();
         let display = latest_row_selection(3, events.len());

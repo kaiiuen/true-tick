@@ -5523,13 +5523,19 @@ mod tests {
     fn diagnostic_toolbar_contract_uses_explicit_controls_and_tsv_events() {
         assert_ne!(ID_DIAGNOSTIC_RANGE, ID_DIAGNOSTIC_COPY);
         assert_ne!(ID_DIAGNOSTIC_COPY, ID_DIAGNOSTIC_EXPORT);
+        assert_ne!(ID_DIAGNOSTIC_DISPLAY_LIMIT, ID_DIAGNOSTIC_RANGE);
+        assert_ne!(ID_DIAGNOSTIC_SHOW_ALL, ID_DIAGNOSTIC_RANGE);
         assert_eq!(DIAGNOSTIC_RANGE_INPUT_LIMIT, 64);
+        assert_eq!(DIAGNOSTIC_TOOLBAR_HEIGHT, 72);
         let selection = RowSelection::new(12, 24);
         assert_eq!(
             diagnostic_range_details(selection, 32),
             "selected_range=12-24 retained_rows=32 row_count=13 format=TSV"
         );
         for name in [
+            "diagnostic.display_limit.changed",
+            "diagnostic.display_limit.override",
+            "diagnostic.display_limit.validation",
             "diagnostic.range.parsed",
             "diagnostic.copy.request",
             "diagnostic.copy.result",
