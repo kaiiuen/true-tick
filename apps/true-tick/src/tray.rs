@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tick_core::{DesiredIntent, DesiredIntentQueue};
-use tick_diagnostics::{format_event, truncate_utf8, DiagnosticStore, DEFAULT_MAX_EVENTS};
+use tick_diagnostics::{
+    format_event, truncate_utf8, DiagnosticOutcome, DiagnosticPhase, DiagnosticRecord,
+    DiagnosticSource, DiagnosticStore, NativeOutcome, OperationContext, DEFAULT_MAX_EVENTS,
+};
 use tick_observation_windows::{ObservationSource, WindowsObservation};
 use tick_ownership::{OwnershipState, TimerController, TimingSnapshot, Verification};
 use tick_platform_windows::{TimerObservation, WindowsTimerPlatform};
@@ -331,6 +334,15 @@ fn register_startup_target(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PublicationKey {
+    status: TrayStatus,
+    ownership: OwnershipState,
+    effective: Option<tick_core::Hns>,
+    requested: Option<tick_core::Hns>,
+    handoff: bool,
+}
+
 struct App {
     controller: TimerController<WindowsTimerPlatform>,
     observation: WindowsObservation,
@@ -354,6 +366,10 @@ struct App {
     pause_timer_id: Option<usize>,
     pause_timer_generation: Option<u64>,
     shutdown_gate: ShutdownGate,
+    operation: Option<OperationContext>,
+    operation_source: DiagnosticSource,
+    handoff_operation: Option<OperationContext>,
+    last_publication: Option<PublicationKey>,
 }
 
 pub fn run() {
@@ -510,9 +526,14 @@ pub fn run() {
             pause_timer_id: None,
             pause_timer_generation: None,
             shutdown_gate: ShutdownGate::new(),
+            operation: None,
+            operation_source: DiagnosticSource::Internal,
+            handoff_operation: None,
+            last_publication: None,
         });
         let app_ptr = Box::into_raw(app);
         let app = &mut *app_ptr;
+        app.begin_operation(DiagnosticSource::Startup);
         let class_name = wide("TrueTickTrayClass");
         let instance = GetModuleHandleW(std::ptr::null());
         if instance.is_null() {
@@ -661,6 +682,7 @@ pub fn run() {
             app.record("policy.startup_automatic", "enabled=true");
         }
         apply_power_reconciliation(app);
+        app.finish_operation(DiagnosticOutcome::Completed);
         loop {
             let message_loop_exit = run_message_loop();
             let cleanup_result = app.cleanup_normal_shutdown();
@@ -1098,6 +1120,7 @@ fn manual_stop(app: &mut App) {
 }
 
 fn pause_for_duration(app: &mut App, duration: PauseDuration) {
+    app.begin_operation(DiagnosticSource::Pause);
     app.record(
         "tray.command",
         format!("command=pause duration_minutes={}", duration.minutes()),
@@ -1138,9 +1161,13 @@ fn pause_for_duration(app: &mut App, duration: PauseDuration) {
             }
         }
     }
+    if app.handoff_operation.is_none() {
+        app.finish_operation(DiagnosticOutcome::Completed);
+    }
 }
 
 fn resume_now(app: &mut App) {
+    app.begin_operation(DiagnosticSource::Resume);
     app.record("tray.command", "command=resume");
     if app.pause.resume() {
         cancel_pause_timer(app);
@@ -1149,6 +1176,7 @@ fn resume_now(app: &mut App) {
     } else {
         app.record("pause.resume", "result=ignored reason=not_paused");
     }
+    app.finish_operation(DiagnosticOutcome::Completed);
 }
 
 fn pause_timer_id(generation: u64) -> usize {
@@ -1315,6 +1343,118 @@ fn show_ownership_status(app: &mut App, released_status: TrayStatus) {
     app.publish();
 }
 
+fn numeric_detail(details: &str, key: &str) -> Option<i64> {
+    details.split_whitespace().find_map(|field| {
+        let (field_key, value) = field.split_once('=')?;
+        (field_key == key)
+            .then(|| value.parse::<i64>().ok())
+            .flatten()
+    })
+}
+
+fn native_outcome(name: &str, details: &str) -> NativeOutcome {
+    let raw_status = numeric_detail(details, "raw_status");
+    let raw_error = numeric_detail(details, "raw_error");
+    let ntstatus = if name.contains("Nt") || name.contains("timer") {
+        raw_status.and_then(|value| i32::try_from(value).ok())
+    } else {
+        None
+    };
+    let win32_last_error = if name.contains("GetLastError")
+        || raw_error.is_some()
+        || (name.starts_with("native.") && ntstatus.is_none())
+    {
+        raw_error
+            .or_else(|| {
+                name.contains("GetLastError")
+                    .then_some(raw_status)
+                    .flatten()
+            })
+            .or_else(|| name.starts_with("native.").then_some(raw_status).flatten())
+            .and_then(|value| u32::try_from(value).ok())
+    } else {
+        None
+    };
+    NativeOutcome {
+        ntstatus,
+        win32_last_error,
+        requested_hns: numeric_detail(details, "requested_hns").map(|value| value as u64),
+        selected_hns: numeric_detail(details, "selected_hns").map(|value| value as u64),
+        effective_hns: numeric_detail(details, "effective_hns").map(|value| value as u64),
+    }
+}
+
+fn diagnostic_phase(name: &str) -> DiagnosticPhase {
+    if name.contains("handoff") {
+        DiagnosticPhase::Handoff
+    } else if name.contains("pause") {
+        DiagnosticPhase::Timer
+    } else if name.contains("shutdown") || name.contains("quit") {
+        DiagnosticPhase::Shutdown
+    } else if name.contains("policy") {
+        DiagnosticPhase::Decide
+    } else if name.contains("query") || name.contains("observation") {
+        DiagnosticPhase::Observe
+    } else if name.contains("acquire") || name.contains("request") {
+        DiagnosticPhase::Acquire
+    } else if name.contains("release") || name.contains("stop") {
+        DiagnosticPhase::Release
+    } else if name.contains("verification") {
+        DiagnosticPhase::Verify
+    } else if name.contains("config") || name.contains("startup") {
+        DiagnosticPhase::Persist
+    } else if name.contains("window") || name.contains("tray.status") {
+        DiagnosticPhase::Render
+    } else {
+        DiagnosticPhase::Complete
+    }
+}
+
+fn diagnostic_outcome(name: &str, details: &str) -> DiagnosticOutcome {
+    let value = format!("{name} {details}").to_ascii_lowercase();
+    if value.contains("timedout") || value.contains("timeout") {
+        DiagnosticOutcome::TimedOut
+    } else if value.contains("suppressed") {
+        DiagnosticOutcome::Suppressed
+    } else if value.contains("cancel") {
+        DiagnosticOutcome::Cancelled
+    } else if value.contains("unverified") || value.contains("uncertain") {
+        DiagnosticOutcome::Unverified
+    } else if value.contains("error") || value.contains("failed") {
+        DiagnosticOutcome::Failed
+    } else if value.contains("started") || value.contains("pending") {
+        DiagnosticOutcome::InProgress
+    } else {
+        DiagnosticOutcome::Completed
+    }
+}
+
+fn diagnostic_source(name: &str) -> DiagnosticSource {
+    if name.contains("power") {
+        DiagnosticSource::PowerEvent
+    } else if name.contains("startup") {
+        DiagnosticSource::Startup
+    } else if name.contains("pause") {
+        DiagnosticSource::Pause
+    } else if name.contains("resume") {
+        DiagnosticSource::Resume
+    } else if name.contains("handoff") {
+        DiagnosticSource::Handoff
+    } else if name.contains("shutdown") || name.contains("quit") {
+        DiagnosticSource::Shutdown
+    } else if name.contains("policy") {
+        DiagnosticSource::Policy
+    } else if name.contains("ownership") {
+        DiagnosticSource::Ownership
+    } else if name.starts_with("native.") || name.starts_with("timer.") {
+        DiagnosticSource::Native
+    } else if name.contains("tray.command") {
+        DiagnosticSource::TrayCommand
+    } else {
+        DiagnosticSource::Internal
+    }
+}
+
 impl App {
     fn sync_timing_snapshot(&mut self) {
         self.timing_snapshot = self.controller.snapshot();
@@ -1348,6 +1488,7 @@ impl App {
             self.record("pause.cleared", "reason=shutdown");
         }
         cancel_pause_timer(self);
+        self.begin_operation(DiagnosticSource::Shutdown);
         self.record(
             "shutdown.cleanup",
             format!(
@@ -1376,6 +1517,7 @@ impl App {
                     "shutdown.cleanup.result",
                     format!("result=verified released={released}"),
                 );
+                self.finish_operation(DiagnosticOutcome::Completed);
                 Ok(())
             }
             Err(error) => {
@@ -1386,13 +1528,59 @@ impl App {
                     "shutdown.cleanup.result",
                     format!("result=unverified error={error}"),
                 );
+                self.finish_operation(DiagnosticOutcome::Unverified);
                 Err(error)
             }
         }
     }
 
+    fn begin_operation(&mut self, source: DiagnosticSource) -> OperationContext {
+        let context = self.diagnostics.begin_operation(source);
+        self.operation = Some(context);
+        self.operation_source = source;
+        self.record("operation.begin", format!("source={source:?}"));
+        context
+    }
+
+    fn finish_operation(&mut self, outcome: DiagnosticOutcome) {
+        let Some(context) = self.operation.take() else {
+            return;
+        };
+        self.diagnostics.record_with_context(
+            DiagnosticRecord {
+                context,
+                phase: DiagnosticPhase::Complete,
+                source: self.operation_source,
+                outcome,
+                native: NativeOutcome::default(),
+            },
+            "operation.complete",
+            format!("outcome={outcome:?}"),
+        );
+        if let Some(window) = self.diagnostic_window {
+            unsafe { refresh_diagnostic_window(window, self) };
+        }
+    }
+
     fn record(&mut self, name: &str, details: impl AsRef<str>) {
-        self.diagnostics.record(name, details);
+        let details = details.as_ref();
+        let source = self
+            .operation
+            .map_or_else(|| diagnostic_source(name), |_| self.operation_source);
+        let context = self
+            .operation
+            .unwrap_or_else(|| self.diagnostics.begin_operation(source));
+        self.diagnostics.record_with_context(
+            DiagnosticRecord {
+                context,
+                phase: diagnostic_phase(name),
+                source,
+                outcome: diagnostic_outcome(name, details),
+                native: native_outcome(name, details),
+            },
+            name,
+            details,
+        );
         if let Some(window) = self.diagnostic_window {
             unsafe { refresh_diagnostic_window(window, self) };
         }
@@ -1402,6 +1590,17 @@ impl App {
         let status = self.lifecycle_status();
         self.tray_status = status;
         let timing = self.timing_values();
+        let key = PublicationKey {
+            status,
+            ownership: self.controller.ownership(),
+            effective: timing.effective,
+            requested: timing.requested,
+            handoff: timing.handoff_pending,
+        };
+        if self.last_publication == Some(key) {
+            return;
+        }
+        self.last_publication = Some(key);
         let status_text = tooltip(status, timing);
         self.record(
             "tray.status.changed",
@@ -1460,6 +1659,8 @@ fn refresh_timing_observation(app: &mut App) -> Option<TimerObservation> {
 
 fn begin_handoff(app: &mut App, boundary: tick_core::Hns, released_status: TrayStatus) -> bool {
     let tracker = HandoffTracker::new(boundary, released_status);
+    let handoff_operation = app.begin_operation(DiagnosticSource::Handoff);
+    app.handoff_operation = Some(handoff_operation);
     cancel_pause_timer(app);
     let Some(hwnd) = app.tray_icon.as_ref().map(|icon| icon.h_wnd) else {
         app.record(
@@ -1479,6 +1680,8 @@ fn begin_handoff(app: &mut App, boundary: tick_core::Hns, released_status: TrayS
         if app.pause.active() {
             arm_pause_timer(app);
         }
+        app.finish_operation(DiagnosticOutcome::TimedOut);
+        app.handoff_operation = None;
         return false;
     };
     let timer = unsafe {
@@ -1515,6 +1718,8 @@ fn begin_handoff(app: &mut App, boundary: tick_core::Hns, released_status: TrayS
         if app.pause.active() {
             arm_pause_timer(app);
         }
+        app.finish_operation(DiagnosticOutcome::TimedOut);
+        app.handoff_operation = None;
         return false;
     }
     app.handoff = Some(tracker);
@@ -1549,6 +1754,10 @@ fn finish_handoff_timer(app: &mut App) {
 }
 
 fn handle_handoff_timer(app: &mut App) {
+    if let Some(context) = app.handoff_operation {
+        app.operation = Some(context);
+        app.operation_source = DiagnosticSource::Handoff;
+    }
     let Some(tracker) = app.handoff.take() else {
         return;
     };
@@ -1624,6 +1833,8 @@ fn handle_handoff_timer(app: &mut App) {
             if app.pause.active() {
                 arm_pause_timer(app);
             }
+            app.finish_operation(DiagnosticOutcome::Completed);
+            app.handoff_operation = None;
         }
         HandoffProgress::TimedOut => {
             finish_handoff_timer(app);
@@ -1652,6 +1863,8 @@ fn handle_handoff_timer(app: &mut App) {
             if app.pause.active() {
                 arm_pause_timer(app);
             }
+            app.finish_operation(DiagnosticOutcome::TimedOut);
+            app.handoff_operation = None;
         }
     }
 }
@@ -1782,6 +1995,7 @@ unsafe extern "system" fn window_proc(
                 handle_pause_timer(app, w_param);
             }
             WM_POWERBROADCAST if w_param == PBT_APMPOWERSTATUSCHANGE => {
+                app.begin_operation(DiagnosticSource::PowerEvent);
                 app.record("power.broadcast", "event=APMPOWERSTATUSCHANGE");
                 let previous = app.observation.power().state;
                 app.record("native.GetSystemPowerStatus.call", "fields=sanitized");
@@ -1794,6 +2008,7 @@ unsafe extern "system" fn window_proc(
                     ),
                 );
                 release_for_power_change(app);
+                app.finish_operation(DiagnosticOutcome::Completed);
             }
             WM_DESTROY => PostQuitMessage(0),
             _ => {}
@@ -2219,6 +2434,7 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
         );
         return false;
     }
+    app.begin_operation(DiagnosticSource::TrayCommand);
     app.record("tray.command.id", format!("id={command}"));
     match command {
         ID_START => manual_start(app),
@@ -2345,7 +2561,11 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
         }
         _ => {}
     }
-    menu_action_keeps_open(command)
+    let keeps_open = menu_action_keeps_open(command);
+    if command != ID_QUIT {
+        app.finish_operation(DiagnosticOutcome::Completed);
+    }
+    keeps_open
 }
 
 unsafe fn open_github_page(hwnd: *mut c_void, app: &mut App) {
