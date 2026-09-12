@@ -1538,6 +1538,11 @@ impl App {
         let context = self.diagnostics.begin_operation(source);
         self.operation = Some(context);
         self.operation_source = source;
+        self.controller.set_operation_context(Some((
+            context.operation_id,
+            context.parent_operation_id,
+            context.correlation_id,
+        )));
         self.record("operation.begin", format!("source={source:?}"));
         context
     }
@@ -1557,6 +1562,7 @@ impl App {
             "operation.complete",
             format!("outcome={outcome:?}"),
         );
+        self.controller.set_operation_context(None);
         if let Some(window) = self.diagnostic_window {
             unsafe { refresh_diagnostic_window(window, self) };
         }
@@ -1570,6 +1576,13 @@ impl App {
         let context = self
             .operation
             .unwrap_or_else(|| self.diagnostics.begin_operation(source));
+        if self.operation.is_some() {
+            self.controller.set_operation_context(Some((
+                context.operation_id,
+                context.parent_operation_id,
+                context.correlation_id,
+            )));
+        }
         self.diagnostics.record_with_context(
             DiagnosticRecord {
                 context,

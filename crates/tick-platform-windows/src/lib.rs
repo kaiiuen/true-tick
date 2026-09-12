@@ -6,7 +6,10 @@
 
 use std::sync::Arc;
 use tick_core::Hns;
-use tick_diagnostics::DiagnosticStore;
+use tick_diagnostics::{
+    DiagnosticOutcome, DiagnosticPhase, DiagnosticRecord, DiagnosticSource, DiagnosticStore,
+    NativeOutcome, OperationContext,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimerBounds {
@@ -107,6 +110,8 @@ pub enum TimerError {
 }
 
 pub trait TimerPlatform {
+    fn set_operation_context(&mut self, _context: Option<(u64, Option<u64>, u64)>) {}
+
     fn query(&mut self, interval: Hns) -> Result<TimerQuery, TimerError>;
 
     fn resolve(&mut self, requested: Hns) -> Result<Hns, TimerError> {
@@ -124,6 +129,7 @@ pub struct WindowsTimerPlatform {
     #[cfg(windows)]
     requested: Option<Hns>,
     diagnostics: Option<Arc<DiagnosticStore>>,
+    operation_context: Option<(u64, Option<u64>, u64)>,
 }
 
 impl WindowsTimerPlatform {
@@ -132,17 +138,53 @@ impl WindowsTimerPlatform {
             #[cfg(windows)]
             requested: None,
             diagnostics: Some(diagnostics),
+            operation_context: None,
         }
     }
 
     fn log(&self, name: &str, details: impl AsRef<str>) {
         if let Some(diagnostics) = &self.diagnostics {
-            diagnostics.record(name, details);
+            let details = details.as_ref();
+            if let Some((operation_id, parent_operation_id, correlation_id)) =
+                self.operation_context
+            {
+                diagnostics.record_with_context(
+                    DiagnosticRecord {
+                        context: OperationContext {
+                            operation_id,
+                            parent_operation_id,
+                            correlation_id,
+                        },
+                        phase: if name.contains("release") {
+                            DiagnosticPhase::Release
+                        } else if name.contains("request") {
+                            DiagnosticPhase::Acquire
+                        } else {
+                            DiagnosticPhase::Observe
+                        },
+                        source: DiagnosticSource::Native,
+                        outcome: if name.contains("error") || name.contains("rejected") {
+                            DiagnosticOutcome::Failed
+                        } else {
+                            DiagnosticOutcome::Completed
+                        },
+                        native: native_outcome(name, details),
+                    },
+                    name,
+                    details,
+                );
+            } else {
+                diagnostics.record(name, details);
+            }
         }
     }
 }
 
 impl TimerPlatform for WindowsTimerPlatform {
+    fn set_operation_context(&mut self, context: Option<(u64, Option<u64>, u64)>) {
+        self.operation_context = context;
+    }
+
     fn query(&mut self, interval: Hns) -> Result<TimerQuery, TimerError> {
         self.log(
             "timer.query",
@@ -399,6 +441,32 @@ fn native_resolution_values(
         },
         Hns::new(current_resolution as u64),
     )
+}
+
+fn native_detail(details: &str, key: &str) -> Option<i64> {
+    details.split_whitespace().find_map(|field| {
+        let (field_key, value) = field.split_once('=')?;
+        (field_key == key)
+            .then(|| value.parse::<i64>().ok())
+            .flatten()
+    })
+}
+
+fn native_outcome(name: &str, details: &str) -> NativeOutcome {
+    let raw_status = native_detail(details, "raw_status");
+    NativeOutcome {
+        ntstatus: (name.contains("Nt") || name.contains("timer"))
+            .then_some(raw_status)
+            .flatten()
+            .and_then(|value| i32::try_from(value).ok()),
+        win32_last_error: (!name.contains("Nt") && !name.contains("timer"))
+            .then_some(raw_status)
+            .flatten()
+            .and_then(|value| u32::try_from(value).ok()),
+        requested_hns: native_detail(details, "requested_hns").map(|value| value as u64),
+        selected_hns: native_detail(details, "selected_hns").map(|value| value as u64),
+        effective_hns: native_detail(details, "effective_hns").map(|value| value as u64),
+    }
 }
 
 fn effective_relation(effective: Hns, requested: Hns) -> &'static str {

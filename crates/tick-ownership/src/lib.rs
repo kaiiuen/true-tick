@@ -112,6 +112,10 @@ pub struct TimerController<P> {
 }
 
 impl<P: TimerPlatform> TimerController<P> {
+    pub fn set_operation_context(&mut self, context: Option<(u64, Option<u64>, u64)>) {
+        self.platform.set_operation_context(context);
+    }
+
     pub fn new(platform: P, requested_interval: Hns) -> Self {
         Self {
             platform,
