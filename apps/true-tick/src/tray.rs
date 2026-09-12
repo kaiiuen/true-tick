@@ -13,6 +13,9 @@ use tick_startup_windows::{
     startup_operation, StartupOperation, StartupRegistration, WindowsUserStartup,
 };
 
+use crate::shutdown::{
+    message_loop_exit, shutdown_disposition, MessageLoopExit, ShutdownDisposition, ShutdownGate,
+};
 use crate::tray_surface::{
     dpi_to_icon_canvas, icon_pixel_color, menu_action_keeps_open, menu_command_dispatch_allowed,
     menu_command_is_enabled, menu_items, tooltip, tray_notification_opens_menu, TimingValues,
@@ -263,7 +266,7 @@ struct App {
     diagnostics: Arc<DiagnosticStore>,
     diagnostic_window: Option<*mut c_void>,
     menu_active: bool,
-    shutdown_cleanup_done: bool,
+    shutdown_gate: ShutdownGate,
 }
 
 pub fn run() {
@@ -409,7 +412,7 @@ pub fn run() {
             diagnostics,
             diagnostic_window: None,
             menu_active: false,
-            shutdown_cleanup_done: false,
+            shutdown_gate: ShutdownGate::new(),
         });
         let app_ptr = Box::into_raw(app);
         let app = &mut *app_ptr;
@@ -463,18 +466,137 @@ pub fn run() {
             reconcile(app);
         }
         app.publish();
-        let mut message = Message::default();
-        while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
+        loop {
+            let message_loop_exit = run_message_loop();
+            let cleanup_result = app.cleanup_normal_shutdown();
+            let cleanup_verified = cleanup_result.is_ok();
+            let cleanup_error = cleanup_result.err();
+            let ui_usable = !hwnd.is_null() && IsWindow(hwnd) != 0;
+            match shutdown_disposition(message_loop_exit, cleanup_verified, ui_usable) {
+                ShutdownDisposition::KeepAliveForRetry => {
+                    let error = cleanup_error.unwrap_or_else(|| "cleanup unresolved".to_owned());
+                    app.tray_status = TrayStatus::Unverified;
+                    app.record(
+                        "shutdown.retry_required",
+                        format!("reason=cleanup_unresolved error={error}"),
+                    );
+                    app.publish();
+                    show_shutdown_warning(
+                        hwnd,
+                        &format!(
+                            "True Tick could not verify timer cleanup. The app remains open so cleanup can be retried.\n\n{error}"
+                        ),
+                    );
+                }
+                ShutdownDisposition::Complete => {
+                    app.record("lifecycle.shutdown", "result=normal_cleanup_verified");
+                    break;
+                }
+                ShutdownDisposition::ExitAfterMessageLoopError => {
+                    let MessageLoopExit::GetMessageFailed { raw_error } = message_loop_exit else {
+                        unreachable!()
+                    };
+                    app.record(
+                        "lifecycle.message_loop.error",
+                        format!("native.GetMessageW raw_error={raw_error}"),
+                    );
+                    app.record(
+                        "lifecycle.shutdown",
+                        "result=message_loop_error cleanup_verified",
+                    );
+                    show_shutdown_warning(
+                        hwnd,
+                        &format!(
+                            "True Tick message handling failed and the app must exit. Native error code: {raw_error}."
+                        ),
+                    );
+                    break;
+                }
+                ShutdownDisposition::ExitWithUnresolvedCleanup => {
+                    let error = cleanup_error.unwrap_or_else(|| "cleanup unresolved".to_owned());
+                    if let MessageLoopExit::GetMessageFailed { raw_error } = message_loop_exit {
+                        app.record(
+                            "lifecycle.message_loop.error",
+                            format!("native.GetMessageW raw_error={raw_error}"),
+                        );
+                    }
+                    app.record(
+                        "lifecycle.shutdown",
+                        format!("result=exit_with_unresolved_cleanup error={error}"),
+                    );
+                    show_shutdown_warning(
+                        hwnd,
+                        &format!(
+                            "True Tick must exit before cleanup could be verified. Native cleanup state is unresolved.\n\n{error}"
+                        ),
+                    );
+                    break;
+                }
+            }
         }
-        let _ = app.cleanup_normal_shutdown();
-        if let Some(mut icon) = app.tray_icon.take() {
-            Shell_NotifyIconW(NIM_DELETE, &mut icon);
+        remove_tray_icon(app);
+        destroy_diagnostic_window(app);
+        if !hwnd.is_null() && IsWindow(hwnd) != 0 {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            DestroyWindow(hwnd);
         }
-        app.record("lifecycle.shutdown", "application_shutdown");
+        app.record(
+            "lifecycle.shutdown.resources",
+            "result=destroyed_before_app_drop",
+        );
         drop(Box::from_raw(app_ptr));
     }
+}
+
+unsafe fn run_message_loop() -> MessageLoopExit {
+    let mut message = Message::default();
+    loop {
+        let result = GetMessageW(&mut message, std::ptr::null_mut(), 0, 0);
+        if result > 0 {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+            continue;
+        }
+        let raw_error = if result < 0 { GetLastError() } else { 0 };
+        return message_loop_exit(result, raw_error)
+            .expect("GetMessageW returned an invalid result");
+    }
+}
+
+unsafe fn remove_tray_icon(app: &mut App) {
+    if let Some(mut icon) = app.tray_icon.take() {
+        let result = Shell_NotifyIconW(NIM_DELETE, &mut icon);
+        app.record(
+            "native.Shell_NotifyIconW.delete",
+            format!(
+                "result={} raw_status={}",
+                result != 0,
+                if result == 0 { GetLastError() } else { 0 }
+            ),
+        );
+    }
+}
+
+unsafe fn destroy_diagnostic_window(app: &mut App) {
+    if let Some(window) = app.diagnostic_window.take() {
+        if IsWindow(window) != 0 {
+            let result = DestroyWindow(window);
+            app.record(
+                "native.DestroyWindow.diagnostic",
+                format!(
+                    "result={} raw_status={}",
+                    result != 0,
+                    if result == 0 { GetLastError() } else { 0 }
+                ),
+            );
+        }
+    }
+}
+
+unsafe fn show_shutdown_warning(hwnd: *mut c_void, message: &str) {
+    let text = wide(message);
+    let title = wide("True Tick shutdown warning");
+    MessageBoxW(hwnd, text.as_ptr(), title.as_ptr(), MB_ICONWARNING);
 }
 
 fn reconcile(app: &mut App) {
@@ -629,13 +751,22 @@ impl App {
     }
 
     fn cleanup_normal_shutdown(&mut self) -> Result<(), String> {
-        if self.shutdown_cleanup_done {
+        if self.shutdown_gate.verified() {
             return Ok(());
         }
-        self.record("shutdown.cleanup", "attempt=guarded");
-        match guarded_release(self, "shutdown", TrayStatus::Stopped) {
+        self.record(
+            "shutdown.cleanup",
+            format!(
+                "attempt=guarded number={}",
+                self.shutdown_gate.attempts() + 1
+            ),
+        );
+        let result = guarded_release(self, "shutdown", TrayStatus::Stopped);
+        match result {
             Ok(released) => {
-                self.shutdown_cleanup_done = true;
+                self.shutdown_gate
+                    .attempt(|| Ok::<(), String>(()))
+                    .expect("cleanup gate bookkeeping cannot fail");
                 self.record(
                     "shutdown.cleanup.result",
                     format!("result=verified released={released}"),
@@ -643,6 +774,9 @@ impl App {
                 Ok(())
             }
             Err(error) => {
+                self.shutdown_gate
+                    .attempt(|| Err::<(), String>(error.clone()))
+                    .expect_err("failed cleanup must remain unresolved");
                 self.record(
                     "shutdown.cleanup.result",
                     format!("result=unverified error={error}"),
@@ -924,10 +1058,32 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
             match decision {
                 QuitDecision::ExitNormally => {
                     app.record("quit.dialog.result", "result=not_shown");
-                    app.record("quit.cleanup.result", "result=not_needed");
-                    app.record("quit.exit.allowed", "result=allowed reason=already_stopped");
-                    PostQuitMessage(0);
-                    return false;
+                    match app.cleanup_normal_shutdown() {
+                        Ok(()) => {
+                            app.record("quit.cleanup.result", "result=verified");
+                            app.record(
+                                "quit.exit.allowed",
+                                "result=allowed reason=already_stopped",
+                            );
+                            PostQuitMessage(0);
+                            return false;
+                        }
+                        Err(error) => {
+                            app.record(
+                                "quit.cleanup.result",
+                                format!("result=unverified error={error}"),
+                            );
+                            app.record("quit.blocked.uncertain_cleanup", format!("error={error}"));
+                            app.record("quit.exit.allowed", "result=denied");
+                            show_shutdown_warning(
+                                hwnd,
+                                &format!(
+                                    "Tick could not verify a safe stop. The app remains open.\n\n{error}"
+                                ),
+                            );
+                            return true;
+                        }
+                    }
                 }
                 QuitDecision::RequireSafetyDialog { reason } => {
                     app.record("quit.warning.shown", format!("reason={reason:?}"));
@@ -1668,6 +1824,7 @@ unsafe fn get_module_file_name_w_path() -> PathBuf {
 #[link(name = "kernel32")]
 extern "system" {
     fn GetModuleFileNameW(module: *mut c_void, filename: *mut u16, size: u32) -> u32;
+    fn GetLastError() -> u32;
 }
 
 #[cfg(test)]

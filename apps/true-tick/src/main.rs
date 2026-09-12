@@ -2,6 +2,7 @@
 
 mod config;
 mod portable;
+mod shutdown;
 mod tray_surface;
 
 #[cfg(windows)]
