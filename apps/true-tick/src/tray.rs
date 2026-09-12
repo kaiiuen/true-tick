@@ -1,7 +1,7 @@
 use crate::config;
 use crate::pause::{
-    acquisition_is_allowed, timer_interval_ms, PauseController, PauseDuration, PauseRequest,
-    PauseTimerEvent,
+    acquisition_is_allowed, timer_interval_ms, CoordinatorTimerEvent, DurationAction,
+    DurationChoice, DurationCoordinator, ScheduleRequest,
 };
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -25,13 +25,16 @@ use crate::shutdown::{
     message_loop_exit, shutdown_disposition, MessageLoopExit, ShutdownDisposition, ShutdownGate,
 };
 use crate::tray_surface::{
-    dpi_to_icon_canvas, icon_pixel_color, menu_action_keeps_open, menu_command_dispatch_allowed,
-    menu_command_is_enabled_with_pause, menu_description, menu_items_with_pause,
-    pause_command_duration, pause_submenu_items, power_reconciliation, release_needs_handoff,
-    tooltip, tray_notification_opens_menu, HandoffProgress, HandoffTracker, PowerReconciliation,
-    TimingValues, TrayStatus, GITHUB_COMMAND_ID, GITHUB_URL, HANDOFF_POLL_INTERVAL_MS,
-    LOGS_COMMAND_ID, PAUSE_15_COMMAND_ID, PAUSE_30_COMMAND_ID, PAUSE_5_COMMAND_ID,
-    PAUSE_60_COMMAND_ID, RESUME_COMMAND_ID,
+    dpi_to_icon_canvas, duration_choices, duration_command, duration_menu_items, icon_pixel_color,
+    menu_action_keeps_open, menu_command_dispatch_allowed, menu_command_is_enabled_with_pause,
+    menu_description, menu_items_with_duration, power_reconciliation, release_needs_handoff,
+    status_menu_items, tooltip, tray_notification_opens_menu, HandoffProgress, HandoffTracker,
+    PowerReconciliation, TimingValues, TrayStatus, CANCEL_SCHEDULED_COMMAND_ID, GITHUB_COMMAND_ID,
+    GITHUB_URL, HANDOFF_POLL_INTERVAL_MS, LOGS_COMMAND_ID, PAUSE_FOR_15_COMMAND_ID,
+    PAUSE_FOR_30_COMMAND_ID, PAUSE_FOR_5_COMMAND_ID, PAUSE_FOR_60_COMMAND_ID,
+    START_IN_15_COMMAND_ID, START_IN_1_COMMAND_ID, START_IN_30_COMMAND_ID, START_IN_5_COMMAND_ID,
+    START_IN_60_COMMAND_ID, STOP_IN_15_COMMAND_ID, STOP_IN_1_COMMAND_ID, STOP_IN_30_COMMAND_ID,
+    STOP_IN_5_COMMAND_ID, STOP_IN_60_COMMAND_ID,
 };
 
 const WM_APP: u32 = 0x8000;
@@ -44,7 +47,7 @@ const WM_TIMER: u32 = 0x0113;
 const WM_MENUSELECT: u32 = 0x011F;
 const PBT_APMPOWERSTATUSCHANGE: usize = 0x000A;
 const HANDOFF_TIMER_ID: usize = 0x5449;
-const PAUSE_TIMER_ID_BASE: usize = 0x6000;
+const DURATION_TIMER_ID_BASE: usize = 0x6000;
 const ID_START: usize = 1001;
 const ID_STOP: usize = 1002;
 const ID_QUIT: usize = 1004;
@@ -87,6 +90,7 @@ const MF_STRING: u32 = 0x0000;
 const MF_SEPARATOR: u32 = 0x0800;
 const MF_GRAYED: u32 = 0x0001;
 const MF_POPUP: u32 = 0x0010;
+const MF_BYPOSITION: u32 = 0x0400;
 
 const NIF_MESSAGE: u32 = 0x0001;
 const NIF_ICON: u32 = 0x0002;
@@ -353,6 +357,7 @@ struct App {
     startup_status: String,
     tray_icon: Option<NotifyIconData>,
     timing_snapshot: TimingSnapshot,
+    timing_snapshot_valid: bool,
     invalid_interval: bool,
     external_timing: bool,
     desired_intent: DesiredIntentQueue,
@@ -362,9 +367,11 @@ struct App {
     handoff: Option<HandoffTracker>,
     menu_help: Option<*mut c_void>,
     menu_help_text: Vec<u16>,
-    pause: PauseController,
-    pause_timer_id: Option<usize>,
-    pause_timer_generation: Option<u64>,
+    pause: DurationCoordinator,
+    duration_timer_id: Option<usize>,
+    duration_timer_generation: Option<u64>,
+    scheduled_operation: Option<OperationContext>,
+    running_since: Option<std::time::Instant>,
     shutdown_gate: ShutdownGate,
     operation: Option<OperationContext>,
     operation_source: DiagnosticSource,
@@ -513,6 +520,7 @@ pub fn run() {
             startup_status,
             tray_icon: None,
             timing_snapshot: TimingSnapshot::default(),
+            timing_snapshot_valid: false,
             invalid_interval: false,
             external_timing: false,
             desired_intent: DesiredIntentQueue::new(),
@@ -522,9 +530,11 @@ pub fn run() {
             handoff: None,
             menu_help: None,
             menu_help_text: Vec::new(),
-            pause: PauseController::new(),
-            pause_timer_id: None,
-            pause_timer_generation: None,
+            pause: DurationCoordinator::new(),
+            duration_timer_id: None,
+            duration_timer_generation: None,
+            scheduled_operation: None,
+            running_since: None,
             shutdown_gate: ShutdownGate::new(),
             operation: None,
             operation_source: DiagnosticSource::Internal,
@@ -858,12 +868,42 @@ fn apply_policy(app: &mut App) {
             decision.status, decision.reason
         ),
     );
-    let intent = if app.pause.active() {
+    let intent = if app.pause.pause_active() {
         app.record(
             "policy.pause_suppressed",
             format!("requested_status={:?} reason=pause_active", decision.status),
         );
         DesiredIntent::Release
+    } else if let Some(scheduled) = app.pause.current() {
+        match scheduled.action {
+            DurationAction::Start | DurationAction::Stop
+                if decision.status != tick_core::Status::Requested =>
+            {
+                app.record(
+                    "policy.duration.suppressed",
+                    format!(
+                        "action={} reason={:?} result=release_safe timing_snapshot={}",
+                        scheduled.action.label(),
+                        decision.reason,
+                        app.timing_snapshot_details()
+                    ),
+                );
+                return release_for_policy(app, decision.reason);
+            }
+            DurationAction::Start | DurationAction::Stop => {
+                app.record(
+                    "policy.duration.deferred",
+                    format!(
+                        "action={} reason=scheduled_action deadline_remaining_ms={}",
+                        scheduled.action.label(),
+                        scheduled.remaining(std::time::Instant::now()).as_millis()
+                    ),
+                );
+                show_ownership_status(app, TrayStatus::Stopped);
+                return;
+            }
+            DurationAction::Pause => DesiredIntent::Release,
+        }
     } else if acquisition_is_allowed(false, app.config.automatic, power) {
         DesiredIntent::Acquire
     } else {
@@ -885,7 +925,7 @@ fn queue_intent(app: &mut App, intent: DesiredIntent, source: impl AsRef<str>) {
         format!("intent={intent:?} source={}", source.as_ref()),
     );
     if app.handoff.is_some() {
-        app.tray_status = if app.pause.active() {
+        app.tray_status = if app.pause.pause_active() {
             TrayStatus::Pausing
         } else {
             TrayStatus::Stopping
@@ -898,7 +938,7 @@ fn queue_intent(app: &mut App, intent: DesiredIntent, source: impl AsRef<str>) {
 
 fn process_desired_intent(app: &mut App) {
     if app.handoff.is_some() {
-        app.tray_status = if app.pause.active() {
+        app.tray_status = if app.pause.pause_active() {
             TrayStatus::Pausing
         } else {
             TrayStatus::Stopping
@@ -911,7 +951,7 @@ fn process_desired_intent(app: &mut App) {
     };
     match intent {
         DesiredIntent::Acquire => {
-            if app.pause.active() {
+            if app.pause.pause_active() {
                 app.record(
                     "lifecycle.acquire.suppressed",
                     "reason=pause_active result=suppressed",
@@ -919,7 +959,7 @@ fn process_desired_intent(app: &mut App) {
                 if app.controller.ownership() == OwnershipState::Released {
                     app.tray_status = TrayStatus::Paused;
                     app.publish();
-                    arm_pause_timer(app);
+                    arm_duration_timer(app);
                 }
                 return;
             }
@@ -949,22 +989,22 @@ fn process_desired_intent(app: &mut App) {
                 let _ = guarded_release(
                     app,
                     "desired intent",
-                    if app.pause.active() {
+                    if app.pause.pause_active() {
                         TrayStatus::Paused
                     } else {
                         TrayStatus::Stopped
                     },
                 );
             } else {
-                app.tray_status = if app.pause.active() && app.tray_status != TrayStatus::Unverified
-                {
-                    TrayStatus::Paused
-                } else {
-                    TrayStatus::Stopped
-                };
+                app.tray_status =
+                    if app.pause.pause_active() && app.tray_status != TrayStatus::Unverified {
+                        TrayStatus::Paused
+                    } else {
+                        TrayStatus::Stopped
+                    };
                 app.publish();
-                if app.pause.active() {
-                    arm_pause_timer(app);
+                if app.pause.pause_active() {
+                    arm_duration_timer(app);
                 }
             }
         }
@@ -981,6 +1021,10 @@ fn acquire_timer(app: &mut App) {
     app.record("ownership.acquire.request", "source=desired_intent");
     let start_result = app.controller.start();
     app.sync_timing_snapshot();
+    app.timing_snapshot_valid = matches!(
+        start_result,
+        Ok(Verification::Verified | Verification::FinerThanRequested)
+    );
     app.invalid_interval = matches!(
         start_result,
         Err(tick_platform_windows::TimerError::InvalidInterval)
@@ -1003,6 +1047,11 @@ fn acquire_timer(app: &mut App) {
             }
         }
     };
+    if status == TrayStatus::Running {
+        app.running_since = Some(std::time::Instant::now());
+    } else {
+        app.running_since = None;
+    }
     app.tray_status = status;
     app.publish();
     if app.desired_intent.pending().is_some() {
@@ -1055,7 +1104,8 @@ fn guarded_release(
         format!("source={}", source.as_ref()),
     );
     app.external_timing = false;
-    app.tray_status = if app.pause.active() {
+    app.running_since = None;
+    app.tray_status = if app.pause.pause_active() {
         TrayStatus::Pausing
     } else {
         TrayStatus::Stopping
@@ -1063,6 +1113,7 @@ fn guarded_release(
     app.publish();
     let stop_result = app.controller.stop();
     app.sync_timing_snapshot();
+    app.timing_snapshot_valid = stop_result.is_ok();
     match stop_result {
         Ok(released) => {
             app.record(
@@ -1076,7 +1127,7 @@ fn guarded_release(
                 if begin_handoff(
                     app,
                     boundary,
-                    if app.pause.active() {
+                    if app.pause.pause_active() {
                         TrayStatus::Paused
                     } else {
                         TrayStatus::Stopped
@@ -1091,14 +1142,17 @@ fn guarded_release(
             );
             app.controller.clear_release_boundary();
             app.sync_timing_snapshot();
+            app.timing_snapshot_valid = true;
             app.tray_status = released_status;
             app.publish();
-            if app.pause.active() {
-                arm_pause_timer(app);
+            if app.pause.pause_active() {
+                arm_duration_timer(app);
             }
             Ok(released)
         }
         Err(error) => {
+            app.timing_snapshot_valid = false;
+            app.running_since = None;
             app.record("ownership.release.error", format!("error={error:?}"));
             app.tray_status = TrayStatus::Unverified;
             app.publish();
@@ -1119,80 +1173,130 @@ fn manual_stop(app: &mut App) {
     queue_intent(app, DesiredIntent::Release, "manual");
 }
 
-fn pause_for_duration(app: &mut App, duration: PauseDuration) {
-    app.begin_operation(DiagnosticSource::Pause);
+fn schedule_duration_action(app: &mut App, action: DurationAction, duration: DurationChoice) {
+    let now = std::time::Instant::now();
+    let replacing_pause = app.pause.pause_active();
+    if let Some(previous) = app.pause.current() {
+        app.record(
+            "duration.schedule.replacement",
+            format!(
+                "previous_action={} previous_duration_minutes={} previous_remaining_ms={} result=replacing",
+                previous.action.label(),
+                previous.duration.minutes(),
+                previous.remaining(now).as_millis()
+            ),
+        );
+        app.record(
+            "duration.schedule.replacement.timing",
+            app.timing_snapshot_details(),
+        );
+    }
+    cancel_duration_timer(app);
+    let request = app.pause.schedule(action, duration, now);
+    let current = match request {
+        ScheduleRequest::Started(current) => current,
+        ScheduleRequest::Replaced { current, .. } => current,
+    };
+    app.scheduled_operation = app.operation;
     app.record(
-        "tray.command",
-        format!("command=pause duration_minutes={}", duration.minutes()),
+        "duration.schedule",
+        format!(
+            "action={} duration_minutes={} generation={} deadline_monotonic_ms={} remaining_ms={}",
+            action.label(),
+            duration.minutes(),
+            current.generation,
+            duration.duration().as_millis(),
+            current.remaining(now).as_millis()
+        ),
     );
-    match app.pause.request(duration, std::time::Instant::now()) {
-        PauseRequest::Repeated {
-            generation,
-            deadline,
-        } => {
-            app.record(
-                "pause.request",
-                format!(
-                    "result=ignored reason=already_paused generation={generation} remaining_ms={}",
-                    deadline
-                        .saturating_duration_since(std::time::Instant::now())
-                        .as_millis()
-                ),
-            );
-        }
-        PauseRequest::Started {
-            generation,
-            deadline,
-        } => {
-            app.record(
-                "pause.request",
-                format!(
-                    "result=started duration_minutes={} generation={generation} deadline_monotonic_ms={}",
-                    duration.minutes(),
-                    deadline
-                        .saturating_duration_since(std::time::Instant::now())
-                        .as_millis()
-                ),
-            );
-            app.tray_status = TrayStatus::Pausing;
-            app.publish();
-            if arm_pause_timer(app) {
-                queue_intent(app, DesiredIntent::Release, "pause");
-            }
-        }
+    app.record("duration.schedule.timing", app.timing_snapshot_details());
+    app.record(
+        "duration.schedule.policy",
+        "policy_result=deferred safety_recheck=deadline",
+    );
+    if !arm_duration_timer(app) {
+        let _ = app.pause.cancel();
+        app.scheduled_operation = None;
+        app.record(
+            "duration.schedule.result",
+            "outcome=failed reason=coordinator_timer_unavailable",
+        );
+        app.tray_status = TrayStatus::Error;
+        app.publish();
+        return;
     }
-    if app.handoff_operation.is_none() {
-        app.finish_operation(DiagnosticOutcome::Completed);
+    app.record(
+        "duration.schedule.result",
+        format!(
+            "outcome=scheduled action={} duration_minutes={} generation={} remaining_ms={}",
+            action.label(),
+            duration.minutes(),
+            current.generation,
+            current.remaining(std::time::Instant::now()).as_millis()
+        ),
+    );
+    if replacing_pause && action != DurationAction::Pause {
+        show_ownership_status(app, TrayStatus::Stopped);
+    }
+    if action == DurationAction::Pause {
+        app.tray_status = TrayStatus::Pausing;
+        app.publish();
+        queue_intent(app, DesiredIntent::Release, "duration pause");
     }
 }
 
-fn resume_now(app: &mut App) {
-    app.begin_operation(DiagnosticSource::Resume);
-    app.record("tray.command", "command=resume");
-    if app.pause.resume() {
-        cancel_pause_timer(app);
-        app.record("pause.resume", "result=cleared source=tray");
-        reconcile(app);
-    } else {
-        app.record("pause.resume", "result=ignored reason=not_paused");
-    }
-    app.finish_operation(DiagnosticOutcome::Completed);
-}
-
-fn pause_timer_id(generation: u64) -> usize {
-    PAUSE_TIMER_ID_BASE.saturating_add(generation as usize)
-}
-
-fn cancel_pause_timer(app: &mut App) {
-    let Some(timer_id) = app.pause_timer_id.take() else {
-        app.pause_timer_generation = None;
+fn cancel_scheduled_action(app: &mut App) {
+    let now = std::time::Instant::now();
+    let Some(previous) = app.pause.current() else {
+        app.record(
+            "duration.cancel",
+            "outcome=noop reason=no_scheduled_action remaining_ms=0",
+        );
         return;
     };
-    app.pause_timer_generation = None;
+    app.record(
+        "duration.cancel.request",
+        format!(
+            "action={} duration_minutes={} generation={} remaining_ms={}",
+            previous.action.label(),
+            previous.duration.minutes(),
+            previous.generation,
+            previous.remaining(now).as_millis()
+        ),
+    );
+    app.record("duration.cancel.timing", app.timing_snapshot_details());
+    cancel_duration_timer(app);
+    let cancelled = app.pause.cancel().expect("scheduled action was checked");
+    app.scheduled_operation = None;
+    app.record(
+        "duration.cancel",
+        format!(
+            "outcome=cancelled action={} duration_minutes={} generation={} remaining_ms=0",
+            cancelled.action.label(),
+            cancelled.duration.minutes(),
+            cancelled.generation
+        ),
+    );
+    if cancelled.action == DurationAction::Pause {
+        refresh_power_for_duration(app, "cancel");
+        reconcile(app);
+    }
+}
+
+fn duration_timer_id(generation: u64) -> usize {
+    DURATION_TIMER_ID_BASE.saturating_add(generation as usize)
+}
+
+fn cancel_duration_timer(app: &mut App) {
+    let Some(timer_id) = app.duration_timer_id.take() else {
+        app.duration_timer_generation = None;
+        return;
+    };
+    app.duration_timer_generation = None;
     if let Some(hwnd) = app.tray_icon.as_ref().map(|icon| icon.h_wnd) {
         if unsafe { KillTimer(hwnd, timer_id) } == 0 {
             app.record(
-                "native.KillTimer.pause.error",
+                "native.KillTimer.duration.error",
                 format!("timer_id={timer_id} raw_status={}", unsafe {
                     GetLastError()
                 }),
@@ -1201,22 +1305,19 @@ fn cancel_pause_timer(app: &mut App) {
     }
 }
 
-fn arm_pause_timer(app: &mut App) -> bool {
+fn arm_duration_timer(app: &mut App) -> bool {
     let Some(deadline) = app.pause.deadline() else {
         return false;
     };
     let Some(hwnd) = app.tray_icon.as_ref().map(|icon| icon.h_wnd) else {
         app.record(
-            "pause.timer",
-            "result=unavailable reason=tray_window_missing",
+            "duration.timer",
+            "outcome=unavailable reason=tray_window_missing",
         );
         return false;
     };
     let generation = app.pause.generation();
-    let timer_id = pause_timer_id(generation);
-    if app.pause_timer_id != Some(timer_id) {
-        cancel_pause_timer(app);
-    }
+    let timer_id = duration_timer_id(generation);
     let remaining = deadline.saturating_duration_since(std::time::Instant::now());
     let result = unsafe {
         SetTimer(
@@ -1228,59 +1329,185 @@ fn arm_pause_timer(app: &mut App) -> bool {
     };
     if result == 0 {
         app.record(
-            "native.SetTimer.pause.error",
+            "native.SetTimer.duration.error",
             format!("generation={generation} raw_status={}", unsafe {
                 GetLastError()
             }),
         );
-        app.pause.resume();
-        app.pause_timer_id = None;
-        app.pause_timer_generation = None;
+        let _ = app.pause.cancel();
+        app.duration_timer_id = None;
+        app.duration_timer_generation = None;
         app.tray_status = TrayStatus::Error;
         app.publish();
         return false;
     }
-    app.pause_timer_id = Some(timer_id);
-    app.pause_timer_generation = Some(generation);
+    app.duration_timer_id = Some(timer_id);
+    app.duration_timer_generation = Some(generation);
+    app.record(
+        "duration.timer.armed",
+        format!(
+            "generation={generation} remaining_ms={} interval_ms={}",
+            remaining.as_millis(),
+            timer_interval_ms(remaining)
+        ),
+    );
     true
 }
 
-fn handle_pause_timer(app: &mut App, timer_id: usize) {
-    if app.pause_timer_id != Some(timer_id) {
+fn execute_scheduled_action(app: &mut App, action: crate::pause::ScheduledAction) {
+    if let Some(parent) = app.scheduled_operation.take() {
+        app.begin_child_operation(parent, DiagnosticSource::Timer);
+    } else {
+        app.begin_operation(DiagnosticSource::Timer);
+    }
+    app.record(
+        "duration.deadline",
+        format!(
+            "action={} duration_minutes={} generation={} remaining_ms=0",
+            action.action.label(),
+            action.duration.minutes(),
+            action.generation
+        ),
+    );
+    app.record("duration.deadline.timing", app.timing_snapshot_details());
+    match action.action {
+        DurationAction::Start => {
+            refresh_power_for_duration(app, "start_deadline");
+            let power = app.observation.power().state;
+            let decision = decide(PolicyInput {
+                enabled: true,
+                eligible_profile: true,
+                power,
+            });
+            app.record(
+                "duration.start.policy",
+                format!(
+                    "power={power:?} result={:?} reason={:?} selected_duration_minutes={} deadline_remaining_ms=0",
+                    decision.status,
+                    decision.reason,
+                    action.duration.minutes()
+                ),
+            );
+            app.record(
+                "duration.start.policy.timing",
+                app.timing_snapshot_details(),
+            );
+            if decision.status == tick_core::Status::Requested {
+                if app.controller.ownership() == OwnershipState::Released {
+                    app.record(
+                        "duration.start.result",
+                        "outcome=acquire_intent_queued policy_result=allowed",
+                    );
+                    queue_intent(app, DesiredIntent::Acquire, "duration start deadline");
+                } else {
+                    app.record(
+                        "duration.start.result",
+                        format!(
+                            "outcome=noop reason=ownership_{:?} policy_result=allowed",
+                            app.controller.ownership()
+                        ),
+                    );
+                    show_ownership_status(app, TrayStatus::Stopped);
+                }
+            } else {
+                app.record(
+                    "duration.start.suppressed",
+                    format!(
+                        "outcome=suppressed reason={:?} policy_result=blocked",
+                        decision.reason
+                    ),
+                );
+                app.record(
+                    "duration.start.suppressed.timing",
+                    app.timing_snapshot_details(),
+                );
+                release_for_policy(app, decision.reason);
+            }
+        }
+        DurationAction::Stop => {
+            if app.controller.ownership() == OwnershipState::Released {
+                app.record(
+                    "duration.stop.result",
+                    "outcome=noop reason=already_released policy_result=not_needed remaining_ms=0",
+                );
+                show_ownership_status(app, TrayStatus::Stopped);
+            } else {
+                let result = guarded_release(app, "duration stop deadline", TrayStatus::Stopped);
+                app.record(
+                    "duration.stop.result",
+                    format!("outcome={:?} remaining_ms=0", result),
+                );
+            }
+            app.record("duration.stop.timing", app.timing_snapshot_details());
+        }
+        DurationAction::Pause => {
+            app.record(
+                "duration.pause.expired",
+                format!(
+                    "outcome=resume_and_reconcile duration_minutes={} remaining_ms=0",
+                    action.duration.minutes()
+                ),
+            );
+            refresh_power_for_duration(app, "pause_expiry");
+            reconcile(app);
+        }
+    }
+    if app.handoff_operation.is_none() {
+        app.finish_operation(DiagnosticOutcome::Completed);
+    }
+}
+
+fn handle_duration_timer(app: &mut App, timer_id: usize) {
+    if app.duration_timer_id != Some(timer_id) {
         app.record(
-            "pause.timer",
-            format!("result=ignored reason=stale_timer timer_id={timer_id}"),
+            "duration.timer",
+            format!("outcome=ignored reason=stale_timer timer_id={timer_id}"),
         );
         return;
     }
-    let generation = app.pause_timer_generation.unwrap_or_default();
+    let generation = app.duration_timer_generation.unwrap_or_default();
     match app.pause.timer_event(generation, std::time::Instant::now()) {
-        PauseTimerEvent::Early { remaining, .. } => {
+        CoordinatorTimerEvent::Early {
+            remaining, action, ..
+        } => {
             app.record(
-                "pause.timer",
+                "duration.timer",
                 format!(
-                    "result=early generation={generation} remaining_ms={}",
+                    "outcome=early action={} generation={generation} remaining_ms={}",
+                    action.label(),
                     remaining.as_millis()
                 ),
             );
-            arm_pause_timer(app);
+            arm_duration_timer(app);
         }
-        PauseTimerEvent::Expired { .. } => {
-            cancel_pause_timer(app);
-            app.pause.resume();
-            app.record(
-                "pause.timeout",
-                format!("result=expired generation={generation}"),
-            );
-            reconcile(app);
+        CoordinatorTimerEvent::Expired(action) => {
+            cancel_duration_timer(app);
+            let _ = app.pause.cancel();
+            execute_scheduled_action(app, action);
         }
-        PauseTimerEvent::Stale => {
+        CoordinatorTimerEvent::Stale => {
             app.record(
-                "pause.timer",
-                format!("result=ignored reason=stale_generation generation={generation}"),
+                "duration.timer",
+                format!("outcome=ignored reason=stale_generation generation={generation}"),
             );
         }
     }
+}
+
+fn refresh_power_for_duration(app: &mut App, source: &str) {
+    let previous = app.observation.power().state;
+    app.record(
+        "native.GetSystemPowerStatus.call",
+        format!("source={source} fields=sanitized"),
+    );
+    let result = app.observation.refresh_power();
+    app.record(
+        "duration.power_observation",
+        format!(
+            "source={source} previous={previous:?} result={result:?} current={:?} policy=authoritative",
+            app.observation.power().state
+        ),
+    );
 }
 
 fn release_for_power_change(app: &mut App) {
@@ -1293,7 +1520,7 @@ fn release_for_power_change(app: &mut App) {
 }
 
 fn apply_power_reconciliation(app: &mut App) {
-    if app.pause.active() {
+    if app.pause.pause_active() {
         app.record(
             "policy.power_reconciliation.suppressed",
             "reason=pause_active result=release_only",
@@ -1326,7 +1553,7 @@ fn apply_power_reconciliation(app: &mut App) {
 
 fn show_ownership_status(app: &mut App, released_status: TrayStatus) {
     if app.handoff.is_some() {
-        app.tray_status = if app.pause.active() {
+        app.tray_status = if app.pause.pause_active() {
             TrayStatus::Pausing
         } else {
             TrayStatus::Stopping
@@ -1335,7 +1562,7 @@ fn show_ownership_status(app: &mut App, released_status: TrayStatus) {
         return;
     }
     app.tray_status = match app.controller.ownership() {
-        OwnershipState::Released if app.pause.active() => TrayStatus::Paused,
+        OwnershipState::Released if app.pause.pause_active() => TrayStatus::Paused,
         OwnershipState::Released => released_status,
         OwnershipState::Owned => TrayStatus::Running,
         OwnershipState::Uncertain => TrayStatus::Unverified,
@@ -1387,12 +1614,12 @@ fn native_outcome(name: &str, details: &str) -> NativeOutcome {
 fn diagnostic_phase(name: &str) -> DiagnosticPhase {
     if name.contains("handoff") {
         DiagnosticPhase::Handoff
-    } else if name.contains("pause") {
+    } else if name.contains("policy") {
+        DiagnosticPhase::Decide
+    } else if name.contains("duration") || name.contains("pause") {
         DiagnosticPhase::Timer
     } else if name.contains("shutdown") || name.contains("quit") {
         DiagnosticPhase::Shutdown
-    } else if name.contains("policy") {
-        DiagnosticPhase::Decide
     } else if name.contains("query") || name.contains("observation") {
         DiagnosticPhase::Observe
     } else if name.contains("acquire") || name.contains("request") {
@@ -1440,6 +1667,8 @@ fn diagnostic_source(name: &str) -> DiagnosticSource {
         DiagnosticSource::Resume
     } else if name.contains("handoff") {
         DiagnosticSource::Handoff
+    } else if name.contains("duration") {
+        DiagnosticSource::Timer
     } else if name.contains("shutdown") || name.contains("quit") {
         DiagnosticSource::Shutdown
     } else if name.contains("policy") {
@@ -1460,6 +1689,61 @@ impl App {
         self.timing_snapshot = self.controller.snapshot();
     }
 
+    fn timing_snapshot_details(&self) -> String {
+        format!(
+            "valid={} requested_hns={} selected_hns={} effective_hns={} minimum_hns={} maximum_hns={} raw_status={}",
+            self.timing_snapshot_valid,
+            self.timing_snapshot
+                .requested
+                .map_or_else(|| "unknown".to_owned(), |value| value.value().to_string()),
+            self.timing_snapshot
+                .selected
+                .map_or_else(|| "unknown".to_owned(), |value| value.value().to_string()),
+            self.timing_snapshot
+                .effective
+                .map_or_else(|| "unknown".to_owned(), |value| value.value().to_string()),
+            self.timing_snapshot
+                .minimum_interval
+                .map_or_else(|| "unknown".to_owned(), |value| value.value().to_string()),
+            self.timing_snapshot
+                .maximum_interval
+                .map_or_else(|| "unknown".to_owned(), |value| value.value().to_string()),
+            self.timing_snapshot
+                .raw_status
+                .map_or_else(|| "unknown".to_owned(), |value| value.to_string()),
+        )
+    }
+
+    fn running_duration(&self) -> Option<std::time::Duration> {
+        (self.lifecycle_status() == TrayStatus::Running
+            && self.controller.ownership() == OwnershipState::Owned)
+            .then(|| self.running_since.map(|since| since.elapsed()))
+            .flatten()
+    }
+
+    fn begin_child_operation(
+        &mut self,
+        parent: OperationContext,
+        source: DiagnosticSource,
+    ) -> OperationContext {
+        let context = self.diagnostics.child_operation(parent, source);
+        self.operation = Some(context);
+        self.operation_source = source;
+        self.controller.set_operation_context(Some((
+            context.operation_id,
+            context.parent_operation_id,
+            context.correlation_id,
+        )));
+        self.record(
+            "operation.begin",
+            format!(
+                "source={source:?} parent_operation_id={:?}",
+                context.parent_operation_id
+            ),
+        );
+        context
+    }
+
     fn lifecycle_status(&self) -> TrayStatus {
         crate::tray_surface::lifecycle_status(self.tray_status, self.handoff.is_some())
     }
@@ -1476,6 +1760,7 @@ impl App {
             self.handoff.is_some(),
             external,
             self.invalid_interval,
+            self.timing_snapshot_valid,
         )
     }
 
@@ -1483,11 +1768,19 @@ impl App {
         if self.shutdown_gate.verified() {
             return Ok(());
         }
-        if self.pause.active() {
-            self.pause.resume();
-            self.record("pause.cleared", "reason=shutdown");
+        if let Some(scheduled) = self.pause.cancel() {
+            self.record(
+                "duration.cleared",
+                format!(
+                    "reason=shutdown action={} duration_minutes={} generation={}",
+                    scheduled.action.label(),
+                    scheduled.duration.minutes(),
+                    scheduled.generation
+                ),
+            );
         }
-        cancel_pause_timer(self);
+        cancel_duration_timer(self);
+        self.scheduled_operation = None;
         self.begin_operation(DiagnosticSource::Shutdown);
         self.record(
             "shutdown.cleanup",
@@ -1601,6 +1894,9 @@ impl App {
 
     fn publish(&mut self) {
         let status = self.lifecycle_status();
+        if status != TrayStatus::Running || self.controller.ownership() != OwnershipState::Owned {
+            self.running_since = None;
+        }
         self.tray_status = status;
         let timing = self.timing_values();
         let key = PublicationKey {
@@ -1647,6 +1943,7 @@ fn refresh_timing_observation(app: &mut App) -> Option<TimerObservation> {
     match app.controller.query() {
         Ok(observation) => {
             app.sync_timing_snapshot();
+            app.timing_snapshot_valid = true;
             app.record(
                 "timer.query.observation",
                 format!(
@@ -1661,6 +1958,7 @@ fn refresh_timing_observation(app: &mut App) -> Option<TimerObservation> {
         }
         Err(error) => {
             app.sync_timing_snapshot();
+            app.timing_snapshot_valid = false;
             app.record(
                 "timer.query.error",
                 format!("error={error:?} effective=unknown"),
@@ -1674,7 +1972,7 @@ fn begin_handoff(app: &mut App, boundary: tick_core::Hns, released_status: TrayS
     let tracker = HandoffTracker::new(boundary, released_status);
     let handoff_operation = app.begin_operation(DiagnosticSource::Handoff);
     app.handoff_operation = Some(handoff_operation);
-    cancel_pause_timer(app);
+    cancel_duration_timer(app);
     let Some(hwnd) = app.tray_icon.as_ref().map(|icon| icon.h_wnd) else {
         app.record(
             "handoff.timeout",
@@ -1690,8 +1988,8 @@ fn begin_handoff(app: &mut App, boundary: tick_core::Hns, released_status: TrayS
         };
         app.publish();
         process_desired_intent(app);
-        if app.pause.active() {
-            arm_pause_timer(app);
+        if app.pause.pause_active() {
+            arm_duration_timer(app);
         }
         app.finish_operation(DiagnosticOutcome::TimedOut);
         app.handoff_operation = None;
@@ -1728,8 +2026,8 @@ fn begin_handoff(app: &mut App, boundary: tick_core::Hns, released_status: TrayS
         };
         app.publish();
         process_desired_intent(app);
-        if app.pause.active() {
-            arm_pause_timer(app);
+        if app.pause.pause_active() {
+            arm_duration_timer(app);
         }
         app.finish_operation(DiagnosticOutcome::TimedOut);
         app.handoff_operation = None;
@@ -1779,6 +2077,7 @@ fn handle_handoff_timer(app: &mut App) {
     let observation = match app.controller.observe_current(boundary) {
         Ok(observation) => {
             app.sync_timing_snapshot();
+            app.timing_snapshot_valid = true;
             app.record(
                 "timer.handoff.observation",
                 format!(
@@ -1793,6 +2092,7 @@ fn handle_handoff_timer(app: &mut App) {
         }
         Err(error) => {
             app.sync_timing_snapshot();
+            app.timing_snapshot_valid = false;
             app.record(
                 "timer.handoff.query.error",
                 format!("error={error:?} effective=unknown"),
@@ -1843,8 +2143,8 @@ fn handle_handoff_timer(app: &mut App) {
             app.external_timing = false;
             app.publish();
             process_desired_intent(app);
-            if app.pause.active() {
-                arm_pause_timer(app);
+            if app.pause.pause_active() {
+                arm_duration_timer(app);
             }
             app.finish_operation(DiagnosticOutcome::Completed);
             app.handoff_operation = None;
@@ -1873,8 +2173,8 @@ fn handle_handoff_timer(app: &mut App) {
             app.external_timing = true;
             app.publish();
             process_desired_intent(app);
-            if app.pause.active() {
-                arm_pause_timer(app);
+            if app.pause.pause_active() {
+                arm_duration_timer(app);
             }
             app.finish_operation(DiagnosticOutcome::TimedOut);
             app.handoff_operation = None;
@@ -1999,13 +2299,18 @@ unsafe extern "system" fn window_proc(
                 handle_menu_command(hwnd, app, w_param & 0xffff);
             }
             WM_MENUSELECT => {
-                update_menu_help(app, w_param & 0xffff);
+                update_menu_help(
+                    app,
+                    w_param & 0xffff,
+                    (w_param >> 16) as u32,
+                    l_param as *mut c_void,
+                );
             }
             WM_TIMER if w_param == HANDOFF_TIMER_ID => {
                 handle_handoff_timer(app);
             }
-            WM_TIMER if app.pause_timer_id == Some(w_param) => {
-                handle_pause_timer(app, w_param);
+            WM_TIMER if app.duration_timer_id == Some(w_param) => {
+                handle_duration_timer(app, w_param);
             }
             WM_POWERBROADCAST if w_param == PBT_APMPOWERSTATUSCHANGE => {
                 app.begin_operation(DiagnosticSource::PowerEvent);
@@ -2053,12 +2358,12 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
             );
             break;
         }
-        let items = menu_items_with_pause(
+        let items = menu_items_with_duration(
             app.lifecycle_status(),
             app.config.startup_enabled,
             app.config.automatic,
             app.timing_values(),
-            app.pause.active(),
+            app.pause.pause_active(),
         );
         let header_flags = if items[0].enabled {
             MF_STRING
@@ -2099,7 +2404,6 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
                 ID_START,
                 wide(&items[1].label).as_ptr(),
             )
-            && append_pause_submenu(app, menu)
             && append_menu_checked(
                 app,
                 menu,
@@ -2107,36 +2411,24 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
                 ID_STOP,
                 wide(&items[2].label).as_ptr(),
             )
+            && append_duration_submenu(app, menu)
             && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
             && append_menu_checked(
                 app,
                 menu,
                 MF_STRING,
                 startup_id,
-                wide(&items[3].label).as_ptr(),
+                wide(&items[4].label).as_ptr(),
             )
             && append_menu_checked(
                 app,
                 menu,
                 MF_STRING,
                 automatic_id,
-                wide(&items[4].label).as_ptr(),
-            )
-            && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
-            && append_menu_checked(
-                app,
-                menu,
-                MF_STRING | MF_GRAYED,
-                0,
                 wide(&items[5].label).as_ptr(),
             )
-            && append_menu_checked(
-                app,
-                menu,
-                MF_STRING,
-                LOGS_COMMAND_ID,
-                wide(&items[6].label).as_ptr(),
-            )
+            && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
+            && append_status_submenu(app, menu)
             && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
             && append_menu_checked(
                 app,
@@ -2200,40 +2492,164 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
     app.menu_active = false;
 }
 
-unsafe fn append_pause_submenu(app: &mut App, menu: *mut c_void) -> bool {
+unsafe fn append_duration_choice_submenu(
+    app: &mut App,
+    parent: *mut c_void,
+    action: DurationAction,
+) -> bool {
     let submenu = CreatePopupMenu();
     if submenu.is_null() {
         app.record(
-            "native.CreatePopupMenu.pause.error",
+            "native.CreatePopupMenu.duration_choice.error",
+            format!("action={} raw_status={}", action.label(), GetLastError()),
+        );
+        return false;
+    }
+    let command_ids: &[usize] = match action {
+        DurationAction::Start => &[
+            crate::tray_surface::START_IN_1_COMMAND_ID,
+            crate::tray_surface::START_IN_5_COMMAND_ID,
+            crate::tray_surface::START_IN_15_COMMAND_ID,
+            crate::tray_surface::START_IN_30_COMMAND_ID,
+            crate::tray_surface::START_IN_60_COMMAND_ID,
+        ],
+        DurationAction::Stop => &[
+            crate::tray_surface::STOP_IN_1_COMMAND_ID,
+            crate::tray_surface::STOP_IN_5_COMMAND_ID,
+            crate::tray_surface::STOP_IN_15_COMMAND_ID,
+            crate::tray_surface::STOP_IN_30_COMMAND_ID,
+            crate::tray_surface::STOP_IN_60_COMMAND_ID,
+        ],
+        DurationAction::Pause => &[
+            PAUSE_FOR_5_COMMAND_ID,
+            PAUSE_FOR_15_COMMAND_ID,
+            PAUSE_FOR_30_COMMAND_ID,
+            PAUSE_FOR_60_COMMAND_ID,
+        ],
+    };
+    let choices = duration_choices(action);
+    let mut ok = true;
+    for (command, item) in command_ids.iter().zip(choices.iter()) {
+        ok &= append_menu_checked(
+            app,
+            submenu,
+            MF_STRING,
+            *command,
+            wide(&item.label).as_ptr(),
+        );
+    }
+    if !ok {
+        DestroyMenu(submenu);
+        return false;
+    }
+    let label = match action {
+        DurationAction::Start => "Start in >",
+        DurationAction::Stop => "Stop in >",
+        DurationAction::Pause => "Pause for >",
+    };
+    if !append_menu_checked(
+        app,
+        parent,
+        MF_STRING | MF_POPUP,
+        submenu as usize,
+        wide(label).as_ptr(),
+    ) {
+        DestroyMenu(submenu);
+        return false;
+    }
+    true
+}
+
+unsafe fn append_duration_submenu(app: &mut App, menu: *mut c_void) -> bool {
+    let submenu = CreatePopupMenu();
+    if submenu.is_null() {
+        app.record(
+            "native.CreatePopupMenu.duration.error",
             format!("raw_status={}", GetLastError()),
         );
         return false;
     }
-    let paused = app.pause.active();
-    let items = pause_submenu_items(paused);
-    let choices = [
-        (crate::tray_surface::PAUSE_5_COMMAND_ID, &items[0]),
-        (crate::tray_surface::PAUSE_15_COMMAND_ID, &items[1]),
-        (crate::tray_surface::PAUSE_30_COMMAND_ID, &items[2]),
-        (crate::tray_surface::PAUSE_60_COMMAND_ID, &items[3]),
-    ];
-    let mut ok = true;
-    if paused {
-        ok = append_menu_checked(
-            app,
-            submenu,
-            MF_STRING,
-            RESUME_COMMAND_ID,
-            wide(&items[4].label).as_ptr(),
-        );
+    let mut ok = append_duration_choice_submenu(app, submenu, DurationAction::Start);
+    ok &= append_duration_choice_submenu(app, submenu, DurationAction::Stop);
+    ok &= append_duration_choice_submenu(app, submenu, DurationAction::Pause);
+    let cancel = duration_menu_items(app.pause.current())[3].clone();
+    let cancel_flags = if cancel.enabled {
+        MF_STRING
     } else {
-        for (command, item) in choices {
-            let flags = if item.enabled {
-                MF_STRING
-            } else {
-                MF_STRING | MF_GRAYED
-            };
-            ok &= append_menu_checked(app, submenu, flags, command, wide(&item.label).as_ptr());
+        MF_STRING | MF_GRAYED
+    };
+    ok &= append_menu_checked(
+        app,
+        submenu,
+        cancel_flags,
+        CANCEL_SCHEDULED_COMMAND_ID,
+        wide(&cancel.label).as_ptr(),
+    );
+    if !ok {
+        DestroyMenu(submenu);
+        return false;
+    }
+    if !append_menu_checked(
+        app,
+        menu,
+        MF_STRING | MF_POPUP,
+        submenu as usize,
+        wide("Duration >").as_ptr(),
+    ) {
+        DestroyMenu(submenu);
+        return false;
+    }
+    true
+}
+
+unsafe fn append_status_submenu(app: &mut App, menu: *mut c_void) -> bool {
+    let submenu = CreatePopupMenu();
+    if submenu.is_null() {
+        app.record(
+            "native.CreatePopupMenu.status.error",
+            format!("raw_status={}", GetLastError()),
+        );
+        return false;
+    }
+    let items = status_menu_items(
+        app.lifecycle_status(),
+        app.timing_values(),
+        app.controller.ownership(),
+        app.pause.current(),
+        app.running_duration(),
+        std::time::Instant::now(),
+    );
+    let mut ok = true;
+    for (index, item) in items.iter().enumerate() {
+        let flags = if item.enabled {
+            MF_STRING
+        } else {
+            MF_STRING | MF_GRAYED
+        };
+        let command = if item.enabled && item.label == "Logs" {
+            LOGS_COMMAND_ID
+        } else {
+            0
+        };
+        ok &= append_menu_checked(app, submenu, flags, command, wide(&item.label).as_ptr());
+        if index == 4 {
+            app.record(
+                "status.submenu.render",
+                format!(
+                    "rows=state,timing,running_for,next_action,ownership state={:?} ownership={:?} next_action={}",
+                    app.lifecycle_status(),
+                    app.controller.ownership(),
+                    app.pause.current().map_or_else(
+                        || "none".to_owned(),
+                        |action| format!(
+                            "{} remaining_ms={}",
+                            action.action.label(),
+                            action.remaining(std::time::Instant::now()).as_millis()
+                        )
+                    )
+                ),
+            );
+            app.record("status.submenu.timing", app.timing_snapshot_details());
         }
     }
     if !ok {
@@ -2245,7 +2661,7 @@ unsafe fn append_pause_submenu(app: &mut App, menu: *mut c_void) -> bool {
         menu,
         MF_STRING | MF_POPUP,
         submenu as usize,
-        wide("Pause").as_ptr(),
+        wide("Status >").as_ptr(),
     ) {
         DestroyMenu(submenu);
         return false;
@@ -2320,11 +2736,57 @@ fn track_position_lparam(x: i32, y: i32) -> isize {
     packed as usize as isize
 }
 
-fn update_menu_help(app: &mut App, command: usize) {
+fn submenu_description(menu: *mut c_void) -> Option<&'static str> {
+    if menu.is_null() {
+        return None;
+    }
+    let count = unsafe { GetMenuItemCount(menu) };
+    if count < 0 {
+        return None;
+    }
+    for position in 0..count {
+        let mut buffer = [0u16; 64];
+        let length = unsafe {
+            GetMenuStringW(
+                menu,
+                position as usize,
+                buffer.as_mut_ptr(),
+                buffer.len() as i32,
+                MF_BYPOSITION,
+            )
+        };
+        if length <= 0 {
+            continue;
+        }
+        let label = String::from_utf16_lossy(&buffer[..length as usize]);
+        let label = label.trim_end_matches('&');
+        let description = match label {
+            "Duration >" => Some("Schedule a bounded timing action"),
+            "Start in >" => Some("Schedule a future guarded acquire"),
+            "Stop in >" => Some("Schedule a future guarded release"),
+            "Pause for >" => Some("Suppress acquisition for a fixed duration"),
+            "Status >" => Some("View read-only lifecycle details"),
+            _ => None,
+        };
+        if description.is_some() {
+            return description;
+        }
+    }
+    None
+}
+
+fn update_menu_help(app: &mut App, command: usize, flags: u32, menu: *mut c_void) {
     let Some(tooltip) = app.menu_help else {
         return;
     };
-    let Some(description) = menu_description(command) else {
+    let description = menu_description(command).or_else(|| {
+        if flags & MF_POPUP != 0 {
+            submenu_description(menu)
+        } else {
+            None
+        }
+    });
+    let Some(description) = description else {
         unsafe {
             let tool = menu_tool_info(
                 app.tray_icon
@@ -2457,12 +2919,25 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
             open_diagnostic_window(app);
         }
         GITHUB_COMMAND_ID => open_github_page(hwnd, app),
-        PAUSE_5_COMMAND_ID | PAUSE_15_COMMAND_ID | PAUSE_30_COMMAND_ID | PAUSE_60_COMMAND_ID => {
-            if let Some(duration) = pause_command_duration(command) {
-                pause_for_duration(app, duration);
+        CANCEL_SCHEDULED_COMMAND_ID => cancel_scheduled_action(app),
+        START_IN_1_COMMAND_ID
+        | START_IN_5_COMMAND_ID
+        | START_IN_15_COMMAND_ID
+        | START_IN_30_COMMAND_ID
+        | START_IN_60_COMMAND_ID
+        | STOP_IN_1_COMMAND_ID
+        | STOP_IN_5_COMMAND_ID
+        | STOP_IN_15_COMMAND_ID
+        | STOP_IN_30_COMMAND_ID
+        | STOP_IN_60_COMMAND_ID
+        | PAUSE_FOR_5_COMMAND_ID
+        | PAUSE_FOR_15_COMMAND_ID
+        | PAUSE_FOR_30_COMMAND_ID
+        | PAUSE_FOR_60_COMMAND_ID => {
+            if let Some((action, duration)) = duration_command(command) {
+                schedule_duration_action(app, action, duration);
             }
         }
-        RESUME_COMMAND_ID => resume_now(app),
         ID_STARTUP_ON => set_startup(app, true),
         ID_STARTUP_OFF => set_startup(app, false),
         ID_AUTOMATIC_ON => set_automatic(app, true),
@@ -3249,6 +3724,14 @@ extern "system" {
     fn KillTimer(hwnd: *mut c_void, event_id: usize) -> i32;
     fn MessageBoxW(hwnd: *mut c_void, text: *const u16, title: *const u16, flags: u32) -> i32;
     fn CreatePopupMenu() -> *mut c_void;
+    fn GetMenuItemCount(menu: *mut c_void) -> i32;
+    fn GetMenuStringW(
+        menu: *mut c_void,
+        item: usize,
+        text: *mut u16,
+        maximum: i32,
+        flags: u32,
+    ) -> i32;
     fn AppendMenuW(menu: *mut c_void, flags: u32, id: usize, text: *const u16) -> i32;
     fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
     fn TrackPopupMenu(
