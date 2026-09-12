@@ -69,6 +69,26 @@ focus. A refresh preserves selected event sequences when retained. Truncation dr
 invalid selections, preserves valid selected events, and shows and logs a concise
 selection reset. These UI actions do not change timer state.
 
+The diagnostic window uses a stable native rendering pipeline. Common Controls and
+all child HWNDs are created before the parent is shown. The summary starts with
+`Loading True™ Tick diagnostics...`, then one bounded snapshot is queued through
+the UI message loop. That snapshot supplies the summary and grid rows, converts each
+event to its eleven bounded cells once, and replaces the loading text after the first
+render. Refresh requests are coalesced, and the retained event bound remains 512.
+
+A refresh suspends redraw while controls and the list are updated, then re-enables
+redraw and invalidates the window once. `WM_SIZE` only performs one deferred control
+reposition pass. It does not snapshot data, rebuild rows, or fit columns. Horizontal
+scrolling and header interaction do not fit columns. Auto-fit runs after the initial
+population or a material data snapshot change, once per snapshot generation. Fixed
+columns are bounded and Details absorbs remaining width. Normal refresh restores the
+horizontal scroll position when Windows permits it. Reopening reuses the existing
+window and posts one refresh rather than rebuilding synchronously.
+
+The rendering contract is source-tested. Actual first-open paint timing, interactive
+resize behavior, horizontal scroll appearance, and native taskbar window behavior
+remain runtime-required checks because validation does not launch the app.
+
 The commands above are not runtime validation of
 tray behavior, startup registration, or launcher handoff.
 
