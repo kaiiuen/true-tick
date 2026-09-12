@@ -382,6 +382,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn handoff_is_authoritatively_yellow_even_when_an_unrelated_error_is_reported() {
+        assert_eq!(
+            lifecycle_status(TrayStatus::Error, true),
+            TrayStatus::Stopping
+        );
+        assert_eq!(
+            lifecycle_status(TrayStatus::Blocked, true),
+            TrayStatus::Stopping
+        );
+        assert_eq!(
+            lifecycle_status(TrayStatus::Error, false),
+            TrayStatus::Error
+        );
+        assert_eq!(TrayStatus::Stopping.icon_color(), IconColor::Yellow);
+    }
+
+    #[test]
+    fn one_timing_snapshot_feeds_tooltip_and_menu_status() {
+        let snapshot = TimingSnapshot {
+            requested: Some(Hns::new(5_000)),
+            selected: Some(Hns::new(5_000)),
+            effective: Some(Hns::new(4_966)),
+            minimum_interval: Some(Hns::new(156_250)),
+            maximum_interval: Some(Hns::new(5_000)),
+            raw_status: Some(0),
+        };
+        let timing = TimingValues::from_snapshot(snapshot, false, false, false);
+        assert_eq!(
+            tooltip(TrayStatus::Running, timing),
+            "True™ Tick: Running 0.497 ms"
+        );
+        assert_eq!(
+            menu_items(TrayStatus::Running, false, false, timing)[5].label,
+            "Status: Running (0.497 ms)"
+        );
+    }
+
+    #[test]
     fn version_header_uses_the_package_version() {
         assert_eq!(
             version_header(),

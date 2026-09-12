@@ -995,6 +995,7 @@ fn guarded_release(
                 format!("state=released effective_system={effective:?} handoff=not_required"),
             );
             app.controller.clear_release_boundary();
+            app.sync_timing_snapshot();
             app.tray_status = released_status;
             app.publish();
             Ok(released)
@@ -1214,6 +1215,7 @@ fn begin_handoff(app: &mut App, boundary: tick_core::Hns, released_status: TrayS
         );
         app.external_timing = true;
         app.controller.clear_release_boundary();
+        app.sync_timing_snapshot();
         app.tray_status = TrayStatus::Stopped;
         app.publish();
         process_desired_intent(app);
@@ -1242,6 +1244,7 @@ fn begin_handoff(app: &mut App, boundary: tick_core::Hns, released_status: TrayS
         );
         app.external_timing = true;
         app.controller.clear_release_boundary();
+        app.sync_timing_snapshot();
         app.tray_status = TrayStatus::Stopped;
         app.publish();
         process_desired_intent(app);
@@ -1338,6 +1341,7 @@ fn handle_handoff_timer(app: &mut App) {
                 "state=released effective_system=non_finer handoff=completed",
             );
             app.controller.clear_release_boundary();
+            app.sync_timing_snapshot();
             app.tray_status = TrayStatus::Stopped;
             app.external_timing = false;
             app.publish();
@@ -1358,6 +1362,7 @@ fn handle_handoff_timer(app: &mut App) {
                 "state=released effective_system=finer due_to=external_or_unknown_client",
             );
             app.controller.clear_release_boundary();
+            app.sync_timing_snapshot();
             app.tray_status = TrayStatus::Stopped;
             app.external_timing = true;
             app.publish();
@@ -2040,11 +2045,13 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &App) {
     }
     let timing_details = match app.timing_snapshot.effective {
         Some(effective) => format!(
-            "Timing observation: {} requested_hns={} selected_hns={} effective_hns={} raw_status={} effective_relation={}\r\n",
+            "Timing observation: {} requested_hns={} selected_hns={} effective_hns={} minimum_hns={} maximum_hns={} raw_status={} effective_relation={}\r\n",
             tooltip(app.lifecycle_status(), app.timing_values()),
             app.timing_snapshot.requested.map_or_else(|| "unknown".to_owned(), |value| value.value().to_string()),
             app.timing_snapshot.selected.map_or_else(|| "unknown".to_owned(), |value| value.value().to_string()),
             effective.value(),
+            app.timing_snapshot.minimum_interval.map_or_else(|| "unknown".to_owned(), |value| value.value().to_string()),
+            app.timing_snapshot.maximum_interval.map_or_else(|| "unknown".to_owned(), |value| value.value().to_string()),
             app.timing_snapshot.raw_status.map_or_else(|| "unknown".to_owned(), |value| value.to_string()),
             app.timing_snapshot.effective_relation().unwrap_or("unknown")
         ),

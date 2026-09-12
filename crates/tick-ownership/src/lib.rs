@@ -77,6 +77,8 @@ pub struct TimingSnapshot {
     pub requested: Option<Hns>,
     pub selected: Option<Hns>,
     pub effective: Option<Hns>,
+    pub minimum_interval: Option<Hns>,
+    pub maximum_interval: Option<Hns>,
     pub raw_status: Option<NtStatus>,
 }
 
@@ -123,6 +125,8 @@ impl<P: TimerPlatform> TimerController<P> {
                 requested: None,
                 selected: None,
                 effective: None,
+                minimum_interval: None,
+                maximum_interval: None,
                 raw_status: None,
             },
         }
@@ -172,6 +176,8 @@ impl<P: TimerPlatform> TimerController<P> {
             }
         };
         self.snapshot.selected = self.selected_interval.or(self.release_boundary);
+        self.snapshot.minimum_interval = Some(query.bounds.minimum_interval);
+        self.snapshot.maximum_interval = Some(query.bounds.maximum_interval);
         self.record_query(interval, query.reported_current, query.raw_status);
         Ok(self.observation.expect("query observation was recorded"))
     }
@@ -192,6 +198,8 @@ impl<P: TimerPlatform> TimerController<P> {
             }
         };
         self.snapshot.selected = Some(boundary);
+        self.snapshot.minimum_interval = Some(query.bounds.minimum_interval);
+        self.snapshot.maximum_interval = Some(query.bounds.maximum_interval);
         self.record_query(boundary, query.reported_current, query.raw_status);
         Ok(self.observation.expect("handoff observation was recorded"))
     }
@@ -219,6 +227,8 @@ impl<P: TimerPlatform> TimerController<P> {
             }
         };
         self.snapshot.selected = Some(interval);
+        self.snapshot.minimum_interval = Some(query.bounds.minimum_interval);
+        self.snapshot.maximum_interval = Some(query.bounds.maximum_interval);
         self.record_query(interval, query.reported_current, query.raw_status);
         let request_observation = match self.platform.request(interval) {
             Ok(observation) => observation,
@@ -379,6 +389,51 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct RecordingPlatform {
+        intervals: Vec<Hns>,
+    }
+
+    impl TimerPlatform for RecordingPlatform {
+        fn query(&mut self, interval: Hns) -> Result<TimerQuery, TimerError> {
+            self.intervals.push(interval);
+            Ok(TimerQuery {
+                bounds: TimerBounds {
+                    minimum_interval: Hns::new(5_000),
+                    maximum_interval: Hns::new(156_250),
+                },
+                reported_current: Hns::new(4_966),
+                raw_status: 0,
+            })
+        }
+
+        fn preflight(&mut self, interval: Hns) -> Result<TimerQuery, TimerError> {
+            self.query(interval)
+        }
+
+        fn request(&mut self, interval: Hns) -> Result<TimerObservation, TimerError> {
+            Ok(TimerObservation {
+                requested: interval,
+                reported_current: interval,
+                raw_status: 0,
+            })
+        }
+
+        fn release(&mut self, interval: Hns) -> Result<TimerObservation, TimerError> {
+            Ok(TimerObservation {
+                requested: interval,
+                reported_current: Hns::new(4_966),
+                raw_status: 0,
+            })
+        }
+    }
+
+    impl<P> TimerController<P> {
+        fn into_platform(self) -> P {
+            self.platform
+        }
+    }
+
     fn fixture_controller() -> TimerController<FixturePlatform> {
         TimerController::new(
             FixturePlatform {
@@ -466,6 +521,62 @@ mod tests {
         );
         assert_eq!(controller.observation(), None);
         assert_eq!(controller.ownership(), OwnershipState::Released);
+    }
+
+    #[test]
+    fn query_failure_invalidates_a_previous_effective_observation() {
+        let query = TimerQuery {
+            bounds: TimerBounds {
+                minimum_interval: Hns::new(156_250),
+                maximum_interval: Hns::new(5_000),
+            },
+            reported_current: Hns::new(9_966),
+            raw_status: 0,
+        };
+        let mut controller = TimerController::new(
+            FixturePlatform {
+                request_observation: TimerObservation {
+                    requested: Hns::new(5_000),
+                    reported_current: Hns::new(4_966),
+                    raw_status: 0,
+                },
+                release_result: Ok(TimerObservation {
+                    requested: Hns::new(5_000),
+                    reported_current: Hns::new(4_966),
+                    raw_status: 0,
+                }),
+                query_results: vec![
+                    Ok(query),
+                    Ok(query),
+                    Err(TimerError::QueryFailed { raw_status: -8 }),
+                ],
+            },
+            Hns::new(5_000),
+        );
+        controller.query().unwrap();
+        assert_eq!(controller.snapshot().effective, Some(Hns::new(9_966)));
+        assert_eq!(
+            controller.query(),
+            Err(TimerError::QueryFailed { raw_status: -8 })
+        );
+        assert_eq!(controller.snapshot().effective, None);
+        assert_eq!(controller.observation(), None);
+    }
+
+    #[test]
+    fn handoff_observes_without_resolving_a_new_release_boundary() {
+        let mut controller = TimerController::new(
+            RecordingPlatform {
+                intervals: Vec::new(),
+            },
+            Hns::new(5_000),
+        );
+        controller.start().unwrap();
+        controller.stop().unwrap();
+        assert_eq!(controller.release_boundary(), Some(Hns::new(5_000)));
+        controller.observe_current(Hns::new(5_000)).unwrap();
+        let intervals = controller.into_platform().intervals;
+        assert_eq!(intervals.last(), Some(&Hns::new(5_000)));
     }
 
     #[test]
