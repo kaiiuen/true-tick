@@ -8,8 +8,10 @@ use tick_policy::PowerState;
 pub(crate) enum TrayStatus {
     Running,
     Starting,
+    ScheduledStart,
     Pausing,
     Stopping,
+    ScheduledStop,
     Paused,
     #[allow(dead_code)]
     Pending,
@@ -65,12 +67,25 @@ pub(crate) fn power_reconciliation(
 
 pub(crate) const fn lifecycle_status(status: TrayStatus, handoff_active: bool) -> TrayStatus {
     if handoff_active {
-        match status {
-            TrayStatus::Pausing => TrayStatus::Pausing,
-            _ => TrayStatus::Stopping,
-        }
+        TrayStatus::Stopping
     } else {
         status
+    }
+}
+
+pub(crate) const fn scheduled_lifecycle_status(
+    status: TrayStatus,
+    handoff_active: bool,
+    scheduled: Option<DurationAction>,
+) -> TrayStatus {
+    let status = lifecycle_status(status, handoff_active);
+    if handoff_active {
+        return status;
+    }
+    match (status, scheduled) {
+        (TrayStatus::Stopped, Some(DurationAction::Start)) => TrayStatus::ScheduledStart,
+        (TrayStatus::Running, Some(DurationAction::Stop)) => TrayStatus::ScheduledStop,
+        _ => status,
     }
 }
 
@@ -79,8 +94,10 @@ impl TrayStatus {
         match self {
             Self::Running => IconColor::Green,
             Self::Starting
+            | Self::ScheduledStart
             | Self::Pausing
             | Self::Stopping
+            | Self::ScheduledStop
             | Self::Paused
             | Self::Pending
             | Self::Degraded
@@ -203,40 +220,71 @@ pub(crate) fn version_header() -> String {
     format!("True™ Tick v{}", env!("CARGO_PKG_VERSION"))
 }
 
-pub(crate) fn tooltip(status: TrayStatus, timing: TimingValues) -> String {
-    let summary = match status {
-        TrayStatus::Running if timing.valid && !timing.invalid_interval => {
-            timing.effective.map_or_else(
-                || "Running".to_owned(),
-                |value| format!("Running {} ms", format_ms(value)),
-            )
+fn effective_timing_suffix(timing: TimingValues) -> String {
+    if timing.valid && !timing.invalid_interval {
+        timing.effective.map_or_else(
+            || "Timing unknown".to_owned(),
+            |value| format!("{} ms", format_ms(value)),
+        )
+    } else {
+        "Timing unknown".to_owned()
+    }
+}
+
+fn state_summary(
+    status: TrayStatus,
+    timing: TimingValues,
+    scheduled: Option<ScheduledAction>,
+    now: Instant,
+) -> String {
+    let timing_suffix = effective_timing_suffix(timing);
+    let action_summary = match (status, scheduled) {
+        (TrayStatus::ScheduledStart, Some(action)) => Some(format!(
+            "Starting in {}",
+            format_remaining_duration(action.remaining(now))
+        )),
+        (TrayStatus::ScheduledStop, Some(action)) => Some(format!(
+            "Stopping in {}",
+            format_remaining_duration(action.remaining(now))
+        )),
+        (TrayStatus::Paused, Some(action)) if action.action == DurationAction::Pause => {
+            Some(format!(
+                "Paused for {}",
+                format_remaining_duration(action.remaining(now))
+            ))
         }
-        TrayStatus::Running => "Running".to_owned(),
-        TrayStatus::Stopped if timing.external => "Stopped, external timing".to_owned(),
-        TrayStatus::Stopped if timing.valid && !timing.invalid_interval => {
-            timing.effective.map_or_else(
-                || "Stopped".to_owned(),
-                |value| format!("Stopped {} ms", format_ms(value)),
-            )
-        }
-        TrayStatus::Stopped => "Stopped".to_owned(),
-        TrayStatus::Starting => timing.requested.map_or_else(
-            || "Starting, verifying".to_owned(),
-            |requested| format!("Starting {} ms, verifying", format_ms(requested)),
-        ),
-        TrayStatus::Pausing if timing.handoff_pending => "Pausing, handoff pending".to_owned(),
-        TrayStatus::Pausing => "Pausing".to_owned(),
-        TrayStatus::Stopping if timing.handoff_pending => "Stopping, handoff pending".to_owned(),
-        TrayStatus::Paused => "Paused".to_owned(),
-        TrayStatus::Stopping => "Stopping".to_owned(),
-        TrayStatus::Error => "Error".to_owned(),
-        TrayStatus::Pending
-        | TrayStatus::Degraded
-        | TrayStatus::Unverified
-        | TrayStatus::Blocked
-        | TrayStatus::Unsupported => "Warning".to_owned(),
+        _ => None,
     };
-    format!("True™ Tick: {summary}")
+    let state = match action_summary {
+        Some(summary) => summary,
+        None => match status {
+            TrayStatus::Running => "Running".to_owned(),
+            TrayStatus::Starting => "Starting".to_owned(),
+            TrayStatus::ScheduledStart => "Starting".to_owned(),
+            TrayStatus::Pausing => "Stopping".to_owned(),
+            TrayStatus::Stopping if timing.handoff_pending => "Stopping, handoff".to_owned(),
+            TrayStatus::ScheduledStop => "Stopping".to_owned(),
+            TrayStatus::Stopping => "Stopping".to_owned(),
+            TrayStatus::Paused => "Paused".to_owned(),
+            TrayStatus::Stopped => "Stopped".to_owned(),
+            TrayStatus::Error => return "True™ Tick: Error".to_owned(),
+            TrayStatus::Pending
+            | TrayStatus::Degraded
+            | TrayStatus::Blocked
+            | TrayStatus::Unsupported => return "True™ Tick: Warning".to_owned(),
+            TrayStatus::Unverified => return "True™ Tick: Timing unknown".to_owned(),
+        },
+    };
+    format!("True™ Tick: {state} · {timing_suffix}")
+}
+
+pub(crate) fn tooltip(
+    status: TrayStatus,
+    timing: TimingValues,
+    scheduled: Option<ScheduledAction>,
+    now: Instant,
+) -> String {
+    state_summary(status, timing, scheduled, now)
 }
 
 pub(crate) const LOGS_COMMAND_ID: usize = 1009;
@@ -472,19 +520,46 @@ pub(crate) const fn menu_command_is_enabled_with_pause(
     }
 }
 
-fn state_label(status: TrayStatus) -> &'static str {
+fn state_label(status: TrayStatus, timing: TimingValues) -> &'static str {
     match status {
         TrayStatus::Running => "Running",
         TrayStatus::Stopped => "Stopped",
-        TrayStatus::Starting => "Starting",
-        TrayStatus::Stopping | TrayStatus::Pausing => "Stopping",
-        TrayStatus::Paused => "Paused (Start disabled)",
-        TrayStatus::Blocked => "Blocked",
-        TrayStatus::Error
-        | TrayStatus::Unsupported
-        | TrayStatus::Pending
-        | TrayStatus::Degraded
-        | TrayStatus::Unverified => "Error",
+        TrayStatus::Starting | TrayStatus::ScheduledStart => "Starting",
+        TrayStatus::Stopping | TrayStatus::Pausing | TrayStatus::ScheduledStop => {
+            if timing.handoff_pending {
+                "Stopping, handoff"
+            } else {
+                "Stopping"
+            }
+        }
+        TrayStatus::Paused => "Paused",
+        TrayStatus::Blocked => "Warning",
+        TrayStatus::Error => "Error",
+        TrayStatus::Unsupported | TrayStatus::Pending | TrayStatus::Degraded => "Warning",
+        TrayStatus::Unverified => "Timing unknown",
+    }
+}
+
+fn state_menu_label(
+    status: TrayStatus,
+    timing: TimingValues,
+    scheduled: Option<ScheduledAction>,
+    now: Instant,
+) -> String {
+    match (status, scheduled) {
+        (TrayStatus::ScheduledStart, Some(action)) => format!(
+            "Starting in {}",
+            format_remaining_duration(action.remaining(now))
+        ),
+        (TrayStatus::ScheduledStop, Some(action)) => format!(
+            "Stopping in {}",
+            format_remaining_duration(action.remaining(now))
+        ),
+        (TrayStatus::Paused, Some(action)) if action.action == DurationAction::Pause => format!(
+            "Paused for {}",
+            format_remaining_duration(action.remaining(now))
+        ),
+        _ => state_label(status, timing).to_owned(),
     }
 }
 
@@ -513,14 +588,7 @@ fn format_duration_seconds(seconds: u64) -> String {
 }
 
 fn effective_timing_label(timing: TimingValues) -> String {
-    if timing.valid && !timing.invalid_interval {
-        timing.effective.map_or_else(
-            || "Unknown".to_owned(),
-            |value| format!("{} ms", format_ms(value)),
-        )
-    } else {
-        "Unknown".to_owned()
-    }
+    effective_timing_suffix(timing)
 }
 
 fn running_for_label(running_for: Option<Duration>) -> String {
@@ -559,7 +627,10 @@ pub(crate) fn status_menu_items(
 ) -> Vec<MenuItem> {
     vec![
         MenuItem {
-            label: format!("State: {}", state_label(status)),
+            label: format!(
+                "State: {}",
+                state_menu_label(status, timing, scheduled, now)
+            ),
             enabled: false,
         },
         MenuItem {

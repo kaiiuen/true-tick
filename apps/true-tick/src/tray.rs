@@ -404,6 +404,7 @@ struct PublicationKey {
     effective: Option<tick_core::Hns>,
     requested: Option<tick_core::Hns>,
     handoff: bool,
+    scheduled: Option<(DurationAction, u64)>,
 }
 
 struct App {
@@ -728,8 +729,12 @@ pub fn run() {
             abort_startup(app_ptr, "True™ Tick could not create its tray window.");
             return;
         }
-        let mut icon = match NotifyIconData::new(hwnd, app.lifecycle_status(), app.timing_values())
-        {
+        let mut icon = match NotifyIconData::new(
+            hwnd,
+            app.lifecycle_status(),
+            app.timing_values(),
+            app.pause.current(),
+        ) {
             Ok(icon) => icon,
             Err(raw_error) => {
                 app.record(
@@ -1311,6 +1316,8 @@ fn schedule_duration_action(app: &mut App, action: DurationAction, duration: Dur
         app.tray_status = TrayStatus::Pausing;
         app.publish();
         queue_intent(app, DesiredIntent::Release, "duration pause");
+    } else {
+        app.publish();
     }
     if app.menu_active {
         unsafe { refresh_popup_menu(app) };
@@ -1823,7 +1830,11 @@ impl App {
     }
 
     fn lifecycle_status(&self) -> TrayStatus {
-        crate::tray_surface::lifecycle_status(self.tray_status, self.handoff.is_some())
+        crate::tray_surface::scheduled_lifecycle_status(
+            self.tray_status,
+            self.handoff.is_some(),
+            self.pause.current().map(|action| action.action),
+        )
     }
 
     fn timing_values(&self) -> TimingValues {
@@ -1979,12 +1990,21 @@ impl App {
             effective: timing.effective,
             requested: timing.requested,
             handoff: timing.handoff_pending,
+            scheduled: self
+                .pause
+                .current()
+                .map(|action| (action.action, action.generation)),
         };
         if self.last_publication == Some(key) {
             return;
         }
         self.last_publication = Some(key);
-        let status_text = tooltip(status, timing);
+        let status_text = tooltip(
+            status,
+            timing,
+            self.pause.current(),
+            std::time::Instant::now(),
+        );
         self.record(
             "tray.status.changed",
             format!("status={status:?} tooltip={status_text}"),
@@ -2003,7 +2023,7 @@ impl App {
             ),
         );
         if let Some(icon) = self.tray_icon.as_mut() {
-            if let Err(raw_error) = update_icon(icon, status, timing) {
+            if let Err(raw_error) = update_icon(icon, status, timing, self.pause.current()) {
                 self.record(
                     "native.Shell_NotifyIconW.modify.error",
                     format!("raw_status={raw_error}"),
@@ -2263,6 +2283,7 @@ fn update_icon(
     icon: &mut NotifyIconData,
     status: TrayStatus,
     timing: TimingValues,
+    scheduled: Option<crate::pause::ScheduledAction>,
 ) -> Result<(), u32> {
     let replacement = unsafe { status_icon(status, dpi_for_window(icon.h_wnd)) }?;
     let old_icon = icon.h_icon;
@@ -2272,7 +2293,7 @@ fn update_icon(
     for (target, source) in icon
         .sz_tip
         .iter_mut()
-        .zip(tooltip(status, timing).encode_utf16())
+        .zip(tooltip(status, timing, scheduled, std::time::Instant::now()).encode_utf16())
     {
         *target = source;
     }
@@ -4053,7 +4074,12 @@ impl Drop for NotifyIconData {
 }
 
 impl NotifyIconData {
-    fn new(hwnd: *mut c_void, status: TrayStatus, timing: TimingValues) -> Result<Self, u32> {
+    fn new(
+        hwnd: *mut c_void,
+        status: TrayStatus,
+        timing: TimingValues,
+        scheduled: Option<crate::pause::ScheduledAction>,
+    ) -> Result<Self, u32> {
         let mut value = Self {
             cb_size: size_of::<Self>() as u32,
             h_wnd: hwnd,
@@ -4074,7 +4100,7 @@ impl NotifyIconData {
         for (target, source) in value
             .sz_tip
             .iter_mut()
-            .zip(tooltip(status, timing).encode_utf16())
+            .zip(tooltip(status, timing, scheduled, std::time::Instant::now()).encode_utf16())
         {
             *target = source;
         }
