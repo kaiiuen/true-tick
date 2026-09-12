@@ -3891,6 +3891,22 @@ fn diagnostic_visible_selection(app: &App, retained_rows: usize) -> RowSelection
     }
 }
 
+fn diagnostic_hud_field_text(
+    effective: &str,
+    ownership: &str,
+    power: &str,
+    startup: &str,
+    running_duration: &str,
+    next_action: &str,
+    history: &str,
+    visible: usize,
+    retained: usize,
+) -> String {
+    format!(
+        "Effective timing: {effective}\r\nOwnership: {ownership}\r\nPower: {power}\r\nStartup: {startup}\r\nRunning duration: {running_duration}\r\nNext action: {next_action}\r\nHistory: {history}\r\nShowing {visible} of {retained} retained rows\r\n"
+    )
+}
+
 fn diagnostic_summary_text(app: &App, retained: usize) -> String {
     let status = status_menu_items(
         app.lifecycle_status(),
@@ -3906,14 +3922,32 @@ fn diagnostic_summary_text(app: &App, retained: usize) -> String {
         app.diagnostics.maximum_events(),
         snapshot_is_truncated(&app.diagnostics.snapshot()),
     );
-    format!(
-        "Effective timing: {}\r\nOwnership: {}\r\nPower: {}\r\nStartup: {}\r\nRunning duration: {}\r\nNext action: {}\r\nHistory: {history}\r\nShowing {visible} of {retained} retained rows\r\n",
-        status[1].label.strip_prefix("Timing: ").unwrap_or(&status[1].label),
-        status[4].label.strip_prefix("Ownership: ").unwrap_or(&status[4].label),
+    diagnostic_hud_field_text(
+        status[1]
+            .label
+            .strip_prefix("Timing: ")
+            .unwrap_or(&status[1].label),
+        status[4]
+            .label
+            .strip_prefix("Ownership: ")
+            .unwrap_or(&status[4].label),
         power_state_label(app.observation.power().state),
-        if app.config.startup_enabled { "On" } else { "Off" },
-        status[2].label.strip_prefix("Running for: ").unwrap_or(&status[2].label),
-        status[3].label.strip_prefix("Next action: ").unwrap_or(&status[3].label),
+        if app.config.startup_enabled {
+            "On"
+        } else {
+            "Off"
+        },
+        status[2]
+            .label
+            .strip_prefix("Running for: ")
+            .unwrap_or(&status[2].label),
+        status[3]
+            .label
+            .strip_prefix("Next action: ")
+            .unwrap_or(&status[3].label),
+        &history,
+        visible,
+        retained,
     )
 }
 
@@ -7100,6 +7134,33 @@ mod tests {
             outer_size_from_client(916, 324, frame),
             Point { x: 932, y: 364 }
         );
+    }
+
+    #[test]
+    fn hud_field_formatting_keeps_key_values_and_snapshot_evidence_visible() {
+        let text = diagnostic_hud_field_text(
+            "0.500 ms",
+            "True™ Tick",
+            "AC",
+            "On",
+            "4m 12s",
+            "None",
+            "retained_events=12 retention_cap=512 truncated=true",
+            4,
+            12,
+        );
+        for field in [
+            "Effective timing: 0.500 ms",
+            "Ownership: True™ Tick",
+            "Power: AC",
+            "Startup: On",
+            "Running duration: 4m 12s",
+            "Next action: None",
+            "History: retained_events=12 retention_cap=512 truncated=true",
+            "Showing 4 of 12 retained rows",
+        ] {
+            assert!(text.contains(field), "missing HUD field: {field}");
+        }
     }
 
     #[test]
