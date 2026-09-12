@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 use tick_core::Status;
 
 pub const DEFAULT_MAX_EVENTS: usize = 512;
+pub const HARD_MAX_EVENTS: usize = 512;
 pub const MAX_FIELD_LENGTH: usize = 160;
+pub const MAX_RENDERED_EVENT_BYTES: usize = 1_024;
 
 pub fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
     if value.len() <= maximum_bytes {
@@ -56,31 +58,137 @@ pub fn format_status(record: StatusRecord) -> String {
     record.to_string()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticPhase {
+    Begin,
+    Observe,
+    Decide,
+    Acquire,
+    Release,
+    Verify,
+    Handoff,
+    Timer,
+    Render,
+    Persist,
+    Shutdown,
+    Complete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticSource {
+    TrayCommand,
+    PowerEvent,
+    Startup,
+    Pause,
+    Resume,
+    Handoff,
+    Shutdown,
+    Policy,
+    Ownership,
+    Platform,
+    Native,
+    Timer,
+    Diagnostic,
+    Internal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticOutcome {
+    InProgress,
+    Completed,
+    Failed,
+    Cancelled,
+    Suppressed,
+    TimedOut,
+    Unverified,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NativeOutcome {
+    pub ntstatus: Option<i32>,
+    pub win32_last_error: Option<u32>,
+    pub requested_hns: Option<u64>,
+    pub selected_hns: Option<u64>,
+    pub effective_hns: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperationContext {
+    pub operation_id: u64,
+    pub parent_operation_id: Option<u64>,
+    pub correlation_id: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DiagnosticRecord {
+    pub context: OperationContext,
+    pub phase: DiagnosticPhase,
+    pub source: DiagnosticSource,
+    pub outcome: DiagnosticOutcome,
+    pub native: NativeOutcome,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiagnosticEvent {
     pub sequence: u64,
     pub elapsed: Duration,
+    pub operation_id: u64,
+    pub parent_operation_id: Option<u64>,
+    pub correlation_id: u64,
+    pub phase: DiagnosticPhase,
+    pub source: DiagnosticSource,
+    pub outcome: DiagnosticOutcome,
+    pub native: NativeOutcome,
     pub name: String,
     pub details: String,
 }
 
 pub fn format_event(event: &DiagnosticEvent) -> String {
-    format!(
-        "#{:06} +{:>8}ms {}{}",
+    let rendered = format!(
+        "#{:06} +{:>8}ms op={} parent={} corr={} phase={:?} source={:?} outcome={:?} native_ntstatus={} native_win32={} requested_hns={} selected_hns={} effective_hns={} {}{}",
         event.sequence,
         event.elapsed.as_millis(),
+        event.operation_id,
+        event
+            .parent_operation_id
+            .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+        event.correlation_id,
+        event.phase,
+        event.source,
+        event.outcome,
+        event.native
+            .ntstatus
+            .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+        event
+            .native
+            .win32_last_error
+            .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+        event
+            .native
+            .requested_hns
+            .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+        event
+            .native
+            .selected_hns
+            .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+        event
+            .native
+            .effective_hns
+            .map_or_else(|| "none".to_owned(), |value| value.to_string()),
         event.name,
         if event.details.is_empty() {
             String::new()
         } else {
             format!(" {}", event.details)
         }
-    )
+    );
+    truncate_utf8(&rendered, MAX_RENDERED_EVENT_BYTES)
 }
 
 #[derive(Clone, Debug)]
 struct StoreState {
     next_sequence: u64,
+    next_operation_id: u64,
     events: Vec<DiagnosticEvent>,
     truncation_recorded: bool,
 }
@@ -102,9 +210,10 @@ impl DiagnosticStore {
         Self {
             inner: Arc::new(StoreInner {
                 started: Instant::now(),
-                maximum_events: maximum_events.max(2),
+                maximum_events: maximum_events.clamp(2, HARD_MAX_EVENTS),
                 state: Mutex::new(StoreState {
                     next_sequence: 1,
+                    next_operation_id: 1,
                     events: Vec::new(),
                     truncation_recorded: false,
                 }),
@@ -112,7 +221,58 @@ impl DiagnosticStore {
         }
     }
 
+    pub fn begin_operation(&self, source: DiagnosticSource) -> OperationContext {
+        self.allocate_operation(None, source)
+    }
+
+    pub fn child_operation(
+        &self,
+        parent: OperationContext,
+        source: DiagnosticSource,
+    ) -> OperationContext {
+        self.allocate_operation(Some(parent), source)
+    }
+
+    fn allocate_operation(
+        &self,
+        parent: Option<OperationContext>,
+        _source: DiagnosticSource,
+    ) -> OperationContext {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("diagnostic store mutex poisoned");
+        let operation_id = state.next_operation_id;
+        state.next_operation_id = state.next_operation_id.saturating_add(1);
+        OperationContext {
+            operation_id,
+            parent_operation_id: parent.map(|value| value.operation_id),
+            correlation_id: parent.map_or(operation_id, |value| value.correlation_id),
+        }
+    }
+
     pub fn record(&self, name: &str, details: impl AsRef<str>) {
+        let context = self.begin_operation(DiagnosticSource::Internal);
+        self.record_with_context(
+            DiagnosticRecord {
+                context,
+                phase: DiagnosticPhase::Complete,
+                source: DiagnosticSource::Internal,
+                outcome: DiagnosticOutcome::Completed,
+                native: NativeOutcome::default(),
+            },
+            name,
+            details,
+        );
+    }
+
+    pub fn record_with_context(
+        &self,
+        record: DiagnosticRecord,
+        name: &str,
+        details: impl AsRef<str>,
+    ) {
         let mut state = self
             .inner
             .state
@@ -133,6 +293,13 @@ impl DiagnosticStore {
                     DiagnosticEvent {
                         sequence,
                         elapsed,
+                        operation_id: record.context.operation_id,
+                        parent_operation_id: record.context.parent_operation_id,
+                        correlation_id: record.context.correlation_id,
+                        phase: DiagnosticPhase::Complete,
+                        source: DiagnosticSource::Diagnostic,
+                        outcome: DiagnosticOutcome::Completed,
+                        native: NativeOutcome::default(),
                         name: "diagnostic.log_truncated".to_owned(),
                         details,
                     },
@@ -147,6 +314,13 @@ impl DiagnosticStore {
         let event = DiagnosticEvent {
             sequence: state.next_sequence,
             elapsed: self.inner.started.elapsed(),
+            operation_id: record.context.operation_id,
+            parent_operation_id: record.context.parent_operation_id,
+            correlation_id: record.context.correlation_id,
+            phase: record.phase,
+            source: record.source,
+            outcome: record.outcome,
+            native: record.native,
             name: sanitize(name),
             details: sanitize(details.as_ref()),
         };
@@ -203,17 +377,65 @@ mod tests {
     }
 
     #[test]
-    fn event_format_is_structured_and_stable() {
+    fn event_format_contains_bounded_chain_of_custody_fields() {
         let event = DiagnosticEvent {
             sequence: 7,
             elapsed: Duration::from_millis(42),
-            name: "tray.command".to_owned(),
-            details: "command=start".to_owned(),
+            operation_id: 11,
+            parent_operation_id: Some(3),
+            correlation_id: 2,
+            phase: DiagnosticPhase::Release,
+            source: DiagnosticSource::Handoff,
+            outcome: DiagnosticOutcome::Unverified,
+            native: NativeOutcome {
+                ntstatus: Some(-7),
+                win32_last_error: Some(5),
+                requested_hns: Some(5_000),
+                selected_hns: Some(5_000),
+                effective_hns: Some(9_966),
+            },
+            name: "timer.release".to_owned(),
+            details: "command=stop".to_owned(),
         };
-        assert_eq!(
-            format_event(&event),
-            "#000007 +      42ms tray.command command=start"
+        let rendered = format_event(&event);
+        assert!(rendered.contains("op=11"));
+        assert!(rendered.contains("parent=3"));
+        assert!(rendered.contains("corr=2"));
+        assert!(rendered.contains("ntstatus=-7"));
+        assert!(rendered.contains("native_win32=5"));
+        assert!(rendered.len() <= MAX_RENDERED_EVENT_BYTES + 3);
+    }
+
+    #[test]
+    fn operation_contexts_are_local_parented_and_correlated_without_registry() {
+        let store = DiagnosticStore::new(8);
+        let root = store.begin_operation(DiagnosticSource::TrayCommand);
+        let child = store.child_operation(root, DiagnosticSource::Native);
+        assert_ne!(root.operation_id, child.operation_id);
+        assert_eq!(child.parent_operation_id, Some(root.operation_id));
+        assert_eq!(child.correlation_id, root.correlation_id);
+        store.record_with_context(
+            DiagnosticRecord {
+                context: child,
+                phase: DiagnosticPhase::Release,
+                source: DiagnosticSource::Native,
+                outcome: DiagnosticOutcome::Failed,
+                native: NativeOutcome {
+                    ntstatus: Some(-1),
+                    ..NativeOutcome::default()
+                },
+            },
+            "native.release",
+            "bounded",
         );
+        assert_eq!(store.snapshot()[0].operation_id, child.operation_id);
+    }
+
+    #[test]
+    fn event_format_is_bounded_for_large_fields() {
+        let store = DiagnosticStore::new(8);
+        store.record("event", "x".repeat(10_000));
+        assert!(format_event(&store.snapshot()[0]).len() <= MAX_RENDERED_EVENT_BYTES + 3);
     }
 
     #[test]
@@ -224,6 +446,15 @@ mod tests {
         let events = store.snapshot();
         assert!(events[0].sequence < events[1].sequence);
         assert!(events[0].elapsed <= events[1].elapsed);
+    }
+
+    #[test]
+    fn retention_clamps_to_the_hard_maximum() {
+        assert_eq!(
+            DiagnosticStore::new(usize::MAX).maximum_events(),
+            HARD_MAX_EVENTS
+        );
+        assert_eq!(DiagnosticStore::new(0).maximum_events(), 2);
     }
 
     #[test]
