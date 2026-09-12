@@ -76,6 +76,9 @@ const GWLP_USERDATA: i32 = -21;
 const GW_CHILD: u32 = 5;
 const IDI_APPLICATION: usize = 32512;
 const MB_ICONWARNING: u32 = 0x0000_0030;
+const MB_YESNO: u32 = 0x0000_0004;
+const MB_DEFBUTTON2: u32 = 0x0000_0100;
+const IDYES: i32 = 6;
 const TASKDIALOG_BUTTON_CANCEL: i32 = 2001;
 const TASKDIALOG_BUTTON_STOP_AND_QUIT: i32 = 2002;
 const TASKDIALOG_ICON_WARNING: *const u16 = (-1isize) as *const u16;
@@ -1404,20 +1407,56 @@ unsafe fn show_quit_warning(hwnd: *mut c_void) -> QuitWarningResult {
         std::ptr::null_mut(),
         std::ptr::null_mut(),
     );
-    QuitWarningResult {
-        decision: if task_dialog_hresult < 0 {
-            QuitDialogDecision::Cancel
-        } else {
-            task_dialog_decision(selected)
-        },
-        task_dialog_hresult,
-        message_box_result: None,
-        dialog_shown: task_dialog_hresult >= 0,
+    let message_box_result = if task_dialog_hresult < 0 {
+        let fallback_title = wide("True Tick quit warning");
+        let fallback_text = wide(
+            "The standard quit warning could not be shown.\n\nYes = Stop and Quit\nNo = Cancel\n\nTiming is active or ownership is uncertain.",
+        );
+        Some(MessageBoxW(
+            hwnd,
+            fallback_text.as_ptr(),
+            fallback_title.as_ptr(),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+        ))
+    } else {
+        None
+    };
+    quit_warning_result(task_dialog_hresult, selected, message_box_result)
+}
+
+fn quit_warning_result(
+    task_dialog_hresult: i32,
+    task_dialog_button: i32,
+    message_box_result: Option<i32>,
+) -> QuitWarningResult {
+    if task_dialog_hresult < 0 {
+        let result = message_box_result.unwrap_or(0);
+        QuitWarningResult {
+            decision: message_box_decision(result),
+            task_dialog_hresult,
+            message_box_result,
+            dialog_shown: result != 0,
+        }
+    } else {
+        QuitWarningResult {
+            decision: task_dialog_decision(task_dialog_button),
+            task_dialog_hresult,
+            message_box_result: None,
+            dialog_shown: true,
+        }
     }
 }
 
 fn task_dialog_decision(button_id: i32) -> QuitDialogDecision {
     if button_id == TASKDIALOG_BUTTON_STOP_AND_QUIT {
+        QuitDialogDecision::StopAndQuit
+    } else {
+        QuitDialogDecision::Cancel
+    }
+}
+
+fn message_box_decision(result: i32) -> QuitDialogDecision {
+    if result == IDYES {
         QuitDialogDecision::StopAndQuit
     } else {
         QuitDialogDecision::Cancel
@@ -1638,16 +1677,23 @@ mod tests {
     }
 
     #[test]
-    fn failed_task_dialog_is_not_shown_and_fails_closed() {
-        let result = QuitWarningResult {
-            decision: QuitDialogDecision::Cancel,
-            task_dialog_hresult: -2,
-            message_box_result: None,
-            dialog_shown: false,
-        };
-        assert_eq!(result.decision, QuitDialogDecision::Cancel);
+    fn failed_task_dialog_uses_the_message_box_fallback_decision() {
+        let result = quit_warning_result(-0x7ff8_ffff, 0, Some(IDYES));
+        assert_eq!(result.decision, QuitDialogDecision::StopAndQuit);
+        assert_eq!(result.message_box_result, Some(IDYES));
+        assert!(result.dialog_shown);
         assert!(result.task_dialog_hresult < 0);
-        assert!(!result.dialog_shown);
+    }
+
+    #[test]
+    fn message_box_maps_only_yes_to_stop_and_quit() {
+        assert_eq!(message_box_decision(IDYES), QuitDialogDecision::StopAndQuit);
+        for result in [7, 0, 1, -1, 9999] {
+            assert_eq!(message_box_decision(result), QuitDialogDecision::Cancel);
+        }
+        let failed = quit_warning_result(-1, 0, Some(0));
+        assert_eq!(failed.decision, QuitDialogDecision::Cancel);
+        assert!(!failed.dialog_shown);
     }
 
     #[test]
