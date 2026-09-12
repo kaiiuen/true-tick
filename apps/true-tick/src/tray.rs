@@ -1312,6 +1312,9 @@ fn schedule_duration_action(app: &mut App, action: DurationAction, duration: Dur
         app.publish();
         queue_intent(app, DesiredIntent::Release, "duration pause");
     }
+    if app.menu_active {
+        unsafe { refresh_popup_menu(app) };
+    }
 }
 
 fn cancel_scheduled_action(app: &mut App) {
@@ -1321,6 +1324,9 @@ fn cancel_scheduled_action(app: &mut App) {
             "duration.cancel",
             "outcome=noop reason=no_scheduled_action remaining_ms=0",
         );
+        if app.menu_active {
+            unsafe { refresh_popup_menu(app) };
+        }
         return;
     };
     app.record(
@@ -1349,6 +1355,9 @@ fn cancel_scheduled_action(app: &mut App) {
     if cancelled.action == DurationAction::Pause {
         refresh_power_for_duration(app, "cancel");
         reconcile(app);
+    }
+    if app.menu_active {
+        unsafe { refresh_popup_menu(app) };
     }
 }
 
