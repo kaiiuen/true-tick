@@ -3855,6 +3855,8 @@ unsafe fn open_diagnostic_window(app: &mut App) -> bool {
             clear_diagnostic_state(app);
             return false;
         }
+        // Populate the hidden window so its first visible frame is already real data.
+        refresh_diagnostic_window(window, app, false);
         ShowWindow(window, SW_SHOWNORMAL);
         UpdateWindow(window);
         SetForegroundWindow(window);
@@ -4903,7 +4905,11 @@ fn diagnostic_grid_refresh_message(
     )
 }
 
-unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
+unsafe fn refresh_diagnostic_window(
+    window: *mut c_void,
+    app: &mut App,
+    allow_follow_up_post: bool,
+) {
     if app.diagnostic_refreshing {
         return;
     }
@@ -5060,18 +5066,29 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
     }
     if let Some(state) = app.diagnostic_hud_state {
         let text = wide(&diagnostic_state_text(app));
-        let _ = SetWindowTextW(state, text.as_ptr());
+        if SetWindowTextW(state, text.as_ptr()) == 0 {
+            app.diagnostics.record(
+                "native.SetWindowTextW.diagnostic_hud.error",
+                format!("raw_status={}", GetLastError()),
+            );
+        }
     }
     if let Some(summary) = app.diagnostic_summary {
         let text = wide(&diagnostic_summary_text(app, retained_rows));
-        let _ = SetWindowTextW(summary, text.as_ptr());
+        if SetWindowTextW(summary, text.as_ptr()) == 0 {
+            app.diagnostics.record(
+                "native.SetWindowTextW.diagnostic_summary.error",
+                format!("raw_status={}", GetLastError()),
+            );
+        }
     }
     app.diagnostic_layout_stable = true;
     let generated_direct_records = app.diagnostic_refresh_direct_recorded;
     finish_diagnostic_redraw(window, app);
     finish_diagnostic_refresh(
         app,
-        diagnostic_follow_up_needed(generated_direct_records, follow_up_refresh),
+        allow_follow_up_post
+            && diagnostic_follow_up_needed(generated_direct_records, follow_up_refresh),
     );
 }
 
@@ -6310,7 +6327,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             }
         } else if message == WM_DIAGNOSTIC_REFRESH {
             (*app).diagnostic_refresh_pending = false;
-            refresh_diagnostic_window(hwnd, &mut *app);
+            refresh_diagnostic_window(hwnd, &mut *app, true);
             return 0;
         } else if message == WM_DPICHANGED {
             let suggested = l_param as *const Rect;
