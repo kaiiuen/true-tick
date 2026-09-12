@@ -66,7 +66,7 @@ pub(crate) fn power_reconciliation(
 }
 
 pub(crate) const fn lifecycle_status(status: TrayStatus, handoff_active: bool) -> TrayStatus {
-    if handoff_active {
+    if handoff_active || matches!(status, TrayStatus::Pausing) {
         TrayStatus::Stopping
     } else {
         status
@@ -278,7 +278,12 @@ fn state_summary(
     format!("True™ Tick: {state} · {timing_suffix}")
 }
 
-pub(crate) fn tooltip(
+#[cfg(test)]
+pub(crate) fn tooltip(status: TrayStatus, timing: TimingValues) -> String {
+    tooltip_at(status, timing, None, Instant::now())
+}
+
+pub(crate) fn tooltip_at(
     status: TrayStatus,
     timing: TimingValues,
     scheduled: Option<ScheduledAction>,
@@ -720,6 +725,7 @@ pub(crate) fn menu_items_with_duration(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pause::{CoordinatorTimerEvent, DurationCoordinator, ScheduleRequest};
 
     #[test]
     fn duration_menu_exposes_logical_fixed_submenus_and_all_choices() {
@@ -772,8 +778,12 @@ mod tests {
         assert_eq!(TrayStatus::Pausing.icon_color(), IconColor::Yellow);
         assert_eq!(TrayStatus::Paused.icon_color(), IconColor::Yellow);
         assert_eq!(
+            lifecycle_status(TrayStatus::Pausing, false),
+            TrayStatus::Stopping
+        );
+        assert_eq!(
             lifecycle_status(TrayStatus::Pausing, true),
-            TrayStatus::Pausing
+            TrayStatus::Stopping
         );
         assert!(!menu_command_is_enabled_with_pause(
             1001,
@@ -798,7 +808,7 @@ mod tests {
         ));
         assert_eq!(
             tooltip(TrayStatus::Paused, TimingValues::default()),
-            "True™ Tick: Paused"
+            "True™ Tick: Paused · Timing unknown"
         );
     }
 
@@ -832,7 +842,7 @@ mod tests {
         let timing = TimingValues::from_snapshot(snapshot, false, false, false, true);
         assert_eq!(
             tooltip(TrayStatus::Running, timing),
-            "True™ Tick: Running 0.497 ms"
+            "True™ Tick: Running · 0.497 ms"
         );
         let status = status_menu_items(
             TrayStatus::Running,
@@ -874,7 +884,7 @@ mod tests {
             None,
             now,
         );
-        assert_eq!(status[0].label, "State: Paused (Start disabled)");
+        assert_eq!(status[0].label, "State: Paused for 5m 0s");
         assert_eq!(status[3].label, "Next action: pause in 5m 0s");
         let paused_menu = menu_items_with_duration(
             TrayStatus::Paused,
@@ -909,8 +919,8 @@ mod tests {
             None,
             now,
         );
-        assert_eq!(status[0].label, "State: Blocked");
-        assert_eq!(status[1].label, "Timing: Unknown");
+        assert_eq!(status[0].label, "State: Warning");
+        assert_eq!(status[1].label, "Timing: Timing unknown");
         assert_eq!(status[2].label, "Running for: Not running");
         assert_eq!(status[3].label, "Next action: stop in 4m 12s");
         assert_eq!(status[4].label, "Ownership: Released");
@@ -1002,7 +1012,7 @@ mod tests {
     fn stopped_status_omits_unknown_timing_from_the_hover_text() {
         assert_eq!(
             tooltip(TrayStatus::Stopped, TimingValues::default()),
-            "True™ Tick: Stopped"
+            "True™ Tick: Stopped · Timing unknown"
         );
     }
 
@@ -1020,7 +1030,7 @@ mod tests {
                     valid: true,
                 },
             ),
-            "True™ Tick: Stopped, external timing"
+            "True™ Tick: Stopped · 0.497 ms"
         );
     }
 
@@ -1294,15 +1304,15 @@ mod tests {
         };
         assert_eq!(
             tooltip(TrayStatus::Running, exact),
-            "True™ Tick: Running 0.500 ms"
+            "True™ Tick: Running · 0.500 ms"
         );
         assert_eq!(
             tooltip(TrayStatus::Running, finer),
-            "True™ Tick: Running 0.497 ms"
+            "True™ Tick: Running · 0.497 ms"
         );
         assert_eq!(
             tooltip(TrayStatus::Stopped, finer),
-            "True™ Tick: Stopped 0.497 ms"
+            "True™ Tick: Stopped · 0.497 ms"
         );
         assert_eq!(
             tooltip(
@@ -1312,19 +1322,23 @@ mod tests {
                     ..TimingValues::default()
                 }
             ),
-            "True™ Tick: Starting 0.500 ms, verifying"
+            "True™ Tick: Starting · Timing unknown"
         );
-        assert_eq!(tooltip(TrayStatus::Stopping, finer), "True™ Tick: Stopping");
+        assert_eq!(
+            tooltip(TrayStatus::Stopping, finer),
+            "True™ Tick: Stopping · 0.497 ms"
+        );
         assert_eq!(
             tooltip(
                 TrayStatus::Stopping,
                 TimingValues {
                     effective: Some(Hns::new(4_966)),
                     handoff_pending: true,
+                    valid: true,
                     ..TimingValues::default()
                 }
             ),
-            "True™ Tick: Stopping, handoff pending"
+            "True™ Tick: Stopping, handoff · 0.497 ms"
         );
         assert_eq!(
             tooltip(
@@ -1332,10 +1346,11 @@ mod tests {
                 TimingValues {
                     external: true,
                     effective: Some(Hns::new(4_966)),
+                    valid: true,
                     ..TimingValues::default()
                 }
             ),
-            "True™ Tick: Stopped, external timing"
+            "True™ Tick: Stopped · 0.497 ms"
         );
         assert_eq!(
             tooltip(
@@ -1347,6 +1362,177 @@ mod tests {
             ),
             "True™ Tick: Error"
         );
+    }
+
+    #[test]
+    fn exact_tooltip_contract_covers_running_stopped_and_transitions() {
+        let now = Instant::now();
+        let timing = TimingValues {
+            effective: Some(Hns::new(4_966)),
+            valid: true,
+            ..TimingValues::default()
+        };
+        assert_eq!(
+            tooltip_at(TrayStatus::Running, timing, None, now),
+            "True™ Tick: Running · 0.497 ms"
+        );
+        assert_eq!(
+            tooltip_at(TrayStatus::Stopped, timing, None, now),
+            "True™ Tick: Stopped · 0.497 ms"
+        );
+        assert_eq!(
+            tooltip_at(TrayStatus::Starting, timing, None, now),
+            "True™ Tick: Starting · 0.497 ms"
+        );
+        assert_eq!(
+            tooltip_at(TrayStatus::Stopping, timing, None, now),
+            "True™ Tick: Stopping · 0.497 ms"
+        );
+        assert_eq!(
+            tooltip_at(
+                TrayStatus::Stopping,
+                TimingValues {
+                    handoff_pending: true,
+                    ..timing
+                },
+                None,
+                now,
+            ),
+            "True™ Tick: Stopping, handoff · 0.497 ms"
+        );
+    }
+
+    #[test]
+    fn scheduled_and_paused_tooltips_use_the_live_monotonic_deadline() {
+        let now = Instant::now();
+        let timing = TimingValues {
+            effective: Some(Hns::new(9_966)),
+            valid: true,
+            ..TimingValues::default()
+        };
+        let start = ScheduledAction {
+            action: DurationAction::Start,
+            duration: DurationChoice::FiveMinutes,
+            deadline: now + Duration::from_millis(299_999),
+            generation: 3,
+        };
+        let stop = ScheduledAction {
+            action: DurationAction::Stop,
+            ..start
+        };
+        let pause = ScheduledAction {
+            action: DurationAction::Pause,
+            ..start
+        };
+        assert_eq!(
+            tooltip_at(TrayStatus::ScheduledStart, timing, Some(start), now),
+            "True™ Tick: Starting in 5m 0s · 0.997 ms"
+        );
+        assert_eq!(
+            tooltip_at(TrayStatus::ScheduledStop, timing, Some(stop), now),
+            "True™ Tick: Stopping in 5m 0s · 0.997 ms"
+        );
+        assert_eq!(
+            tooltip_at(TrayStatus::Paused, timing, Some(pause), now),
+            "True™ Tick: Paused for 5m 0s · 0.997 ms"
+        );
+        assert_eq!(
+            tooltip_at(TrayStatus::Paused, timing, None, now),
+            "True™ Tick: Paused · 0.997 ms"
+        );
+    }
+
+    #[test]
+    fn schedule_replacement_and_expiration_derive_the_same_lifecycle_state() {
+        let now = Instant::now();
+        let mut coordinator = DurationCoordinator::new();
+        let first = coordinator.schedule(DurationAction::Start, DurationChoice::FiveMinutes, now);
+        assert!(matches!(first, ScheduleRequest::Started(_)));
+        assert_eq!(
+            scheduled_lifecycle_status(TrayStatus::Stopped, false, Some(DurationAction::Start)),
+            TrayStatus::ScheduledStart
+        );
+        let replaced = coordinator.schedule(
+            DurationAction::Pause,
+            DurationChoice::FiveMinutes,
+            now + Duration::from_secs(1),
+        );
+        assert!(matches!(replaced, ScheduleRequest::Replaced { .. }));
+        assert!(coordinator.pause_active());
+        assert_eq!(
+            coordinator.timer_event(coordinator.generation(), now + Duration::from_secs(301)),
+            CoordinatorTimerEvent::Expired(coordinator.current().unwrap())
+        );
+        assert_eq!(
+            scheduled_lifecycle_status(TrayStatus::Paused, false, Some(DurationAction::Pause)),
+            TrayStatus::Paused
+        );
+        assert_eq!(
+            scheduled_lifecycle_status(TrayStatus::Running, false, Some(DurationAction::Stop)),
+            TrayStatus::ScheduledStop
+        );
+    }
+
+    #[test]
+    fn unknown_and_external_timing_remain_concise_and_never_use_requested_timing() {
+        let now = Instant::now();
+        assert_eq!(
+            tooltip_at(
+                TrayStatus::Stopped,
+                TimingValues {
+                    requested: Some(Hns::new(5_000)),
+                    ..TimingValues::default()
+                },
+                None,
+                now,
+            ),
+            "True™ Tick: Stopped · Timing unknown"
+        );
+        assert_eq!(
+            tooltip_at(TrayStatus::Unverified, TimingValues::default(), None, now),
+            "True™ Tick: Timing unknown"
+        );
+        assert_eq!(
+            tooltip_at(
+                TrayStatus::Stopped,
+                TimingValues {
+                    requested: Some(Hns::new(5_000)),
+                    effective: Some(Hns::new(4_966)),
+                    external: true,
+                    valid: true,
+                    ..TimingValues::default()
+                },
+                None,
+                now,
+            ),
+            "True™ Tick: Stopped · 0.497 ms"
+        );
+        assert_eq!(
+            tooltip_at(TrayStatus::Error, TimingValues::default(), None, now),
+            "True™ Tick: Error"
+        );
+        assert_eq!(
+            tooltip_at(TrayStatus::Degraded, TimingValues::default(), None, now),
+            "True™ Tick: Warning"
+        );
+    }
+
+    #[test]
+    fn scheduled_and_transition_states_are_yellow_while_verified_running_is_green() {
+        for status in [
+            TrayStatus::Starting,
+            TrayStatus::ScheduledStart,
+            TrayStatus::Stopping,
+            TrayStatus::ScheduledStop,
+            TrayStatus::Paused,
+            TrayStatus::Unverified,
+        ] {
+            assert_eq!(status.icon_color(), IconColor::Yellow);
+        }
+        assert_eq!(TrayStatus::Running.icon_color(), IconColor::Green);
+        for status in [TrayStatus::Stopped, TrayStatus::Blocked, TrayStatus::Error] {
+            assert_eq!(status.icon_color(), IconColor::Red);
+        }
     }
 
     #[test]

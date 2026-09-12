@@ -29,7 +29,7 @@ use crate::tray_surface::{
     dpi_to_icon_canvas, duration_choices, duration_command, duration_menu_items, icon_pixel_color,
     menu_action_keeps_open, menu_command_dispatch_allowed, menu_command_is_enabled_with_pause,
     menu_description, menu_items_with_duration, power_reconciliation, release_needs_handoff,
-    status_menu_items, tooltip, tray_notification_opens_menu, HandoffProgress, HandoffTracker,
+    status_menu_items, tooltip_at, tray_notification_opens_menu, HandoffProgress, HandoffTracker,
     PowerReconciliation, TimingValues, TrayStatus, CANCEL_SCHEDULED_COMMAND_ID, GITHUB_COMMAND_ID,
     GITHUB_URL, HANDOFF_POLL_INTERVAL_MS, LOGS_COMMAND_ID, PAUSE_FOR_15_COMMAND_ID,
     PAUSE_FOR_30_COMMAND_ID, PAUSE_FOR_5_COMMAND_ID, PAUSE_FOR_60_COMMAND_ID,
@@ -1999,7 +1999,7 @@ impl App {
             return;
         }
         self.last_publication = Some(key);
-        let status_text = tooltip(
+        let status_text = tooltip_at(
             status,
             timing,
             self.pause.current(),
@@ -2293,7 +2293,7 @@ fn update_icon(
     for (target, source) in icon
         .sz_tip
         .iter_mut()
-        .zip(tooltip(status, timing, scheduled, std::time::Instant::now()).encode_utf16())
+        .zip(tooltip_at(status, timing, scheduled, std::time::Instant::now()).encode_utf16())
     {
         *target = source;
     }
@@ -4100,7 +4100,7 @@ impl NotifyIconData {
         for (target, source) in value
             .sz_tip
             .iter_mut()
-            .zip(tooltip(status, timing, scheduled, std::time::Instant::now()).encode_utf16())
+            .zip(tooltip_at(status, timing, scheduled, std::time::Instant::now()).encode_utf16())
         {
             *target = source;
         }
