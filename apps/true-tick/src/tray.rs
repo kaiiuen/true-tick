@@ -58,7 +58,7 @@ const SW_SHOWNORMAL: i32 = 1;
 const SW_RESTORE: i32 = 9;
 const DIAGNOSTIC_MIN_WIDTH: i32 = 420;
 const DIAGNOSTIC_MIN_HEIGHT: i32 = 260;
-const DIAGNOSTIC_WINDOW_TITLE: &str = "True Tick Status and Diagnostics";
+const DIAGNOSTIC_WINDOW_TITLE: &str = "True™ Tick Status and Diagnostics";
 const MAX_STARTUP_STATUS_BYTES: usize = 512;
 const MAX_DIAGNOSTIC_TEXT_BYTES: usize = 64 * 1024;
 const DIAGNOSTIC_WINDOW_PARENT: *mut c_void = std::ptr::null_mut();
@@ -139,7 +139,7 @@ enum QuitDialogDecision {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct QuitWarningResult {
     decision: QuitDialogDecision,
-    task_dialog_hresult: i32,
+    task_dialog_hresult: Option<i32>,
     message_box_result: Option<i32>,
     dialog_shown: bool,
 }
@@ -617,7 +617,7 @@ pub fn run() {
                     show_shutdown_warning(
                         hwnd,
                         &format!(
-                            "True Tick could not verify timer cleanup. The app remains open so cleanup can be retried.\n\n{error}"
+                            "True™ Tick could not verify timer cleanup. The app remains open so cleanup can be retried.\n\n{error}"
                         ),
                     );
                 }
@@ -640,7 +640,7 @@ pub fn run() {
                     show_shutdown_warning(
                         hwnd,
                         &format!(
-                            "True Tick message handling failed and the app must exit. Native error code: {raw_error}."
+                            "True™ Tick message handling failed and the app must exit. Native error code: {raw_error}."
                         ),
                     );
                     break;
@@ -660,7 +660,7 @@ pub fn run() {
                     show_shutdown_warning(
                         hwnd,
                         &format!(
-                            "True Tick must exit before cleanup could be verified. Native cleanup state is unresolved.\n\n{error}"
+                            "True™ Tick must exit before cleanup could be verified. Native cleanup state is unresolved.\n\n{error}"
                         ),
                     );
                     break;
@@ -746,7 +746,7 @@ unsafe fn destroy_diagnostic_window(app: &mut App) {
 
 unsafe fn show_shutdown_warning(hwnd: *mut c_void, message: &str) {
     let text = wide(message);
-    let title = wide("True Tick shutdown warning");
+    let title = wide("True™ Tick shutdown warning");
     MessageBoxW(hwnd, text.as_ptr(), title.as_ptr(), MB_ICONWARNING);
 }
 
@@ -1565,7 +1565,7 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
                             show_shutdown_warning(
                                 hwnd,
                                 &format!(
-                                    "Tick could not verify a safe stop. The app remains open.\n\n{error}"
+                                    "True™ Tick could not verify a safe stop. The app remains open.\n\n{error}"
                                 ),
                             );
                             return true;
@@ -1575,12 +1575,11 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
                 QuitDecision::RequireSafetyDialog { reason } => {
                     app.record("quit.warning.shown", format!("reason={reason:?}"));
                     let warning = show_quit_warning(hwnd);
-                    let task_dialog_hresult = warning.task_dialog_hresult;
                     app.record(
                         "quit.dialog.result",
                         format!(
-                            "task_dialog_hresult={task_dialog_hresult} task_dialog_hresult_hex=0x{:08X} message_box_result={:?} final_decision={:?} dialog_shown={}",
-                            task_dialog_hresult as u32,
+                            "dialog_path=message_box task_dialog=secondary_not_invoked task_dialog_hresult={:?} task_dialog_hresult_hex=not_invoked message_box_result={:?} final_decision={:?} dialog_shown={}",
+                            warning.task_dialog_hresult,
                             warning.message_box_result,
                             warning.decision,
                             warning.dialog_shown
@@ -1609,12 +1608,12 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
                                     );
                                     app.record("quit.exit.allowed", "result=denied");
                                     let message = format!(
-                                        "Tick could not verify a safe stop. The app remains open.\n\n{error}"
+                                        "True™ Tick could not verify a safe stop. The app remains open.\n\n{error}"
                                     );
                                     MessageBoxW(
                                         hwnd,
                                         wide(&message).as_ptr(),
-                                        wide("True Tick quit warning").as_ptr(),
+                                        wide("True™ Tick quit warning").as_ptr(),
                                         MB_ICONWARNING,
                                     );
                                     return true;
@@ -2061,6 +2060,21 @@ fn quit_decision_for(status: TrayStatus, ownership: OwnershipState) -> QuitDecis
 }
 
 unsafe fn show_quit_warning(hwnd: *mut c_void) -> QuitWarningResult {
+    let title = wide("True™ Tick quit warning");
+    let text = wide(
+        "True™ Tick is still active or its ownership is uncertain.\n\nYes = Stop and Quit\nNo = Cancel\n\nOnly Yes will stop timing and quit after verification.",
+    );
+    let result = MessageBoxW(
+        hwnd,
+        text.as_ptr(),
+        title.as_ptr(),
+        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+    );
+    quit_warning_result(None, 0, Some(result))
+}
+
+#[allow(dead_code)]
+unsafe fn show_quit_warning_task_dialog_secondary(hwnd: *mut c_void) -> (i32, i32) {
     let cancel = wide("Cancel");
     let stop_and_quit = wide("Stop and Quit");
     let buttons = [
@@ -2073,7 +2087,7 @@ unsafe fn show_quit_warning(hwnd: *mut c_void) -> QuitWarningResult {
             button_text: stop_and_quit.as_ptr(),
         },
     ];
-    let title = wide("True Tick quit warning");
+    let title = wide("True™ Tick quit warning");
     let instruction = wide("Stop timing before quitting?");
     let content = wide(
         "Timing is active or ownership is uncertain. Quit only after a safe stop is verified.",
@@ -2104,48 +2118,44 @@ unsafe fn show_quit_warning(hwnd: *mut c_void) -> QuitWarningResult {
         width: 0,
     };
     let mut selected = 0;
-    let task_dialog_hresult = TaskDialogIndirect(
+    let hresult = TaskDialogIndirect(
         &config,
         &mut selected,
         std::ptr::null_mut(),
         std::ptr::null_mut(),
     );
-    let message_box_result = if task_dialog_hresult < 0 {
-        let fallback_title = wide("True Tick quit warning");
-        let fallback_text = wide(
-            "The standard quit warning could not be shown.\n\nYes = Stop and Quit\nNo = Cancel\n\nTiming is active or ownership is uncertain.",
-        );
-        Some(MessageBoxW(
-            hwnd,
-            fallback_text.as_ptr(),
-            fallback_title.as_ptr(),
-            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
-        ))
-    } else {
-        None
-    };
-    quit_warning_result(task_dialog_hresult, selected, message_box_result)
+    (hresult, selected)
 }
 
 fn quit_warning_result(
-    task_dialog_hresult: i32,
+    task_dialog_hresult: Option<i32>,
     task_dialog_button: i32,
     message_box_result: Option<i32>,
 ) -> QuitWarningResult {
-    if task_dialog_hresult < 0 {
-        let result = message_box_result.unwrap_or(0);
-        QuitWarningResult {
-            decision: message_box_decision(result),
-            task_dialog_hresult,
-            message_box_result,
-            dialog_shown: result != 0,
+    match task_dialog_hresult {
+        Some(hresult) if hresult < 0 => {
+            let result = message_box_result.unwrap_or(0);
+            QuitWarningResult {
+                decision: message_box_decision(result),
+                task_dialog_hresult: Some(hresult),
+                message_box_result,
+                dialog_shown: result != 0,
+            }
         }
-    } else {
-        QuitWarningResult {
+        Some(hresult) => QuitWarningResult {
             decision: task_dialog_decision(task_dialog_button),
-            task_dialog_hresult,
+            task_dialog_hresult: Some(hresult),
             message_box_result: None,
             dialog_shown: true,
+        },
+        None => {
+            let result = message_box_result.unwrap_or(0);
+            QuitWarningResult {
+                decision: message_box_decision(result),
+                task_dialog_hresult: None,
+                message_box_result,
+                dialog_shown: result != 0,
+            }
         }
     }
 }
@@ -2416,11 +2426,11 @@ mod tests {
 
     #[test]
     fn failed_task_dialog_uses_the_message_box_fallback_decision() {
-        let result = quit_warning_result(-0x7ff8_ffff, 0, Some(IDYES));
+        let result = quit_warning_result(Some(-0x7ff8_ffff), 0, Some(IDYES));
         assert_eq!(result.decision, QuitDialogDecision::StopAndQuit);
         assert_eq!(result.message_box_result, Some(IDYES));
         assert!(result.dialog_shown);
-        assert!(result.task_dialog_hresult < 0);
+        assert_eq!(result.task_dialog_hresult, Some(-0x7ff8_ffff));
     }
 
     #[test]
@@ -2429,14 +2439,14 @@ mod tests {
         for result in [7, 0, 1, -1, 9999] {
             assert_eq!(message_box_decision(result), QuitDialogDecision::Cancel);
         }
-        let failed = quit_warning_result(-1, 0, Some(0));
+        let failed = quit_warning_result(Some(-1), 0, Some(0));
         assert_eq!(failed.decision, QuitDialogDecision::Cancel);
         assert!(!failed.dialog_shown);
     }
 
     #[test]
     fn diagnostic_window_contract_is_normal_and_taskbar_visible() {
-        assert_eq!(DIAGNOSTIC_WINDOW_TITLE, "True Tick Status and Diagnostics");
+        assert_eq!(DIAGNOSTIC_WINDOW_TITLE, "True™ Tick Status and Diagnostics");
         assert_eq!(
             diagnostic_window_style() & WS_OVERLAPPEDWINDOW,
             WS_OVERLAPPEDWINDOW
