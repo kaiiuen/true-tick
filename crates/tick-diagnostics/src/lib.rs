@@ -220,7 +220,8 @@ stable_labels!(DiagnosticOutcome, {
     DiagnosticOutcome::Unverified => "Unverified",
 });
 
-pub const REPORT_COLUMNS: [&str; 10] = [
+pub const REPORT_COLUMNS: [&str; 11] = [
+    "Row",
     "Sequence",
     "Elapsed",
     "Operation",
@@ -390,7 +391,7 @@ fn native_details(native: NativeOutcome) -> String {
     )
 }
 
-pub fn diagnostic_grid_row(event: &DiagnosticEvent) -> DiagnosticGridRow {
+pub fn diagnostic_grid_row(row_position: usize, event: &DiagnosticEvent) -> DiagnosticGridRow {
     let details = if event.details.is_empty() {
         native_details(event.native)
     } else {
@@ -398,6 +399,7 @@ pub fn diagnostic_grid_row(event: &DiagnosticEvent) -> DiagnosticGridRow {
     };
     DiagnosticGridRow {
         cells: vec![
+            row_position.to_string(),
             event.sequence.to_string(),
             format!("+{}ms", event.elapsed.as_millis()),
             event.operation_id.to_string(),
@@ -409,6 +411,63 @@ pub fn diagnostic_grid_row(event: &DiagnosticEvent) -> DiagnosticGridRow {
             event.name.clone(),
             truncate_utf8(&details, MAX_FIELD_LENGTH),
         ],
+    }
+}
+
+pub fn diagnostic_grid_rows(
+    events: &[DiagnosticEvent],
+    selection: RowSelection,
+) -> Vec<DiagnosticGridRow> {
+    if selection.is_empty() {
+        return Vec::new();
+    }
+    events
+        .iter()
+        .enumerate()
+        .skip(selection.start().saturating_sub(1))
+        .take(selection.row_count())
+        .map(|(index, event)| diagnostic_grid_row(index.saturating_add(1), event))
+        .collect()
+}
+
+pub fn selected_event_sequences(events: &[DiagnosticEvent], selection: RowSelection) -> Vec<u64> {
+    if selection.is_empty() {
+        return Vec::new();
+    }
+    events
+        .iter()
+        .skip(selection.start().saturating_sub(1))
+        .take(selection.row_count())
+        .map(|event| event.sequence)
+        .collect()
+}
+
+pub fn row_selection_for_sequences(
+    events: &[DiagnosticEvent],
+    sequences: &[u64],
+) -> Option<RowSelection> {
+    if sequences.is_empty() {
+        return None;
+    }
+    let positions = sequences
+        .iter()
+        .map(|sequence| {
+            events
+                .iter()
+                .position(|event| event.sequence == *sequence)
+                .map(|index| index.saturating_add(1))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if positions
+        .windows(2)
+        .all(|window| window[1] == window[0].saturating_add(1))
+    {
+        Some(RowSelection::new(
+            positions[0],
+            *positions.last().expect("non-empty positions"),
+        ))
+    } else {
+        None
     }
 }
 
@@ -712,19 +771,20 @@ mod tests {
             cells: vec!["one\ttwo\nthree".to_owned(), "x".repeat(10_000)],
         };
         let output = format_tsv(&[row]);
-        assert!(output.starts_with("Sequence\tElapsed\tOperation\tParent\tCorrelation\tPhase\tSource\tOutcome\tEvent\tDetails\r\n"));
+        assert!(output.starts_with("Row\tSequence\tElapsed\tOperation\tParent\tCorrelation\tPhase\tSource\tOutcome\tEvent\tDetails\r\n"));
         assert!(output.contains("one two three"));
         assert_eq!(output.matches('\n').count(), 2);
         assert!(output.len() <= MAX_TSV_BYTES);
         assert_eq!(output.lines().count(), 2);
-        assert_eq!(output.lines().nth(1).unwrap().split('\t').count(), 10);
+        assert_eq!(output.lines().nth(1).unwrap().split('\t').count(), 11);
     }
 
     #[test]
     fn report_columns_and_typed_grid_row_preserve_operation_lineage() {
-        assert_eq!(REPORT_COLUMNS.len(), 10);
-        assert_eq!(REPORT_COLUMNS[0], "Sequence");
-        assert_eq!(REPORT_COLUMNS[9], "Details");
+        assert_eq!(REPORT_COLUMNS.len(), 11);
+        assert_eq!(REPORT_COLUMNS[0], "Row");
+        assert_eq!(REPORT_COLUMNS[1], "Sequence");
+        assert_eq!(REPORT_COLUMNS[10], "Details");
         let event = DiagnosticEvent {
             sequence: 7,
             elapsed: Duration::from_millis(42),
@@ -744,19 +804,20 @@ mod tests {
             name: "timer.release".to_owned(),
             details: "command=stop".to_owned(),
         };
-        let row = diagnostic_grid_row(&event);
+        let row = diagnostic_grid_row(4, &event);
         assert_eq!(row.cells.len(), REPORT_COLUMNS.len());
-        assert_eq!(row.cells[0], "7");
-        assert_eq!(row.cells[1], "+42ms");
-        assert_eq!(row.cells[2], "11");
-        assert_eq!(row.cells[3], "3");
-        assert_eq!(row.cells[4], "2");
-        assert_eq!(row.cells[5], "Release");
-        assert_eq!(row.cells[6], "Handoff");
-        assert_eq!(row.cells[7], "Unverified");
-        assert_eq!(row.cells[8], "timer.release");
+        assert_eq!(row.cells[0], "4");
+        assert_eq!(row.cells[1], "7");
+        assert_eq!(row.cells[2], "+42ms");
+        assert_eq!(row.cells[3], "11");
+        assert_eq!(row.cells[4], "3");
+        assert_eq!(row.cells[5], "2");
+        assert_eq!(row.cells[6], "Release");
+        assert_eq!(row.cells[7], "Handoff");
+        assert_eq!(row.cells[8], "Unverified");
+        assert_eq!(row.cells[9], "timer.release");
         assert_eq!(
-            row.cells[9],
+            row.cells[10],
             "command=stop ntstatus=-7 win32_last_error=5 requested_hns=5000 selected_hns=5000 effective_hns=9966"
         );
     }
@@ -780,13 +841,14 @@ mod tests {
             "rows=1",
         );
         let event = store.snapshot().into_iter().next().expect("snapshot row");
-        let row = diagnostic_grid_row(&event);
+        let row = diagnostic_grid_row(1, &event);
         assert_eq!(row.cells.len(), REPORT_COLUMNS.len());
-        assert_eq!(row.cells[2], context.operation_id.to_string());
-        assert_eq!(row.cells[5], "Render");
-        assert_eq!(row.cells[8], "diagnostic.refresh");
-        assert!(row.cells[9].contains("rows=1"));
-        assert!(row.cells[9].contains("win32_last_error=5"));
+        assert_eq!(row.cells[0], "1");
+        assert_eq!(row.cells[3], context.operation_id.to_string());
+        assert_eq!(row.cells[6], "Render");
+        assert_eq!(row.cells[9], "diagnostic.refresh");
+        assert!(row.cells[10].contains("rows=1"));
+        assert!(row.cells[10].contains("win32_last_error=5"));
     }
 
     #[test]
@@ -808,10 +870,10 @@ mod tests {
             name: "query".to_owned(),
             details: "x".to_owned(),
         };
-        let row = diagnostic_grid_row(&event);
-        assert!(row.cells[9].len() <= MAX_FIELD_LENGTH + 3);
-        assert!(row.cells[9].contains("ntstatus=-1"));
-        assert!(row.cells[9].contains("win32_last_error=5"));
+        let row = diagnostic_grid_row(1, &event);
+        assert!(row.cells[10].len() <= MAX_FIELD_LENGTH + 3);
+        assert!(row.cells[10].contains("ntstatus=-1"));
+        assert!(row.cells[10].contains("win32_last_error=5"));
     }
 
     #[test]

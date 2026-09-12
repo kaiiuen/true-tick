@@ -10,9 +10,10 @@ use std::sync::Arc;
 
 use tick_core::{DesiredIntent, DesiredIntentQueue};
 use tick_diagnostics::{
-    diagnostic_grid_row, format_tsv, parse_row_selection, truncate_utf8, DiagnosticOutcome,
-    DiagnosticPhase, DiagnosticRecord, DiagnosticSource, DiagnosticStore, NativeOutcome,
-    OperationContext, RowSelection, DEFAULT_MAX_EVENTS, REPORT_COLUMNS,
+    diagnostic_grid_rows, format_tsv, parse_row_selection, row_selection_for_sequences,
+    selected_event_sequences, truncate_utf8, DiagnosticOutcome, DiagnosticPhase, DiagnosticRecord,
+    DiagnosticSource, DiagnosticStore, NativeOutcome, OperationContext, RowSelection,
+    DEFAULT_MAX_EVENTS, REPORT_COLUMNS,
 };
 use tick_observation_windows::{ObservationSource, WindowsObservation};
 use tick_ownership::{OwnershipState, TimerController, TimingSnapshot, Verification};
@@ -97,7 +98,7 @@ const MAX_STARTUP_STATUS_BYTES: usize = 512;
 const DIAGNOSTIC_WINDOW_PARENT: *mut c_void = std::ptr::null_mut();
 const DIAGNOSTIC_SUMMARY_HEIGHT: i32 = 148;
 const DIAGNOSTIC_TOOLBAR_HEIGHT: i32 = 40;
-const DIAGNOSTIC_COLUMN_WIDTHS: [i32; 10] = [70, 78, 78, 70, 86, 82, 90, 86, 160, 240];
+const DIAGNOSTIC_COLUMN_WIDTHS: [i32; 11] = [54, 70, 78, 78, 70, 86, 82, 90, 86, 160, 240];
 const DIAGNOSTIC_RANGE_INPUT_LIMIT: usize = 64;
 const WS_CHILD: u32 = 0x40000000;
 const WS_VSCROLL: u32 = 0x00200000;
@@ -470,12 +471,14 @@ struct App {
     diagnostic_window: Option<*mut c_void>,
     diagnostic_summary: Option<*mut c_void>,
     diagnostic_toolbar_label: Option<*mut c_void>,
+    diagnostic_selection_summary: Option<*mut c_void>,
     diagnostic_range_input: Option<*mut c_void>,
     diagnostic_copy_button: Option<*mut c_void>,
     diagnostic_export_button: Option<*mut c_void>,
     diagnostic_message: Option<*mut c_void>,
     diagnostic_list: Option<*mut c_void>,
     diagnostic_selection: Option<RowSelection>,
+    diagnostic_selection_sequences: Option<Vec<u64>>,
     diagnostic_message_text: String,
     diagnostic_refresh_pending: bool,
     menu_active: bool,
@@ -646,12 +649,14 @@ pub fn run() {
             diagnostic_window: None,
             diagnostic_summary: None,
             diagnostic_toolbar_label: None,
+            diagnostic_selection_summary: None,
             diagnostic_range_input: None,
             diagnostic_copy_button: None,
             diagnostic_export_button: None,
             diagnostic_message: None,
             diagnostic_list: None,
             diagnostic_selection: None,
+            diagnostic_selection_sequences: None,
             diagnostic_message_text: String::new(),
             diagnostic_refresh_pending: false,
             menu_active: false,
@@ -3571,7 +3576,7 @@ fn power_state_label(power: PowerState) -> &'static str {
     }
 }
 
-fn diagnostic_summary_text(app: &App) -> String {
+fn diagnostic_summary_text(app: &App, retained: usize) -> String {
     let status = status_menu_items(
         app.lifecycle_status(),
         app.timing_values(),
@@ -3580,7 +3585,6 @@ fn diagnostic_summary_text(app: &App) -> String {
         app.running_duration(),
         std::time::Instant::now(),
     );
-    let retained = app.diagnostics.snapshot().len();
     format!(
         "{}\r\n{}\r\n{}\r\n{}\r\nPower: {}\r\nStartup: {}\r\nRetained events: {}/{}\r\nDiagnostics are session-local. Newest retained events are shown after the {}-event cap. Timing is current only when the latest observation is valid, otherwise it is Unknown.\r\n",
         status[0].label,
@@ -3625,31 +3629,90 @@ unsafe fn set_diagnostic_message(app: &mut App, message: impl Into<String>) {
     }
 }
 
-unsafe fn refresh_diagnostic_controls(app: &mut App, retained_rows: usize) {
+fn diagnostic_selection_summary(selection: Option<RowSelection>, retained_rows: usize) -> String {
+    match selection {
+        Some(selection) if selection.is_all(retained_rows) => format!("All rows {retained_rows}"),
+        Some(selection) => format!(
+            "Rows {}-{} of {retained_rows}",
+            selection.start(),
+            selection.end()
+        ),
+        None => "Selection unavailable".to_owned(),
+    }
+}
+
+unsafe fn set_diagnostic_selection_summary(app: &mut App, text: impl AsRef<str>) {
+    if let Some(summary) = app.diagnostic_selection_summary {
+        let text = wide(text.as_ref());
+        let _ = SetWindowTextW(summary, text.as_ptr());
+    }
+}
+
+unsafe fn set_diagnostic_action_enabled(app: &App, enabled: bool) {
+    if let Some(copy) = app.diagnostic_copy_button {
+        EnableWindow(copy, i32::from(enabled));
+    }
+    if let Some(export) = app.diagnostic_export_button {
+        EnableWindow(export, i32::from(enabled));
+    }
+}
+
+unsafe fn refresh_diagnostic_controls(
+    app: &mut App,
+    events: &[tick_diagnostics::DiagnosticEvent],
+    preserve_selection: bool,
+) {
+    let retained_rows = events.len();
     let input = diagnostic_range_text(app);
+    let input_is_all = input.trim().is_empty() || input.trim().eq_ignore_ascii_case("all");
+    if preserve_selection && !input_is_all {
+        if let Some(sequences) = app.diagnostic_selection_sequences.clone() {
+            if let Some(selection) = row_selection_for_sequences(events, &sequences) {
+                app.diagnostic_selection = Some(selection);
+                set_diagnostic_selection_summary(
+                    app,
+                    diagnostic_selection_summary(Some(selection), retained_rows),
+                );
+                set_diagnostic_action_enabled(app, !selection.is_empty());
+                return;
+            }
+            app.diagnostic_selection = None;
+            app.diagnostic_selection_sequences = None;
+            set_diagnostic_selection_summary(
+                app,
+                "Selection reset: selected rows are no longer retained",
+            );
+            set_diagnostic_action_enabled(app, false);
+            set_diagnostic_message(
+                app,
+                "Selection reset: selected rows are no longer retained.",
+            );
+            app.diagnostics.record(
+                "diagnostic.selection.reset",
+                format!("reason=rows_not_retained retained_rows={retained_rows}"),
+            );
+            return;
+        }
+    }
     match parse_row_selection(&input, retained_rows) {
         Ok(selection) => {
             app.diagnostic_selection = Some(selection);
+            app.diagnostic_selection_sequences = Some(selected_event_sequences(events, selection));
             if app.diagnostic_message_text.starts_with("Invalid range:") {
                 set_diagnostic_message(app, "");
             }
-            let enabled = !selection.is_empty();
-            if let Some(copy) = app.diagnostic_copy_button {
-                EnableWindow(copy, i32::from(enabled));
-            }
-            if let Some(export) = app.diagnostic_export_button {
-                EnableWindow(export, i32::from(enabled));
-            }
+            set_diagnostic_selection_summary(
+                app,
+                diagnostic_selection_summary(Some(selection), retained_rows),
+            );
+            set_diagnostic_action_enabled(app, !selection.is_empty());
         }
         Err(error) => {
             app.diagnostic_selection = None;
+            app.diagnostic_selection_sequences = None;
+            set_diagnostic_selection_summary(app, "Selection unavailable");
             set_diagnostic_message(app, format!("Invalid range: {error}"));
-            if let Some(copy) = app.diagnostic_copy_button {
-                EnableWindow(copy, 0);
-            }
-            if let Some(export) = app.diagnostic_export_button {
-                EnableWindow(export, 0);
-            }
+            set_diagnostic_action_enabled(app, false);
         }
     }
 }
@@ -3697,7 +3760,17 @@ unsafe fn layout_diagnostic_controls(window: *mut c_void, app: &App) {
             1,
         );
     }
-    let copy_left = scale_logical(176, dpi);
+    if let Some(summary) = app.diagnostic_selection_summary {
+        let _ = MoveWindow(
+            summary,
+            scale_logical(176, dpi),
+            toolbar_top.saturating_add(scale_logical(10, dpi)),
+            scale_logical(136, dpi),
+            scale_logical(20, dpi),
+            1,
+        );
+    }
+    let copy_left = scale_logical(320, dpi);
     if let Some(copy) = app.diagnostic_copy_button {
         let _ = MoveWindow(
             copy,
@@ -3708,7 +3781,7 @@ unsafe fn layout_diagnostic_controls(window: *mut c_void, app: &App) {
             1,
         );
     }
-    let export_left = scale_logical(252, dpi);
+    let export_left = scale_logical(396, dpi);
     if let Some(export) = app.diagnostic_export_button {
         let _ = MoveWindow(
             export,
@@ -3720,7 +3793,7 @@ unsafe fn layout_diagnostic_controls(window: *mut c_void, app: &App) {
         );
     }
     if let Some(message) = app.diagnostic_message {
-        let message_left = scale_logical(328, dpi);
+        let message_left = scale_logical(472, dpi);
         let message_width = width.saturating_sub(message_left).max(0);
         let _ = MoveWindow(
             message,
@@ -3733,12 +3806,12 @@ unsafe fn layout_diagnostic_controls(window: *mut c_void, app: &App) {
     }
     if let Some(list) = app.diagnostic_list {
         let _ = MoveWindow(list, 0, list_top, width, height.saturating_sub(list_top), 1);
-        let fixed_width: i32 = DIAGNOSTIC_COLUMN_WIDTHS[..9]
+        let fixed_width: i32 = DIAGNOSTIC_COLUMN_WIDTHS[..10]
             .iter()
             .map(|value| scale_logical(*value, dpi))
             .sum();
         for (index, logical_width) in DIAGNOSTIC_COLUMN_WIDTHS.iter().enumerate() {
-            let column_width = if index == 9 {
+            let column_width = if index == 10 {
                 scale_logical(240, dpi).max(width.saturating_sub(fixed_width))
             } else {
                 scale_logical(*logical_width, dpi)
@@ -3796,10 +3869,11 @@ fn diagnostic_grid_refresh_message(
 }
 
 unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
-    let retained_rows = app.diagnostics.snapshot().len();
-    refresh_diagnostic_controls(app, retained_rows);
+    let events = app.diagnostics.snapshot();
+    let retained_rows = events.len();
+    refresh_diagnostic_controls(app, &events, true);
     if let Some(summary) = app.diagnostic_summary {
-        let text = wide(&diagnostic_summary_text(app));
+        let text = wide(&diagnostic_summary_text(app, retained_rows));
         let _ = SetWindowTextW(summary, text.as_ptr());
     }
     let Some(list) = app.diagnostic_list else {
@@ -3807,14 +3881,15 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
             .record("diagnostic.grid.refresh.error", "list_handle_null");
         return;
     };
-    let events = app.diagnostics.snapshot();
     let snapshot_rows = events.len();
     let _ = SendMessageW(list, LVM_DELETEALLITEMS, 0, 0);
     let mut inserted_rows = 0usize;
     let mut insert_failures = 0usize;
     let mut set_text_failures = 0usize;
-    for (row_index, event) in events.iter().enumerate() {
-        let row = diagnostic_grid_row(event);
+    for (row_index, row) in diagnostic_grid_rows(&events, RowSelection::all(snapshot_rows))
+        .into_iter()
+        .enumerate()
+    {
         let mut first = wide(&row.cells[0]);
         let item = ListViewItem {
             mask: LVIF_TEXT,
@@ -4133,12 +4208,8 @@ fn diagnostic_toolbar_action(app: &mut App, action: &str) {
         }
     };
     app.diagnostic_selection = Some(selection);
-    let rows = events
-        .iter()
-        .skip(selection.start().saturating_sub(1))
-        .take(selection.row_count())
-        .map(diagnostic_grid_row)
-        .collect::<Vec<_>>();
+    app.diagnostic_selection_sequences = Some(selected_event_sequences(&events, selection));
+    let rows = diagnostic_grid_rows(&events, selection);
     let tsv = format_tsv(&rows);
     let details = diagnostic_range_details(selection, retained_rows);
     app.record(
@@ -4292,11 +4363,14 @@ fn diagnostic_toolbar_action(app: &mut App, action: &str) {
 }
 
 fn diagnostic_range_changed(app: &mut App) {
-    let retained_rows = app.diagnostics.snapshot().len();
+    let events = app.diagnostics.snapshot();
+    let retained_rows = events.len();
     let input = unsafe { diagnostic_range_text(app) };
     app.begin_operation(DiagnosticSource::Diagnostic);
     match parse_row_selection(&input, retained_rows) {
         Ok(selection) => {
+            app.diagnostic_selection = Some(selection);
+            app.diagnostic_selection_sequences = Some(selected_event_sequences(&events, selection));
             app.record(
                 "diagnostic.range.parsed",
                 format!(
@@ -4319,11 +4393,13 @@ fn diagnostic_range_changed(app: &mut App) {
                     "selected_range=none retained_rows={retained_rows} row_count=0 format=TSV result=failed error={error}"
                 ),
             );
+            app.diagnostic_selection = None;
+            app.diagnostic_selection_sequences = None;
             app.finish_operation(DiagnosticOutcome::Failed);
         }
     }
     unsafe {
-        refresh_diagnostic_controls(app, retained_rows);
+        refresh_diagnostic_controls(app, &events, false);
     }
 }
 
@@ -4389,6 +4465,20 @@ unsafe extern "system" fn diagnostic_window_proc(
             24,
             hwnd,
             ID_DIAGNOSTIC_RANGE as *mut c_void,
+            GetModuleHandleW(std::ptr::null()),
+            std::ptr::null_mut(),
+        );
+        let selection_summary = CreateWindowExW(
+            0,
+            static_class.as_ptr(),
+            wide("All rows 0").as_ptr(),
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            0,
+            0,
+            136,
+            24,
+            hwnd,
+            std::ptr::null_mut(),
             GetModuleHandleW(std::ptr::null()),
             std::ptr::null_mut(),
         );
@@ -4482,6 +4572,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             }
         };
         let label_error = control_error(label);
+        let selection_summary_error = control_error(selection_summary);
         let range_error = control_error(range_input);
         let copy_error = control_error(copy_button);
         let export_error = control_error(export_button);
@@ -4489,6 +4580,7 @@ unsafe extern "system" fn diagnostic_window_proc(
         let list_error = control_error(list);
         if summary.is_null()
             || label.is_null()
+            || selection_summary.is_null()
             || range_input.is_null()
             || copy_button.is_null()
             || export_button.is_null()
@@ -4499,11 +4591,13 @@ unsafe extern "system" fn diagnostic_window_proc(
                 (*(app_ptr as *mut App)).diagnostics.record(
                     "native.CreateWindowExW.diagnostic_control.error",
                     format!(
-                        "summary_null={} summary_raw_status={} label_null={} label_raw_status={} range_null={} range_raw_status={} copy_null={} copy_raw_status={} export_null={} export_raw_status={} message_null={} message_raw_status={} list_null={} list_raw_status={}",
+                        "summary_null={} summary_raw_status={} label_null={} label_raw_status={} selection_summary_null={} selection_summary_raw_status={} range_null={} range_raw_status={} copy_null={} copy_raw_status={} export_null={} export_raw_status={} message_null={} message_raw_status={} list_null={} list_raw_status={}",
                         summary.is_null(),
                         summary_error,
                         label.is_null(),
                         label_error,
+                        selection_summary.is_null(),
+                        selection_summary_error,
                         range_input.is_null(),
                         range_error,
                         copy_button.is_null(),
@@ -4520,6 +4614,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             for control in [
                 summary,
                 label,
+                selection_summary,
                 range_input,
                 copy_button,
                 export_button,
@@ -4546,6 +4641,7 @@ unsafe extern "system" fn diagnostic_window_proc(
         if !app_ptr.is_null() {
             (*app).diagnostic_summary = Some(summary);
             (*app).diagnostic_toolbar_label = Some(label);
+            (*app).diagnostic_selection_summary = Some(selection_summary);
             (*app).diagnostic_range_input = Some(range_input);
             (*app).diagnostic_copy_button = Some(copy_button);
             (*app).diagnostic_export_button = Some(export_button);
@@ -4594,12 +4690,14 @@ unsafe extern "system" fn diagnostic_window_proc(
             (*app).diagnostic_window = None;
             (*app).diagnostic_summary = None;
             (*app).diagnostic_toolbar_label = None;
+            (*app).diagnostic_selection_summary = None;
             (*app).diagnostic_range_input = None;
             (*app).diagnostic_copy_button = None;
             (*app).diagnostic_export_button = None;
             (*app).diagnostic_message = None;
             (*app).diagnostic_list = None;
             (*app).diagnostic_selection = None;
+            (*app).diagnostic_selection_sequences = None;
             (*app).diagnostic_message_text.clear();
             (*app).diagnostic_refresh_pending = false;
         }
