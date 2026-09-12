@@ -490,6 +490,18 @@ pub fn diagnostic_grid_rows(
         .collect()
 }
 
+pub fn diagnostic_grid_rows_for_sequences(
+    events: &[DiagnosticEvent],
+    sequences: &[u64],
+) -> Vec<DiagnosticGridRow> {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| sequences.contains(&event.sequence))
+        .map(|(index, event)| diagnostic_grid_row(index.saturating_add(1), event))
+        .collect()
+}
+
 pub fn selected_event_sequences(events: &[DiagnosticEvent], selection: RowSelection) -> Vec<u64> {
     if selection.is_empty() {
         return Vec::new();

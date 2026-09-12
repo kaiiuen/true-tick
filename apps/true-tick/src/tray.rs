@@ -10,12 +10,12 @@ use std::sync::Arc;
 
 use tick_core::{DesiredIntent, DesiredIntentQueue};
 use tick_diagnostics::{
-    diagnostic_grid_rows, format_tsv, latest_row_selection, parse_display_limit,
-    parse_row_selection, row_selection_for_sequences, selected_event_sequences,
-    selected_event_sequences_for_positions, selected_event_sequences_for_sequences, truncate_utf8,
-    visible_positions_for_sequences, DiagnosticOutcome, DiagnosticPhase, DiagnosticRecord,
-    DiagnosticSource, DiagnosticStore, NativeOutcome, OperationContext, RowSelection,
-    DEFAULT_MAX_EVENTS, REPORT_COLUMNS,
+    diagnostic_grid_rows, diagnostic_grid_rows_for_sequences, format_tsv, latest_row_selection,
+    parse_display_limit, parse_row_selection, row_selection_for_sequences,
+    selected_event_sequences, selected_event_sequences_for_positions,
+    selected_event_sequences_for_sequences, truncate_utf8, visible_positions_for_sequences,
+    DiagnosticOutcome, DiagnosticPhase, DiagnosticRecord, DiagnosticSource, DiagnosticStore,
+    NativeOutcome, OperationContext, RowSelection, DEFAULT_MAX_EVENTS, REPORT_COLUMNS,
 };
 use tick_observation_windows::{ObservationSource, WindowsObservation};
 use tick_ownership::{OwnershipState, TimerController, TimingSnapshot, Verification};
@@ -3895,6 +3895,9 @@ unsafe fn update_diagnostic_grid_selection(app: &mut App) {
     );
     app.diagnostic_grid_selection_sequences = selected;
     app.diagnostic_grid_selection_reset = false;
+    if app.diagnostic_message_text.starts_with("Selection reset:") {
+        set_diagnostic_message(app, "");
+    }
     set_diagnostic_selection_summary(app, diagnostic_selection_summary(app, events.len()));
     set_diagnostic_action_enabled(
         app,
@@ -4450,64 +4453,124 @@ fn diagnostic_range_details(selection: RowSelection, retained_rows: usize) -> St
     )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiagnosticTransferSource {
+    GridSelection,
+    RangeSelection,
+}
+
+impl DiagnosticTransferSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::GridSelection => "grid-selection",
+            Self::RangeSelection => "range-selection",
+        }
+    }
+}
+
+fn diagnostic_transfer_details(
+    source: DiagnosticTransferSource,
+    selected_row_count: usize,
+    retained_rows: usize,
+    range: Option<RowSelection>,
+) -> String {
+    let range_details = range.map_or_else(String::new, |selection| {
+        format!(" selected_range={}-{}", selection.start(), selection.end())
+    });
+    format!(
+        "source={} selected_row_count={} retained_rows={} format=TSV{}",
+        source.label(),
+        selected_row_count,
+        retained_rows,
+        range_details
+    )
+}
+
+fn diagnostic_transfer_source(
+    grid_selection_count: usize,
+    range_selection_count: usize,
+) -> Option<DiagnosticTransferSource> {
+    if grid_selection_count > 0 {
+        Some(DiagnosticTransferSource::GridSelection)
+    } else if range_selection_count > 0 {
+        Some(DiagnosticTransferSource::RangeSelection)
+    } else {
+        None
+    }
+}
+
 fn diagnostic_toolbar_action(app: &mut App, action: &str) {
     let events = app.diagnostics.snapshot();
     let retained_rows = events.len();
-    let input = unsafe { diagnostic_range_text(app) };
-    let parsed = parse_row_selection(&input, retained_rows);
     app.begin_operation(DiagnosticSource::Diagnostic);
-    let selection = match parsed {
-        Ok(selection) if !selection.is_empty() => selection,
-        Ok(selection) => {
-            app.record(
-                "diagnostic.range.parsed",
-                format!(
-                    "result=empty {}",
-                    diagnostic_range_details(selection, retained_rows)
-                ),
-            );
-            app.record(
-                "diagnostic.validation_failure",
-                format!(
-                    "selected_range=none retained_rows={} row_count=0 format=TSV result=failed reason=no_retained_events",
-                    retained_rows
-                ),
-            );
-            unsafe {
-                set_diagnostic_message(app, "No retained events.");
+    let grid_sequences =
+        selected_event_sequences_for_sequences(&events, &app.diagnostic_grid_selection_sequences);
+    let (source, rows, range) = if !grid_sequences.is_empty() {
+        (
+            diagnostic_transfer_source(grid_sequences.len(), 0).expect("grid selection has rows"),
+            diagnostic_grid_rows_for_sequences(&events, &grid_sequences),
+            None,
+        )
+    } else {
+        let input = unsafe { diagnostic_range_text(app) };
+        let parsed = parse_row_selection(&input, retained_rows);
+        let selection = match parsed {
+            Ok(selection) if !selection.is_empty() => selection,
+            Ok(selection) => {
+                let details = diagnostic_transfer_details(
+                    DiagnosticTransferSource::RangeSelection,
+                    0,
+                    retained_rows,
+                    Some(selection),
+                );
+                app.record("diagnostic.range.parsed", format!("result=empty {details}"));
+                app.record(
+                    "diagnostic.validation_failure",
+                    format!("{details} result=failed reason=no_retained_events"),
+                );
+                unsafe {
+                    set_diagnostic_message(app, "No retained events.");
+                }
+                app.finish_operation(DiagnosticOutcome::Failed);
+                return;
             }
-            app.finish_operation(DiagnosticOutcome::Failed);
-            return;
-        }
-        Err(error) => {
-            app.record(
-                "diagnostic.range.parsed",
-                format!(
-                    "selected_range=none retained_rows={retained_rows} row_count=0 format=TSV result=invalid error={error}"
-                ),
-            );
-            app.record(
-                "diagnostic.validation_failure",
-                format!(
-                    "selected_range=none retained_rows={retained_rows} row_count=0 format=TSV result=failed error={error}"
-                ),
-            );
-            unsafe {
-                set_diagnostic_message(app, format!("Invalid range: {error}"));
+            Err(error) => {
+                let details = diagnostic_transfer_details(
+                    DiagnosticTransferSource::RangeSelection,
+                    0,
+                    retained_rows,
+                    None,
+                );
+                app.record(
+                    "diagnostic.range.parsed",
+                    format!("{details} result=invalid error={error}"),
+                );
+                app.record(
+                    "diagnostic.validation_failure",
+                    format!("{details} result=failed error={error}"),
+                );
+                unsafe {
+                    set_diagnostic_message(app, format!("Invalid range: {error}"));
+                }
+                app.finish_operation(DiagnosticOutcome::Failed);
+                return;
             }
-            app.finish_operation(DiagnosticOutcome::Failed);
-            return;
-        }
+        };
+        app.diagnostic_selection = Some(selection);
+        app.diagnostic_selection_sequences = Some(selected_event_sequences(&events, selection));
+        app.diagnostic_selection_reset = false;
+        (
+            diagnostic_transfer_source(0, selection.row_count()).expect("range selection has rows"),
+            diagnostic_grid_rows(&events, selection),
+            Some(selection),
+        )
     };
-    app.diagnostic_selection = Some(selection);
-    app.diagnostic_selection_sequences = Some(selected_event_sequences(&events, selection));
-    app.diagnostic_selection_reset = false;
-    let rows = diagnostic_grid_rows(&events, selection);
+    let selected_row_count = rows.len();
+    let details = diagnostic_transfer_details(source, selected_row_count, retained_rows, range);
     let tsv = format_tsv(&rows);
-    let details = diagnostic_range_details(selection, retained_rows);
     app.record(
-        "diagnostic.range.parsed",
-        format!("result=success {details}"),
+        "diagnostic.transfer.selection",
+        format!("{details} result=selected"),
     );
     match action {
         "copy" => {
