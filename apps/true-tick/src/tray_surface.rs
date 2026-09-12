@@ -207,6 +207,18 @@ pub(crate) fn tooltip(status: TrayStatus, timing: TimingValues) -> String {
 
 pub(crate) const STATUS_COMMAND_ID: usize = 1009;
 
+pub(crate) const fn menu_description(command_id: usize) -> Option<&'static str> {
+    match command_id {
+        1001 => Some("Request the best supported timing"),
+        1002 => Some("Release True Tick timing"),
+        1005 | 1006 => Some("Launch True Tick when you sign in"),
+        1007 | 1008 => Some("Request timing automatically on AC power"),
+        STATUS_COMMAND_ID => Some("Open status and session logs"),
+        1004 => Some("Stop safely and quit"),
+        _ => None,
+    }
+}
+
 pub(crate) const fn dpi_to_icon_canvas(dpi: u32) -> i32 {
     let dpi = if dpi == 0 { 96 } else { dpi };
     if dpi <= 107 {
@@ -323,6 +335,24 @@ mod tests {
     fn status_row_maps_to_diagnostic_command() {
         assert_eq!(STATUS_COMMAND_ID, 1009);
         assert!(menu_items(TrayStatus::Stopped, false, false)[4].enabled);
+    }
+
+    #[test]
+    fn every_menu_command_has_its_short_hover_description() {
+        let descriptions = [
+            (1001, "Request the best supported timing"),
+            (1002, "Release True Tick timing"),
+            (1005, "Launch True Tick when you sign in"),
+            (1006, "Launch True Tick when you sign in"),
+            (1007, "Request timing automatically on AC power"),
+            (1008, "Request timing automatically on AC power"),
+            (STATUS_COMMAND_ID, "Open status and session logs"),
+            (1004, "Stop safely and quit"),
+        ];
+        for (command_id, expected) in descriptions {
+            assert_eq!(menu_description(command_id), Some(expected));
+        }
+        assert_eq!(menu_description(9999), None);
     }
 
     #[test]

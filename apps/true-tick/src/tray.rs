@@ -18,9 +18,9 @@ use crate::shutdown::{
 };
 use crate::tray_surface::{
     dpi_to_icon_canvas, icon_pixel_color, menu_action_keeps_open, menu_command_dispatch_allowed,
-    menu_command_is_enabled, menu_items, power_reconciliation, release_needs_handoff, tooltip,
-    tray_notification_opens_menu, HandoffProgress, HandoffTracker, PowerReconciliation,
-    TimingValues, TrayStatus, HANDOFF_POLL_INTERVAL_MS, STATUS_COMMAND_ID,
+    menu_command_is_enabled, menu_description, menu_items, power_reconciliation,
+    release_needs_handoff, tooltip, tray_notification_opens_menu, HandoffProgress, HandoffTracker,
+    PowerReconciliation, TimingValues, TrayStatus, HANDOFF_POLL_INTERVAL_MS, STATUS_COMMAND_ID,
 };
 
 const WM_APP: u32 = 0x8000;
@@ -30,6 +30,7 @@ const WM_COMMAND: u32 = 0x0111;
 const WM_DESTROY: u32 = 0x0002;
 const WM_POWERBROADCAST: u32 = 0x0218;
 const WM_TIMER: u32 = 0x0113;
+const WM_MENUSELECT: u32 = 0x011F;
 const PBT_APMPOWERSTATUSCHANGE: usize = 0x000A;
 const HANDOFF_TIMER_ID: usize = 0x5449;
 const ID_START: usize = 1001;
@@ -69,7 +70,6 @@ const ES_READONLY: u32 = 0x0800;
 const ES_AUTOVSCROLL: u32 = 0x0040;
 const ES_AUTOHSCROLL: u32 = 0x0080;
 const TPM_RIGHTBUTTON: u32 = 0x0002;
-const TPM_NONOTIFY: u32 = 0x0080;
 const TPM_RETURNCMD: u32 = 0x0100;
 const MF_STRING: u32 = 0x0000;
 const MF_SEPARATOR: u32 = 0x0800;
@@ -93,6 +93,17 @@ const TASKDIALOG_BUTTON_STOP_AND_QUIT: i32 = 2002;
 const TASKDIALOG_ICON_WARNING: *const u16 = (-1isize) as *const u16;
 const TDF_ALLOW_DIALOG_CANCELLATION: u32 = 0x0008;
 const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
+const WS_POPUP: u32 = 0x8000_0000;
+const WS_EX_TOPMOST: u32 = 0x0000_0008;
+const TTS_ALWAYSTIP: u32 = 0x0001;
+const TTS_NOPREFIX: u32 = 0x0002;
+const TTF_IDISHWND: u32 = 0x0001;
+const TTF_TRACK: u32 = 0x0020;
+const WM_USER: u32 = 0x0400;
+const TTM_TRACKACTIVATE: u32 = WM_USER + 17;
+const TTM_TRACKPOSITION: u32 = WM_USER + 18;
+const TTM_ADDTOOLW: u32 = WM_USER + 50;
+const TTM_UPDATETIPTEXTW: u32 = WM_USER + 57;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NativeResult {
@@ -204,6 +215,28 @@ struct TaskDialogConfig {
 }
 
 #[repr(C)]
+#[repr(C)]
+struct Rect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+#[repr(C)]
+struct ToolInfo {
+    cb_size: u32,
+    flags: u32,
+    hwnd: *mut c_void,
+    id: usize,
+    rect: Rect,
+    instance: *mut c_void,
+    text: *const u16,
+    l_param: isize,
+    reserved: *mut c_void,
+}
+
+#[repr(C)]
 struct CreateStruct {
     create_params: *mut c_void,
     instance: *mut c_void,
@@ -303,6 +336,8 @@ struct App {
     diagnostic_window: Option<*mut c_void>,
     menu_active: bool,
     handoff: Option<HandoffTracker>,
+    menu_help: Option<*mut c_void>,
+    menu_help_text: Vec<u16>,
     shutdown_gate: ShutdownGate,
 }
 
@@ -451,6 +486,8 @@ pub fn run() {
             diagnostic_window: None,
             menu_active: false,
             handoff: None,
+            menu_help: None,
+            menu_help_text: Vec::new(),
             shutdown_gate: ShutdownGate::new(),
         });
         let app_ptr = Box::into_raw(app);
@@ -1315,6 +1352,9 @@ unsafe extern "system" fn window_proc(
             WM_COMMAND => {
                 handle_menu_command(hwnd, app, w_param & 0xffff);
             }
+            WM_MENUSELECT => {
+                update_menu_help(app, (w_param & 0xffff) as usize);
+            }
             WM_TIMER if w_param == HANDOFF_TIMER_ID => {
                 handle_handoff_timer(app);
             }
@@ -1437,6 +1477,7 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
             }
             break;
         }
+        let _ = create_menu_help(hwnd, app);
         if SetForegroundWindow(hwnd) == 0 {
             app.record(
                 "native.SetForegroundWindow.error",
@@ -1445,13 +1486,14 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
         }
         let command = TrackPopupMenu(
             menu,
-            TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_RETURNCMD,
+            TPM_RIGHTBUTTON | TPM_RETURNCMD,
             anchor.x,
             anchor.y,
             0,
             hwnd,
             std::ptr::null(),
         );
+        destroy_menu_help(app);
         if DestroyMenu(menu) == 0 {
             app.record(
                 "native.DestroyMenu.error",
@@ -1477,7 +1519,145 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
             break;
         }
     }
+    destroy_menu_help(app);
     app.menu_active = false;
+}
+
+unsafe fn create_menu_help(hwnd: *mut c_void, app: &mut App) -> bool {
+    let class_name = wide("tooltips_class32");
+    let tooltip = CreateWindowExW(
+        WS_EX_TOPMOST,
+        class_name.as_ptr(),
+        std::ptr::null(),
+        WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+        0,
+        0,
+        0,
+        0,
+        hwnd,
+        std::ptr::null_mut(),
+        GetModuleHandleW(std::ptr::null()),
+        std::ptr::null_mut(),
+    );
+    if tooltip.is_null() {
+        app.record(
+            "native.CreateWindowExW.menu_help.error",
+            format!("raw_status={}", GetLastError()),
+        );
+        return false;
+    }
+    app.menu_help_text = wide("");
+    let tool = menu_tool_info(hwnd, app);
+    if SendMessageW(
+        tooltip,
+        TTM_ADDTOOLW,
+        0,
+        (&tool as *const ToolInfo).cast::<c_void>() as isize,
+    ) == 0
+    {
+        app.record(
+            "native.SendMessageW.menu_help_add.error",
+            format!("raw_status={}", GetLastError()),
+        );
+        DestroyWindow(tooltip);
+        return false;
+    }
+    app.menu_help = Some(tooltip);
+    true
+}
+
+fn menu_tool_info(hwnd: *mut c_void, app: &App) -> ToolInfo {
+    ToolInfo {
+        cb_size: size_of::<ToolInfo>() as u32,
+        flags: TTF_IDISHWND | TTF_TRACK,
+        hwnd,
+        id: hwnd as usize,
+        rect: Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        },
+        instance: std::ptr::null_mut(),
+        text: app.menu_help_text.as_ptr(),
+        l_param: 0,
+        reserved: std::ptr::null_mut(),
+    }
+}
+
+fn update_menu_help(app: &mut App, command: usize) {
+    let Some(tooltip) = app.menu_help else {
+        return;
+    };
+    let Some(description) = menu_description(command) else {
+        unsafe {
+            let tool = menu_tool_info(
+                app.tray_icon
+                    .as_ref()
+                    .map_or(std::ptr::null_mut(), |icon| icon.h_wnd),
+                app,
+            );
+            SendMessageW(
+                tooltip,
+                TTM_TRACKACTIVATE,
+                0,
+                (&tool as *const ToolInfo).cast::<c_void>() as isize,
+            );
+        }
+        return;
+    };
+    app.menu_help_text = wide(description);
+    let tool = menu_tool_info(
+        app.tray_icon
+            .as_ref()
+            .map_or(std::ptr::null_mut(), |icon| icon.h_wnd),
+        app,
+    );
+    unsafe {
+        SendMessageW(
+            tooltip,
+            TTM_UPDATETIPTEXTW,
+            0,
+            (&tool as *const ToolInfo).cast::<c_void>() as isize,
+        );
+        let mut cursor = Point::default();
+        if GetCursorPos(&mut cursor) != 0 {
+            let position = ((cursor.x as u16 as u32) | ((cursor.y as u16 as u32) << 16)) as isize;
+            SendMessageW(tooltip, TTM_TRACKPOSITION, 0, position);
+        }
+        SendMessageW(
+            tooltip,
+            TTM_TRACKACTIVATE,
+            1,
+            (&tool as *const ToolInfo).cast::<c_void>() as isize,
+        );
+    }
+}
+
+fn destroy_menu_help(app: &mut App) {
+    if let Some(tooltip) = app.menu_help.take() {
+        unsafe {
+            let tool = menu_tool_info(
+                app.tray_icon
+                    .as_ref()
+                    .map_or(std::ptr::null_mut(), |icon| icon.h_wnd),
+                app,
+            );
+            SendMessageW(
+                tooltip,
+                TTM_TRACKACTIVATE,
+                0,
+                (&tool as *const ToolInfo).cast::<c_void>() as isize,
+            );
+            if DestroyWindow(tooltip) == 0 {
+                app.record(
+                    "native.DestroyWindow.menu_help.error",
+                    format!("raw_status={}", GetLastError()),
+                );
+            }
+        }
+    }
+    app.menu_help_text.clear();
 }
 
 unsafe fn append_menu_checked(
@@ -2299,6 +2479,7 @@ extern "system" {
     fn UpdateWindow(window: *mut c_void) -> i32;
     fn GetWindow(window: *mut c_void, command: u32) -> *mut c_void;
     fn SetWindowTextW(window: *mut c_void, text: *const u16) -> i32;
+    fn SendMessageW(hwnd: *mut c_void, message: u32, w: usize, l: isize) -> isize;
     fn MoveWindow(
         window: *mut c_void,
         x: i32,
