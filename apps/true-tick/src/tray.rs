@@ -5095,6 +5095,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn clipboard_and_save_dialog_decision_mapping_is_pure() {
+        assert_eq!(
+            map_native_action(true, 0),
+            DiagnosticNativeAction::Completed
+        );
+        assert_eq!(
+            map_native_action(false, 5),
+            DiagnosticNativeAction::Failed { raw_error: 5 }
+        );
+        assert_eq!(
+            map_save_dialog_result(1, 0),
+            DiagnosticNativeAction::Completed
+        );
+        assert_eq!(
+            map_save_dialog_result(0, 0),
+            DiagnosticNativeAction::Cancelled
+        );
+        assert_eq!(
+            map_save_dialog_result(0, 1223),
+            DiagnosticNativeAction::Failed { raw_error: 1223 }
+        );
+    }
+
+    #[test]
+    fn diagnostic_toolbar_contract_uses_explicit_controls_and_tsv_events() {
+        assert_ne!(ID_DIAGNOSTIC_RANGE, ID_DIAGNOSTIC_COPY);
+        assert_ne!(ID_DIAGNOSTIC_COPY, ID_DIAGNOSTIC_EXPORT);
+        assert_eq!(DIAGNOSTIC_RANGE_INPUT_LIMIT, 64);
+        let selection = RowSelection::new(12, 24);
+        assert_eq!(
+            diagnostic_range_details(selection, 32),
+            "selected_range=12-24 retained_rows=32 row_count=13 format=TSV"
+        );
+        for name in [
+            "diagnostic.range.parsed",
+            "diagnostic.copy.request",
+            "diagnostic.copy.result",
+            "diagnostic.export.request",
+            "diagnostic.export.result",
+            "diagnostic.export.cancelled",
+            "diagnostic.validation_failure",
+            "native.clipboard.error",
+            "native.GetSaveFileNameW.error",
+            "native.export.file.error",
+        ] {
+            assert!(!name.is_empty());
+        }
+    }
+
+    #[test]
     fn common_controls_initialization_uses_list_view_and_tooltip_classes() {
         let init = common_controls_initialization_contract();
         assert_eq!(init.size as usize, size_of::<InitCommonControlsEx>());

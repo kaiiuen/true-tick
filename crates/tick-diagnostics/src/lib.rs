@@ -717,6 +717,7 @@ mod tests {
         assert_eq!(output.matches('\n').count(), 2);
         assert!(output.len() <= MAX_TSV_BYTES);
         assert_eq!(output.lines().count(), 2);
+        assert_eq!(output.lines().nth(1).unwrap().split('\t').count(), 10);
     }
 
     #[test]
