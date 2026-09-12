@@ -4549,6 +4549,17 @@ unsafe fn initialize_diagnostic_list(list: *mut c_void) -> Result<(), u32> {
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiagnosticChildRedrawTarget {
+    Summary,
+    List,
+}
+
+const DIAGNOSTIC_POST_REDRAW_CHILD_TARGETS: [DiagnosticChildRedrawTarget; 2] = [
+    DiagnosticChildRedrawTarget::Summary,
+    DiagnosticChildRedrawTarget::List,
+];
+
 unsafe fn set_diagnostic_redraw(app: &App, enabled: bool) {
     let redraw = usize::from(enabled);
     if let Some(window) = app.diagnostic_window {
@@ -4576,8 +4587,18 @@ unsafe fn set_diagnostic_redraw(app: &App, enabled: bool) {
 
 unsafe fn finish_diagnostic_redraw(window: *mut c_void, app: &App) {
     set_diagnostic_redraw(app, true);
-    if let Some(list) = app.diagnostic_list {
-        let _ = InvalidateRect(list, std::ptr::null(), 1);
+    for target in DIAGNOSTIC_POST_REDRAW_CHILD_TARGETS {
+        let control = match target {
+            DiagnosticChildRedrawTarget::Summary => app.diagnostic_summary,
+            DiagnosticChildRedrawTarget::List => app.diagnostic_list,
+        };
+        if let Some(control) = control {
+            if control.is_null() {
+                continue;
+            }
+            let _ = InvalidateRect(control, std::ptr::null(), 1);
+            let _ = UpdateWindow(control);
+        }
     }
     let _ = InvalidateRect(window, std::ptr::null(), 1);
     let _ = UpdateWindow(window);
@@ -6885,6 +6906,17 @@ mod tests {
         assert!(!diagnostic_refresh_is_coalesced(false, false));
         assert_eq!(WM_SETREDRAW, 0x000B);
         assert_ne!(SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING, 0);
+    }
+
+    #[test]
+    fn diagnostic_post_redraw_invalidation_includes_summary_and_list() {
+        assert_eq!(
+            DIAGNOSTIC_POST_REDRAW_CHILD_TARGETS,
+            [
+                DiagnosticChildRedrawTarget::Summary,
+                DiagnosticChildRedrawTarget::List,
+            ]
+        );
     }
 
     #[test]

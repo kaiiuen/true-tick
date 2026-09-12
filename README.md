@@ -77,7 +77,8 @@ event to its eleven bounded cells once, and replaces the loading text after the 
 render. Refresh requests are coalesced, and the retained event bound remains 512.
 
 A refresh suspends redraw while controls and the list are updated, then re-enables
-redraw and invalidates the window once. `WM_SIZE` only performs one deferred control
+redraw, explicitly invalidates and updates the summary `STATIC` and `ListView`, and
+updates the parent window once within the same batch. `WM_SIZE` only performs one deferred control
 reposition pass. It does not snapshot data, rebuild rows, or fit columns. Horizontal
 scrolling and header interaction do not fit columns. Auto-fit runs after the initial
 population or a material data snapshot change, once per snapshot generation. Fixed
