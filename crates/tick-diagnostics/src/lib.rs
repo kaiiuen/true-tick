@@ -233,6 +233,143 @@ pub const REPORT_COLUMNS: [&str; 10] = [
     "Details",
 ];
 
+pub const MAX_TSV_ROWS: usize = HARD_MAX_EVENTS;
+pub const MAX_TSV_BYTES: usize =
+    REPORT_COLUMNS.len() * (MAX_FIELD_LENGTH + 3) * MAX_TSV_ROWS + MAX_TSV_ROWS * 2 + 256;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RowSelection {
+    start: usize,
+    end: usize,
+}
+
+impl RowSelection {
+    pub fn all(retained_rows: usize) -> Self {
+        if retained_rows == 0 {
+            Self { start: 0, end: 0 }
+        } else {
+            Self {
+                start: 1,
+                end: retained_rows,
+            }
+        }
+    }
+
+    pub fn new(start: usize, end: usize) -> Self {
+        Self { start, end }
+    }
+
+    pub fn start(self) -> usize {
+        self.start
+    }
+
+    pub fn end(self) -> usize {
+        self.end
+    }
+
+    pub fn row_count(self) -> usize {
+        if self.start == 0 || self.end < self.start {
+            0
+        } else {
+            self.end.saturating_sub(self.start).saturating_add(1)
+        }
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.row_count() == 0
+    }
+
+    pub fn is_all(self, retained_rows: usize) -> bool {
+        self == Self::all(retained_rows)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RowSelectionError {
+    Malformed,
+    Negative,
+    Zero,
+    Reversed,
+    OutOfRange { retained_rows: usize },
+    TooLong,
+}
+
+impl fmt::Display for RowSelectionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Malformed => formatter.write_str("use a row number or start-end"),
+            Self::Negative => formatter.write_str("negative rows are not allowed"),
+            Self::Zero => formatter.write_str("row numbers start at 1"),
+            Self::Reversed => formatter.write_str("the range must be in ascending order"),
+            Self::OutOfRange { retained_rows } => {
+                write!(formatter, "row must be between 1 and {retained_rows}")
+            }
+            Self::TooLong => formatter.write_str("the range is too long"),
+        }
+    }
+}
+
+fn parse_row_number(value: &str) -> Result<usize, RowSelectionError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(RowSelectionError::Malformed);
+    }
+    if value.starts_with('-') {
+        return Err(RowSelectionError::Negative);
+    }
+    if value == "0" {
+        return Err(RowSelectionError::Zero);
+    }
+    if !value.chars().all(|character| character.is_ascii_digit()) {
+        return Err(RowSelectionError::Malformed);
+    }
+    let number = value
+        .parse::<usize>()
+        .map_err(|_| RowSelectionError::Malformed)?;
+    if number == 0 {
+        Err(RowSelectionError::Zero)
+    } else {
+        Ok(number)
+    }
+}
+
+pub fn parse_row_selection(
+    input: &str,
+    retained_rows: usize,
+) -> Result<RowSelection, RowSelectionError> {
+    let input = input.trim();
+    if input.len() > 64 {
+        return Err(RowSelectionError::TooLong);
+    }
+    if input.is_empty() || input.eq_ignore_ascii_case("all") {
+        return Ok(RowSelection::all(retained_rows));
+    }
+    if input.starts_with('-') {
+        return Err(RowSelectionError::Negative);
+    }
+    let mut parts = input.split('-');
+    let first = parts.next().ok_or(RowSelectionError::Malformed)?;
+    let Some(second) = parts.next() else {
+        let row = parse_row_number(first)?;
+        if row > retained_rows {
+            return Err(RowSelectionError::OutOfRange { retained_rows });
+        }
+        return Ok(RowSelection::new(row, row));
+    };
+    if parts.next().is_some() {
+        return Err(RowSelectionError::Malformed);
+    }
+    let start = parse_row_number(first)?;
+    let end = parse_row_number(second)?;
+    if start > end {
+        return Err(RowSelectionError::Reversed);
+    }
+    if start > retained_rows || end > retained_rows {
+        return Err(RowSelectionError::OutOfRange { retained_rows });
+    }
+    Ok(RowSelection::new(start, end))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiagnosticGridRow {
     pub cells: Vec<String>,
@@ -273,6 +410,22 @@ pub fn diagnostic_grid_row(event: &DiagnosticEvent) -> DiagnosticGridRow {
             truncate_utf8(&details, MAX_FIELD_LENGTH),
         ],
     }
+}
+
+pub fn format_tsv(rows: &[DiagnosticGridRow]) -> String {
+    let mut output = REPORT_COLUMNS.join("\t");
+    output.push_str("\r\n");
+    for row in rows.iter().take(MAX_TSV_ROWS) {
+        for index in 0..REPORT_COLUMNS.len() {
+            if index > 0 {
+                output.push('\t');
+            }
+            let cell = row.cells.get(index).map_or("", String::as_str);
+            output.push_str(&sanitize(cell));
+        }
+        output.push_str("\r\n");
+    }
+    output
 }
 
 pub fn format_event(event: &DiagnosticEvent) -> String {
@@ -506,6 +659,64 @@ mod tests {
             format_status(record),
             "status=Unsupported, evidence=Unsupported"
         );
+    }
+
+    #[test]
+    fn row_selection_parser_accepts_empty_all_single_range_and_whitespace() {
+        assert_eq!(parse_row_selection("", 4), Ok(RowSelection::new(1, 4)));
+        assert_eq!(parse_row_selection(" all ", 4), Ok(RowSelection::new(1, 4)));
+        assert_eq!(parse_row_selection(" 2 ", 4), Ok(RowSelection::new(2, 2)));
+        assert_eq!(
+            parse_row_selection(" 2 - 4 ", 4),
+            Ok(RowSelection::new(2, 4))
+        );
+        assert_eq!(parse_row_selection("", 0), Ok(RowSelection::all(0)));
+        assert_eq!(
+            parse_row_selection("2", 4).expect("single row").row_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn row_selection_parser_rejects_malformed_reversed_zero_negative_and_out_of_range() {
+        assert_eq!(
+            parse_row_selection("x", 4),
+            Err(RowSelectionError::Malformed)
+        );
+        assert_eq!(
+            parse_row_selection("2-x", 4),
+            Err(RowSelectionError::Malformed)
+        );
+        assert_eq!(
+            parse_row_selection("4-2", 4),
+            Err(RowSelectionError::Reversed)
+        );
+        assert_eq!(parse_row_selection("0", 4), Err(RowSelectionError::Zero));
+        assert_eq!(
+            parse_row_selection("-1", 4),
+            Err(RowSelectionError::Negative)
+        );
+        assert_eq!(
+            parse_row_selection("5", 4),
+            Err(RowSelectionError::OutOfRange { retained_rows: 4 })
+        );
+        assert_eq!(
+            parse_row_selection("1-5", 4),
+            Err(RowSelectionError::OutOfRange { retained_rows: 4 })
+        );
+    }
+
+    #[test]
+    fn tsv_formatter_has_the_report_header_and_bounded_sanitized_cells() {
+        let row = DiagnosticGridRow {
+            cells: vec!["one\ttwo\nthree".to_owned(), "x".repeat(10_000)],
+        };
+        let output = format_tsv(&[row]);
+        assert!(output.starts_with("Sequence\tElapsed\tOperation\tParent\tCorrelation\tPhase\tSource\tOutcome\tEvent\tDetails\r\n"));
+        assert!(output.contains("one two three"));
+        assert_eq!(output.matches('\n').count(), 2);
+        assert!(output.len() <= MAX_TSV_BYTES);
+        assert_eq!(output.lines().count(), 2);
     }
 
     #[test]
