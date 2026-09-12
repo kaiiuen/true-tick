@@ -223,8 +223,9 @@ const DIAGNOSTIC_COLUMN_WIDTHS: [i32; 11] = [54, 70, 78, 78, 70, 86, 82, 90, 86,
 const DIAGNOSTIC_COLUMN_MIN_WIDTHS: [i32; 11] = [36, 52, 64, 64, 52, 64, 60, 68, 64, 84, 240];
 const DIAGNOSTIC_COLUMN_MAX_WIDTHS: [i32; 11] =
     [84, 120, 140, 144, 120, 144, 112, 124, 124, 260, 640];
-const DIAGNOSTIC_DEFAULT_WIDTH: i32 = 980;
-const DIAGNOSTIC_DEFAULT_HEIGHT: i32 = 600;
+// Compact resizable outer default. Minimum tracking remains client-derived below.
+const DIAGNOSTIC_DEFAULT_WIDTH: i32 = 960;
+const DIAGNOSTIC_DEFAULT_HEIGHT: i32 = 520;
 const COLOR_WINDOW: i32 = 5;
 const COLOR_WINDOWTEXT: i32 = 8;
 const DEFAULT_GUI_FONT: i32 = 17;
