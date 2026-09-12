@@ -2400,7 +2400,7 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
         } else {
             MF_STRING | MF_GRAYED
         };
-        let stop_flags = if items[2].enabled {
+        let stop_flags = if items[3].enabled {
             MF_STRING
         } else {
             MF_STRING | MF_GRAYED
@@ -2429,12 +2429,13 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
                 ID_START,
                 wide(&items[1].label).as_ptr(),
             )
+            && append_duration_choice_submenu(app, menu, DurationAction::Pause)
             && append_menu_checked(
                 app,
                 menu,
                 stop_flags,
                 ID_STOP,
-                wide(&items[2].label).as_ptr(),
+                wide(&items[3].label).as_ptr(),
             )
             && append_duration_submenu(app, menu)
             && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
@@ -2443,24 +2444,31 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
                 menu,
                 MF_STRING,
                 startup_id,
-                wide(&items[4].label).as_ptr(),
+                wide(&items[5].label).as_ptr(),
             )
             && append_menu_checked(
                 app,
                 menu,
                 MF_STRING,
                 automatic_id,
-                wide(&items[5].label).as_ptr(),
+                wide(&items[6].label).as_ptr(),
             )
             && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
             && append_status_submenu(app, menu)
+            && append_menu_checked(
+                app,
+                menu,
+                MF_STRING,
+                LOGS_COMMAND_ID,
+                wide(&items[8].label).as_ptr(),
+            )
             && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
             && append_menu_checked(
                 app,
                 menu,
                 MF_STRING,
                 ID_QUIT,
-                wide(&items[7].label).as_ptr(),
+                wide(&items[9].label).as_ptr(),
             );
         if !menu_ok {
             app.popup_menus = None;
@@ -2588,7 +2596,7 @@ unsafe fn refresh_popup_menu(app: &mut App) {
     );
     let _ = ModifyMenuW(
         handles.root,
-        3,
+        4,
         MF_BYPOSITION | MF_STRING | if stop_enabled { 0 } else { MF_GRAYED },
         ID_STOP,
         wide("Stop").as_ptr(),
@@ -2605,7 +2613,7 @@ unsafe fn refresh_popup_menu(app: &mut App) {
     };
     let _ = ModifyMenuW(
         handles.root,
-        6,
+        7,
         MF_BYPOSITION | MF_STRING,
         startup_id,
         wide(crate::tray_surface::auto_start_label(
@@ -2615,7 +2623,7 @@ unsafe fn refresh_popup_menu(app: &mut App) {
     );
     let _ = ModifyMenuW(
         handles.root,
-        7,
+        8,
         MF_BYPOSITION | MF_STRING,
         automatic_id,
         wide(crate::tray_surface::automatic_label(app.config.automatic)).as_ptr(),
@@ -2624,7 +2632,7 @@ unsafe fn refresh_popup_menu(app: &mut App) {
         let cancel_enabled = app.pause.current().is_some();
         let _ = ModifyMenuW(
             duration,
-            3,
+            2,
             MF_BYPOSITION | MF_STRING | if cancel_enabled { 0 } else { MF_GRAYED },
             CANCEL_SCHEDULED_COMMAND_ID,
             wide("Cancel scheduled action").as_ptr(),
@@ -2730,8 +2738,7 @@ unsafe fn append_duration_submenu(app: &mut App, menu: *mut c_void) -> bool {
     }
     let mut ok = append_duration_choice_submenu(app, submenu, DurationAction::Start);
     ok &= append_duration_choice_submenu(app, submenu, DurationAction::Stop);
-    ok &= append_duration_choice_submenu(app, submenu, DurationAction::Pause);
-    let cancel = duration_menu_items(app.pause.current())[3].clone();
+    let cancel = duration_menu_items(app.pause.current())[2].clone();
     let cancel_flags = if cancel.enabled {
         MF_STRING
     } else {
@@ -2753,7 +2760,7 @@ unsafe fn append_duration_submenu(app: &mut App, menu: *mut c_void) -> bool {
         menu,
         MF_STRING | MF_POPUP,
         submenu as usize,
-        wide("Duration >").as_ptr(),
+        wide("Schedule >").as_ptr(),
     ) {
         DestroyMenu(submenu);
         return false;
@@ -2788,12 +2795,7 @@ unsafe fn append_status_submenu(app: &mut App, menu: *mut c_void) -> bool {
         } else {
             MF_STRING | MF_GRAYED
         };
-        let command = if item.enabled && item.label == "Logs" {
-            LOGS_COMMAND_ID
-        } else {
-            0
-        };
-        ok &= append_menu_checked(app, submenu, flags, command, wide(&item.label).as_ptr());
+        ok &= append_menu_checked(app, submenu, flags, 0, wide(&item.label).as_ptr());
         if index == 4 {
             app.record(
                 "status.submenu.render",
@@ -2926,7 +2928,7 @@ fn submenu_description(menu: *mut c_void) -> Option<&'static str> {
         let label = String::from_utf16_lossy(&buffer[..length as usize]);
         let label = label.trim_end_matches('&');
         let description = match label {
-            "Duration >" => Some("Schedule a bounded timing action"),
+            "Schedule >" => Some("Schedule a bounded timing action"),
             "Start in >" => Some("Schedule a future guarded acquire"),
             "Stop in >" => Some("Schedule a future guarded release"),
             "Pause for >" => Some("Suppress acquisition for a fixed duration"),
@@ -3068,9 +3070,14 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
         app.config.automatic,
         app.pause.active(),
     ) {
+        let reason = if command == ID_START && app.pause.pause_active() {
+            "start_disabled_while_paused"
+        } else {
+            "disabled_or_unknown"
+        };
         app.record(
             "tray.command.rejected",
-            format!("id={command} reason=disabled_or_unknown"),
+            format!("id={command} reason={reason}"),
         );
         return false;
     }

@@ -310,10 +310,6 @@ pub(crate) fn duration_menu_items(scheduled: Option<ScheduledAction>) -> Vec<Men
             enabled: true,
         },
         MenuItem {
-            label: "Pause for >".to_owned(),
-            enabled: true,
-        },
-        MenuItem {
             label: "Cancel scheduled action".to_owned(),
             enabled: scheduled.is_some(),
         },
@@ -446,7 +442,7 @@ pub(crate) const fn menu_command_is_enabled_with_pause(
     match command_id {
         1001 => !matches!(
             status,
-            TrayStatus::Running | TrayStatus::Starting | TrayStatus::Stopping
+            TrayStatus::Running | TrayStatus::Starting | TrayStatus::Stopping | TrayStatus::Paused
         ),
         1002 => !matches!(
             status,
@@ -482,7 +478,7 @@ fn state_label(status: TrayStatus) -> &'static str {
         TrayStatus::Stopped => "Stopped",
         TrayStatus::Starting => "Starting",
         TrayStatus::Stopping | TrayStatus::Pausing => "Stopping",
-        TrayStatus::Paused => "Paused",
+        TrayStatus::Paused => "Paused (Start disabled)",
         TrayStatus::Blocked => "Blocked",
         TrayStatus::Error
         | TrayStatus::Unsupported
@@ -582,10 +578,6 @@ pub(crate) fn status_menu_items(
             label: format!("Ownership: {}", ownership_label(ownership, timing)),
             enabled: false,
         },
-        MenuItem {
-            label: "Logs".to_owned(),
-            enabled: true,
-        },
     ]
 }
 
@@ -613,7 +605,11 @@ pub(crate) fn menu_items_with_duration(
         },
         MenuItem {
             label: "Start".to_owned(),
-            enabled: !matches!(status, TrayStatus::Running | TrayStatus::Starting),
+            enabled: !paused && !matches!(status, TrayStatus::Running | TrayStatus::Starting),
+        },
+        MenuItem {
+            label: "Pause >".to_owned(),
+            enabled: true,
         },
         MenuItem {
             label: "Stop".to_owned(),
@@ -624,7 +620,7 @@ pub(crate) fn menu_items_with_duration(
                 ),
         },
         MenuItem {
-            label: "Duration >".to_owned(),
+            label: "Schedule >".to_owned(),
             enabled: true,
         },
         MenuItem {
@@ -637,6 +633,10 @@ pub(crate) fn menu_items_with_duration(
         },
         MenuItem {
             label: "Status >".to_owned(),
+            enabled: true,
+        },
+        MenuItem {
+            label: "Logs".to_owned(),
             enabled: true,
         },
         MenuItem {
@@ -658,14 +658,9 @@ mod tests {
                 .iter()
                 .map(|item| item.label.as_str())
                 .collect::<Vec<_>>(),
-            [
-                "Start in >",
-                "Stop in >",
-                "Pause for >",
-                "Cancel scheduled action"
-            ]
+            ["Start in >", "Stop in >", "Cancel scheduled action"]
         );
-        assert!(!duration[3].enabled);
+        assert!(!duration[2].enabled);
         assert_eq!(
             duration_choices(DurationAction::Start)
                 .iter()
@@ -709,7 +704,7 @@ mod tests {
             lifecycle_status(TrayStatus::Pausing, true),
             TrayStatus::Pausing
         );
-        assert!(menu_command_is_enabled_with_pause(
+        assert!(!menu_command_is_enabled_with_pause(
             1001,
             TrayStatus::Paused,
             false,
@@ -792,6 +787,37 @@ mod tests {
     }
 
     #[test]
+    fn live_menu_model_updates_remaining_action_and_enabled_states() {
+        let now = Instant::now();
+        let scheduled = ScheduledAction {
+            action: DurationAction::Pause,
+            duration: DurationChoice::FiveMinutes,
+            deadline: now + Duration::from_millis(299_999),
+            generation: 4,
+        };
+        let status = status_menu_items(
+            TrayStatus::Paused,
+            TimingValues::default(),
+            OwnershipState::Released,
+            Some(scheduled),
+            None,
+            now,
+        );
+        assert_eq!(status[0].label, "State: Paused (Start disabled)");
+        assert_eq!(status[3].label, "Next action: pause in 5m 0s");
+        let paused_menu = menu_items_with_duration(
+            TrayStatus::Paused,
+            false,
+            false,
+            TimingValues::default(),
+            true,
+        );
+        assert!(!paused_menu[1].enabled);
+        assert!(paused_menu[2].enabled);
+        assert!(paused_menu[8].enabled);
+    }
+
+    #[test]
     fn status_submenu_uses_unknown_for_invalid_timing_and_exposes_the_next_action() {
         let now = Instant::now();
         let scheduled = ScheduledAction {
@@ -817,8 +843,7 @@ mod tests {
         assert_eq!(status[2].label, "Running for: Not running");
         assert_eq!(status[3].label, "Next action: stop in 4m 12s");
         assert_eq!(status[4].label, "Ownership: Released");
-        assert!(status[5].enabled);
-        assert!(status[..5].iter().all(|item| !item.enabled));
+        assert!(status.iter().all(|item| !item.enabled));
     }
 
     #[test]
@@ -830,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn logs_command_remains_clickable_inside_read_only_status() {
+    fn logs_command_is_separate_from_read_only_status() {
         assert_eq!(LOGS_COMMAND_ID, 1009);
         assert_eq!(GITHUB_COMMAND_ID, 1010);
         assert_eq!(GITHUB_URL, "https://github.com/kaiiuen/true-tick");
@@ -842,9 +867,8 @@ mod tests {
             None,
             Instant::now(),
         );
-        assert!(items[..5].iter().all(|item| !item.enabled));
-        assert_eq!(items[5].label, "Logs");
-        assert!(items[5].enabled);
+        assert_eq!(items.len(), 5);
+        assert!(items.iter().all(|item| !item.enabled));
     }
 
     #[test]
@@ -1161,20 +1185,22 @@ mod tests {
             [
                 version_header().as_str(),
                 "Start",
+                "Pause >",
                 "Stop",
-                "Duration >",
+                "Schedule >",
                 "Auto-start: On",
                 "Auto-time: Off",
                 "Status >",
+                "Logs",
                 "Quit"
             ]
         );
         assert!(items[0].enabled);
-        assert!(items[3].enabled);
+        assert!(items[4].enabled);
         assert!(!items[1].enabled);
-        assert!(items[2].enabled);
-        assert!(items[6].enabled);
+        assert!(items[3].enabled);
         assert!(items[7].enabled);
+        assert!(items[9].enabled);
     }
 
     #[test]
