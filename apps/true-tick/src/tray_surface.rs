@@ -1,4 +1,6 @@
 use tick_core::Hns;
+use tick_ownership::OwnershipState;
+use tick_policy::PowerState;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TrayStatus {
@@ -25,6 +27,35 @@ pub(crate) enum IconColor {
 pub(crate) struct MenuItem {
     pub(crate) label: &'static str,
     pub(crate) enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PowerReconciliation {
+    Acquire,
+    ReleaseBlocked,
+    ShowStopped,
+    PreserveOwned,
+    PreserveUncertain,
+}
+
+pub(crate) fn power_reconciliation(
+    automatic: bool,
+    power: PowerState,
+    ownership: OwnershipState,
+) -> PowerReconciliation {
+    match power {
+        PowerState::Ac if automatic && ownership == OwnershipState::Released => {
+            PowerReconciliation::Acquire
+        }
+        PowerState::Ac if ownership == OwnershipState::Owned => PowerReconciliation::PreserveOwned,
+        PowerState::Ac if ownership == OwnershipState::Uncertain => {
+            PowerReconciliation::PreserveUncertain
+        }
+        PowerState::Ac => PowerReconciliation::ShowStopped,
+        PowerState::Battery | PowerState::BatterySaver | PowerState::Unknown => {
+            PowerReconciliation::ReleaseBlocked
+        }
+    }
 }
 
 impl TrayStatus {
@@ -280,6 +311,54 @@ mod tests {
                 },
             ),
             "Stopped (current: 0.497 ms, external)"
+        );
+    }
+
+    #[test]
+    fn auto_time_off_on_ac_without_ownership_shows_stopped() {
+        assert_eq!(
+            power_reconciliation(false, PowerState::Ac, OwnershipState::Released),
+            PowerReconciliation::ShowStopped
+        );
+    }
+
+    #[test]
+    fn auto_time_off_battery_to_ac_waits_for_manual_start() {
+        assert_eq!(
+            power_reconciliation(false, PowerState::Battery, OwnershipState::Released),
+            PowerReconciliation::ReleaseBlocked
+        );
+        assert_eq!(
+            power_reconciliation(false, PowerState::Ac, OwnershipState::Released),
+            PowerReconciliation::ShowStopped
+        );
+    }
+
+    #[test]
+    fn auto_time_on_battery_to_ac_acquires_when_released() {
+        assert_eq!(
+            power_reconciliation(true, PowerState::Battery, OwnershipState::Released),
+            PowerReconciliation::ReleaseBlocked
+        );
+        assert_eq!(
+            power_reconciliation(true, PowerState::Ac, OwnershipState::Released),
+            PowerReconciliation::Acquire
+        );
+    }
+
+    #[test]
+    fn owned_ac_timing_is_preserved_when_auto_time_is_off() {
+        assert_eq!(
+            power_reconciliation(false, PowerState::Ac, OwnershipState::Owned),
+            PowerReconciliation::PreserveOwned
+        );
+    }
+
+    #[test]
+    fn unknown_power_releases_conservatively() {
+        assert_eq!(
+            power_reconciliation(true, PowerState::Unknown, OwnershipState::Owned),
+            PowerReconciliation::ReleaseBlocked
         );
     }
 

@@ -380,6 +380,22 @@ mod tests {
     }
 
     #[test]
+    fn released_external_effective_value_can_return_to_baseline() {
+        let mut controller = fixture_controller();
+        controller.start().unwrap();
+        controller.stop().unwrap();
+        assert_eq!(
+            controller.observation().unwrap().reported_current,
+            Hns::new(4_966)
+        );
+        assert_eq!(
+            controller.query().unwrap().reported_current,
+            Hns::new(9_966)
+        );
+        assert_eq!(controller.ownership(), OwnershipState::Released);
+    }
+
+    #[test]
     fn failed_release_keeps_ownership_and_marks_verification_unverified() {
         let mut controller = TimerController::new(
             FixturePlatform {

@@ -18,8 +18,8 @@ use crate::shutdown::{
 };
 use crate::tray_surface::{
     dpi_to_icon_canvas, icon_pixel_color, menu_action_keeps_open, menu_command_dispatch_allowed,
-    menu_command_is_enabled, menu_items, tooltip, tray_notification_opens_menu, TimingValues,
-    TrayStatus, STATUS_COMMAND_ID,
+    menu_command_is_enabled, menu_items, power_reconciliation, tooltip,
+    tray_notification_opens_menu, PowerReconciliation, TimingValues, TrayStatus, STATUS_COMMAND_ID,
 };
 
 const WM_APP: u32 = 0x8000;
@@ -592,9 +592,8 @@ pub fn run() {
         refresh_timing_observation(app);
         if app.config.automatic {
             app.record("policy.startup_automatic", "enabled=true");
-            reconcile(app);
         }
-        app.publish();
+        apply_power_reconciliation(app);
         loop {
             let message_loop_exit = run_message_loop();
             let cleanup_result = app.cleanup_normal_shutdown();
@@ -867,17 +866,40 @@ fn release_for_power_change(app: &mut App) {
         format!("state={:?}", app.observation.power().state),
     );
     refresh_timing_observation(app);
-    if app.observation.power().state != PowerState::Ac {
-        release_for_policy(
+    apply_power_reconciliation(app);
+}
+
+fn apply_power_reconciliation(app: &mut App) {
+    let power = app.observation.power().state;
+    let action = power_reconciliation(app.config.automatic, power, app.controller.ownership());
+    app.record(
+        "policy.power_reconciliation",
+        format!("power={power:?} action={action:?}"),
+    );
+    match action {
+        PowerReconciliation::Acquire => apply_policy(app),
+        PowerReconciliation::ReleaseBlocked => release_for_policy(
             app,
-            match app.observation.power().state {
+            match power {
                 PowerState::Battery => tick_policy::PolicyReason::BatteryRestricted,
                 PowerState::BatterySaver => tick_policy::PolicyReason::BatterySaverRestricted,
                 PowerState::Unknown => tick_policy::PolicyReason::PowerUnknown,
                 PowerState::Ac => unreachable!(),
             },
-        );
+        ),
+        PowerReconciliation::ShowStopped => show_ownership_status(app, TrayStatus::Stopped),
+        PowerReconciliation::PreserveOwned => show_ownership_status(app, TrayStatus::Stopped),
+        PowerReconciliation::PreserveUncertain => show_ownership_status(app, TrayStatus::Stopped),
     }
+}
+
+fn show_ownership_status(app: &mut App, released_status: TrayStatus) {
+    app.tray_status = match app.controller.ownership() {
+        OwnershipState::Released => released_status,
+        OwnershipState::Owned => TrayStatus::Running,
+        OwnershipState::Uncertain => TrayStatus::Unverified,
+    };
+    app.publish();
 }
 
 impl App {
@@ -1113,12 +1135,7 @@ unsafe extern "system" fn window_proc(
                         app.observation.power().state
                     ),
                 );
-                if app.config.automatic {
-                    reconcile(app);
-                } else {
-                    release_for_power_change(app);
-                }
-                app.publish();
+                release_for_power_change(app);
             }
             WM_DESTROY => PostQuitMessage(0),
             _ => {}
