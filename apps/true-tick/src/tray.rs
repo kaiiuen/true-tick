@@ -29,9 +29,11 @@ mod list_view_native {
     use super::{c_void, Point};
 
     pub const LVS_REPORT: u32 = 0x0001;
+    pub const LVS_SINGLESEL: u32 = 0x0004;
     pub const LVS_SHOWSELALWAYS: u32 = 0x0008;
     pub const LVS_EX_GRIDLINES: usize = 0x0000_0001;
     pub const LVS_EX_FULLROWSELECT: usize = 0x0000_0020;
+    pub const LVS_EX_DOUBLEBUFFER: usize = 0x0001_0000;
     pub const LVM_FIRST: u32 = 0x1000;
     pub const LVM_DELETEALLITEMS: u32 = LVM_FIRST + 9;
     pub const LVM_GETITEMCOUNT: u32 = LVM_FIRST + 4;
@@ -4115,12 +4117,17 @@ unsafe fn auto_fit_diagnostic_columns(list: *mut c_void, client_width: i32, dpi:
     );
 }
 
+const fn diagnostic_list_extended_style() -> usize {
+    LVS_EX_GRIDLINES | LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER
+}
+
 unsafe fn initialize_diagnostic_list(list: *mut c_void) -> Result<(), u32> {
+    let extended_style = diagnostic_list_extended_style();
     let _ = SendMessageW(
         list,
         LVM_SETEXTENDEDLISTVIEWSTYLE,
-        LVS_EX_GRIDLINES | LVS_EX_FULLROWSELECT,
-        (LVS_EX_GRIDLINES | LVS_EX_FULLROWSELECT) as isize,
+        extended_style,
+        extended_style as isize,
     );
     for (index, label) in REPORT_COLUMNS.iter().enumerate() {
         let mut text = wide(label);
@@ -5926,7 +5933,7 @@ mod tests {
         assert_ne!(ID_DIAGNOSTIC_DISPLAY_LIMIT, ID_DIAGNOSTIC_RANGE);
         assert_ne!(ID_DIAGNOSTIC_SHOW_ALL, ID_DIAGNOSTIC_RANGE);
         assert_eq!(DIAGNOSTIC_RANGE_INPUT_LIMIT, 64);
-        assert_eq!(DIAGNOSTIC_TOOLBAR_HEIGHT, 72);
+        assert_eq!(DIAGNOSTIC_TOOLBAR_HEIGHT, 44);
         let selection = RowSelection::new(12, 24);
         assert_eq!(
             diagnostic_range_details(selection, 32),
@@ -5989,8 +5996,13 @@ mod tests {
     #[test]
     fn diagnostic_grid_style_supports_visible_multi_row_drag_selection() {
         let style = diagnostic_list_style();
+        let extended_style = diagnostic_list_extended_style();
         assert_ne!(style & LVS_REPORT, 0);
+        assert_eq!(style & LVS_SINGLESEL, 0);
         assert_ne!(style & LVS_SHOWSELALWAYS, 0);
+        assert_ne!(extended_style & LVS_EX_GRIDLINES, 0);
+        assert_ne!(extended_style & LVS_EX_FULLROWSELECT, 0);
+        assert_ne!(extended_style & LVS_EX_DOUBLEBUFFER, 0);
         assert_eq!(LVN_ITEMCHANGED, -101);
         assert_eq!(LVN_KEYDOWN, -155);
         assert_eq!(WM_NOTIFY, 0x004E);
@@ -6112,8 +6124,9 @@ mod tests {
         assert!(DIAGNOSTIC_WINDOW_PARENT.is_null());
         assert_ne!(diagnostic_window_extended_style() & WS_EX_APPWINDOW, 0);
         assert_eq!(diagnostic_window_extended_style() & WS_EX_TOOLWINDOW, 0);
-        assert_eq!(DIAGNOSTIC_MIN_WIDTH, 420);
+        assert_eq!(DIAGNOSTIC_MIN_WIDTH, 820);
         assert_eq!(DIAGNOSTIC_MIN_HEIGHT, 260);
+        assert_eq!(DIAGNOSTIC_TOOLBAR_HEIGHT, 44);
     }
 
     #[test]
