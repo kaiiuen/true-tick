@@ -27,43 +27,45 @@ from automatic timer activation after the application has launched. Secure
 signatures and rollback are not implemented.
 
 The tray starts with a clickable `True™ Tick v<version>` header sourced from Cargo
-package metadata. It has compact `Start`, a fixed-choice `Pause` submenu, and `Stop`
-manual controls, `Auto-start: On/Off` and `Auto-time: On/Off` items, a disabled
-concise timing summary, a clickable `Logs` command, and Quit. Auto-start launches the app at Windows login.
-Auto-time controls automatic timing acquisition and defaults to off. Both tray
-left-button-up and right-button-up notifications open the same compact menu.
-Button-down and double-click notifications are ignored to avoid duplicate menus.
-The summary row does not dispatch a command. The `Logs` command opens a normal
-taskbar diagnostic window titled `True™ Tick Status and Diagnostics` without
-changing timer state. It uses a normal overlapped style, `WS_EX_APPWINDOW`, no
-`WS_EX_TOOLWINDOW`, no child style, no owner, standard title-bar controls, a
-resizable read-only status and session log view, and a fresh snapshot each time it
-is reopened. Reopening restores and activates the existing window. The native menu
-keeps Start, Stop, and both setting toggles open after successful or failed
-handling. Reopening after any persistent command reuses the original popup anchor
-POINT, and the returned `TPM_RETURNCMD` ID is dispatched once. Logs closes the
-menu when it opens diagnostics. Highlighting a command uses `WM_MENUSELECT` to
-show a standard Windows tooltip with `Request the best supported timing`, `Release
-True Tick timing`, `Launch True Tick when you sign in`, `Request timing automatically
-on AC power`, `Open status and session logs`, or `Stop safely and quit`. The tooltip
-is destroyed when the popup closes and does not change timer state. Cancel keeps the
-Quit command loop available, while successful Quit closes it.
+package metadata. It has compact `Start`, `Stop`, a `Duration` submenu,
+`Auto-start: On/Off`, `Auto-time: On/Off`, a read-only `Status` submenu, and Quit.
+Duration has fixed Start in and Stop in choices of 1 minute, 5 minutes, 15 minutes,
+30 minutes, and 1 hour. Pause for has 5 minutes, 15 minutes, 30 minutes, and 1
+hour. It also has Cancel scheduled action. There is no custom duration,
+persistence, stacking, or indefinite pause. Auto-start launches the app at Windows
+login. Auto-time controls automatic timing acquisition and defaults to off. Both
+tray release notifications open the same compact menu. Button-down and double-click
+notifications are ignored to avoid duplicate menus.
+
+Status contains disabled State, Timing, Running for, Next action, and Ownership rows.
+Logs is the only clickable Status row. Status and Logs do not change timer state.
+The Timing row uses the current authoritative effective snapshot and shows `Unknown`
+when evidence is invalid or stale. Running for uses monotonic time from the last
+verified Running transition. The `Logs` command opens a normal taskbar diagnostic
+window titled `True™ Tick Status and Diagnostics` without changing timer state. It
+uses a normal overlapped style, `WS_EX_APPWINDOW`, no `WS_EX_TOOLWINDOW`, no child
+style, no owner, standard title-bar controls, a resizable read-only status and
+session log view, and a fresh snapshot each time it is reopened. The native menu
+keeps Start, Stop, and both setting toggles open after successful or failed handling.
+Reopening after any persistent command reuses the original popup anchor POINT, and
+the returned `TPM_RETURNCMD` ID is dispatched once. Highlighting a command uses
+`WM_MENUSELECT` tooltips for Duration, Start in, Stop in, Pause for, Cancel scheduled
+action, Status, Logs, Start, Stop, settings, and Quit. The tooltip is destroyed
+when the popup closes and does not change timer state. Cancel keeps the Quit command
+loop available, while successful Quit closes it.
+
 Start and Stop use the same guarded policy and ownership lifecycle as automatic
 activation. Start remains yellow through query, request, and verification, then
 turns green only after a verified request. The tray tooltip uses actual concise
 values such as `True™ Tick: Running 0.497 ms`, `True™ Tick: Stopped 0.997 ms`,
 `True™ Tick: Starting 0.500 ms`, `True™ Tick: Stopping`, `True™ Tick: Warning`,
-and `True™ Tick: Error`. The disabled status summary uses labels such as
-`Status: Running (0.497 ms)`, `Status: Stopped (0.997 ms)`,
-`Status: Starting (0.500 ms)`, `Status: Stopping (external timing)`, or
-`Status: Error (invalid interval)`. It uses `unknown` when no observation exists. After a successful request, the returned
-verified effective observation replaces the preflight current value in the
-controller and app snapshot. Release observations update that same snapshot. A
-remaining finer or different value is displayed as external effective state and
-does not claim Tick ownership. Query, request, release, and power
-reconciliation observations are carried through controller and app state. Full
-system reports, raw HNS values, power explanations, and full errors remain in the
-diagnostic window. Its local session log records automatic selection, raw native
+and `True™ Tick: Error`. After a successful request, the returned verified effective
+observation replaces the preflight current value in the controller and app snapshot.
+Release observations update that same snapshot. A remaining finer or different value
+is displayed as external effective state and does not claim Tick ownership. Query,
+request, release, and power reconciliation observations are carried through
+controller and app state. Full system reports, raw HNS values, power explanations,
+and full errors remain in the diagnostic window. Its local session log records automatic selection, raw native
 boundaries, selected HNS, requested HNS, effective HNS, and an `equal`, `finer`,
 or `unverified` effective relation. The window shows a local in-memory session log
 from process start through the current moment. It uses monotonic sequence numbers
@@ -146,15 +148,17 @@ Intentionally absent:
 - interactive runtime validation of the Windows diagnostic window appearance,
   taskbar presence, title-bar controls, restore, and close behavior
 
-Pause is session-only with fixed choices of 5 min, 15 min, 30 min, and 60 min.
-Repeated Pause does not extend its monotonic deadline. Resume now and timeout
-clear the session state and re-evaluate current policy. Pause suppresses acquisition
-without persistence, stacking, custom duration, or indefinite state. AC, Battery,
-Battery Saver, and unknown power policy remain authoritative. Release stays on the
-serialized ownership path. Pausing and release handoff are yellow, successful pause
-is yellow `Paused`, Resume uses yellow `Starting`, and failed or timed-out cleanup
-remains unverified rather than becoming `Paused`. A bounded coordinator timer uses
-a hard limit and generation IDs.
+Duration scheduling is session-only and uses monotonic deadlines. Only one scheduled
+action or pause exists. A new selection logs the replacement before changing the
+generation and deadline. Cancellation increments the generation and clears the one
+bounded coordinator timer, so stale timer events do nothing. Start in queues a future
+acquire intent, refreshes current power at the deadline, and rechecks AC, Battery,
+Battery Saver, and unknown policy. A blocked start logs suppression and remains safe.
+Stop in uses guarded release, records an already released no-op, and uses the existing
+yellow handoff watcher when finer external timing remains. Pause for suppresses
+acquisition and releases through ownership logic. Expiry and cancellation refresh
+current power and re-evaluate policy through the serialized path. Fixed choices do not
+persist, stack, accept custom input, or create an indefinite pause.
 
 The header uses a safe fixed Windows shell URL operation for GitHub. Shell failure is
 logged and does not change timer state. Tooltip tracking uses `TTF_ABSOLUTE` and

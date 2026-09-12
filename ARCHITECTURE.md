@@ -38,11 +38,10 @@ CRT, with `VCRUNTIME140.dll` and `api-ms-win-crt-*` observed in a static binary 
 The eventual distribution choice is a documented VC++ Redistributable prerequisite
 or a validated static CRT build. No installer or copied DLLs are part of this v1.
 
-The internal v1 has no profile configuration, application detection, foreground hooks, or profile hysteresis. The v1 tray menu is intentionally compact. It starts with a clickable `True™ Tick v<version>` header sourced from Cargo package metadata, then contains `Start`, a `Pause` submenu, `Stop`, current `Auto-start: On/Off` and `Auto-time: On/Off` toggles, a disabled concise status summary, a clickable `Logs` command, and Quit. Auto-start controls Windows login launch. Auto-time controls automatic timer acquisition after launch. Defaults are `startup_enabled = true` and `automatic = false`. Left-button-up and right-button-up tray notifications both open this same menu. Button-down and double-click notifications are ignored, so Windows notification delivery cannot open duplicate menus. Start and Stop remain the core manual controls and use the same guarded
+The internal v1 has no profile configuration, application detection, foreground hooks, or profile hysteresis. The v1 tray menu is intentionally compact. It starts with a clickable `True™ Tick v<version>` header sourced from Cargo package metadata, then contains `Start`, `Stop`, a `Duration` submenu, current `Auto-start: On/Off` and `Auto-time: On/Off` toggles, a read-only `Status` submenu, and Quit. Duration contains fixed Start in, Stop in, and Pause for choices plus Cancel scheduled action. Start and stop choices are 1 minute, 5 minutes, 15 minutes, 30 minutes, and 1 hour. Pause choices are 5 minutes, 15 minutes, 30 minutes, and 1 hour. Defaults are `startup_enabled = true` and `automatic = false`. There is no custom duration, persistence, stacking, or indefinite pause. Left-button-up and right-button-up tray notifications both open this same menu. Button-down and double-click notifications are ignored, so Windows notification delivery cannot open duplicate menus. Start and Stop remain the core manual controls and use the same guarded
 policy and ownership lifecycle as automatic activation. Start, Stop, and both
 setting toggles keep the native context menu open after success or failure. Each
-reopen reuses the original popup anchor POINT. The disabled status summary never
-dispatches a command. The clickable `Logs` command opens a normal overlapped taskbar diagnostic window and never changes timer state.
+reopen reuses the original popup anchor POINT. The read-only Status rows never dispatch commands. Logs is the only clickable Status row and opens a normal overlapped taskbar diagnostic window without changing timer state.
 The two setting toggles use a non recursive return-command loop so the menu stays
 open after a toggle. The original popup anchor POINT is captured once and reused
 when the menu reopens. Returned command IDs are dispatched once, and toggle
@@ -57,7 +56,7 @@ same window, and refreshes its snapshot. The style contract is source-tested, bu
 actual taskbar appearance and runtime control behavior remain unverified because
 validation does not launch the app. Closing it destroys only the window and
 does not affect timer ownership. Full system reports, config paths, raw HNS values,
-power explanations, and full errors remain excluded from the compact menu and tooltip. The version header is clickable, the timing summary is the only disabled status row, and the separate `Logs` command opens diagnostics. While a menu command is highlighted, `WM_MENUSELECT` drives a standard Windows tooltip with concise descriptions. The descriptions include `Request the best supported timing`, `Release True Tick timing`, `Launch True Tick when you sign in`, `Request timing automatically on AC power`, `Open status and session logs`, and `Stop safely and quit`. The tooltip is destroyed when the popup closes and does not change timer state. The local diagnostic session records automatic selection, raw native boundaries, selected HNS, requested HNS, effective HNS, raw status, and an `equal`, `finer`, or `unverified` effective relation. After a successful request, the controller replaces the preflight current observation with the returned verified effective observation. Release also retains its returned current observation so the UI can show a remaining external effective state without claiming Tick ownership. A released finer effective value enters yellow `Stopping (waiting for handoff)`. The active-only watcher queries every 250 ms for at most 12 observations. Completion shows red `Stopped (current: X ms)`. Timeout shows red `Stopped (external: X ms)` and logs released ownership with another or unknown finer client. Battery-policy and other owned-request releases use the same classification.
+power explanations, and full errors remain excluded from the compact menu and tooltip. The version header is clickable. Status contains disabled State, Timing, Running for, Next action, and Ownership rows, with Logs as the only clickable row. While a menu command is highlighted, `WM_MENUSELECT` drives a standard Windows tooltip with concise descriptions for Duration, Start in, Stop in, Pause for, Cancel scheduled action, Status, Logs, Start, Stop, settings, and Quit. The tooltip is destroyed when the popup closes and does not change timer state. The local diagnostic session records automatic selection, raw native boundaries, selected HNS, requested HNS, effective HNS, raw status, and an `equal`, `finer`, or `unverified` effective relation. After a successful request, the controller replaces the preflight current observation with the returned verified effective observation. Release also retains its returned current observation so the UI can show a remaining external effective state without claiming Tick ownership. A released finer effective value enters yellow `Stopping (waiting for handoff)`. The active-only watcher queries every 250 ms for at most 12 observations. Completion shows red `Stopped (current: X ms)`. Timeout shows red `Stopped (external: X ms)` and logs released ownership with another or unknown finer client. Battery-policy and other owned-request releases use the same classification.
 
 Startup always performs a current timing query after the tray surface is ready, even when the runtime is stopped and Auto-time is off. A successful query produces stopped current timing. A failed query produces stopped timing unknown and a diagnostic error. Selected or requested boundaries remain separate from the current effective observation.
 
@@ -81,16 +80,7 @@ then clamps intermediate values to the nearest supported size. Status colors rem
 green for verified running, yellow for transition or uncertainty, and red for
 stopped or failed states. The tray shell may apply its own rendering scale.
 
-Pause is session-only with fixed choices of 5 min, 15 min, 30 min, and 60 min.
-Repeated Pause does not extend its monotonic deadline. Resume now and timeout
-re-evaluate current policy. Pause suppresses acquisition and uses the serialized
-release path while AC, Battery, Battery Saver, and unknown policy rules remain
-authoritative. Pausing and release handoff are yellow, successful pause is yellow
-`Paused`, Resume uses yellow `Starting`, and failed or timed-out cleanup remains
-unverified rather than becoming `Paused`. One bounded coordinator timer uses a hard
-limit and generation IDs. The GitHub header uses a fixed safe shell URL operation.
-Tooltip tracking uses absolute signed screen coordinates and deactivates after a
-failed cursor query.
+Duration scheduling is session-only with fixed choices. Start in and Stop in offer 1 minute, 5 minutes, 15 minutes, 30 minutes, and 1 hour. Pause for offers 5 minutes, 15 minutes, 30 minutes, and 1 hour. There is no custom input, persistence, stacking, or indefinite pause. Only one scheduled action or pause exists. A new selection logs its replacement before changing the monotonic deadline. Cancellation increments the generation and clears the bounded coordinator timer. Start in refreshes current power at its deadline, queues a future acquire intent, and rechecks AC, Battery, Battery Saver, and unknown policy. Stop in uses guarded release and records an already released no-op. Pause for suppresses acquisition, releases through ownership logic, and re-evaluates current policy on expiry or cancellation. Handoff remains the existing yellow bounded watcher. Stale timer generations do nothing. The GitHub header uses a fixed safe shell URL operation. Tooltip tracking uses absolute signed screen coordinates and deactivates after a failed cursor query.
 
 An inconclusive adapter postcondition enters an explicit uncertain ownership state
 and suppresses repeat acquisition. The adapter retains enough request identity for
@@ -163,10 +153,9 @@ an explicit runtime path or is covered by a deterministic boundary test.
 The branded tooltip uses concise values such as
 `True™ Tick: Running 0.497 ms`, `True™ Tick: Stopped 0.997 ms`,
 `True™ Tick: Starting 0.500 ms`, `True™ Tick: Stopping`,
-`True™ Tick: Warning`, and `True™ Tick: Error`. The disabled menu summary uses
-short labels such as `Status: Running (0.497 ms)`, `Status: Stopped (0.997 ms)`,
-`Status: Starting (0.500 ms)`, `Status: Stopping (external timing)`, and
-`Status: Error (invalid interval)`. It uses `unknown` when no observation is
+`True™ Tick: Warning`, and `True™ Tick: Error`. The read-only Status submenu uses
+short labels such as `State: Running`, `Timing: 0.497 ms`, `Running for: 4m 12s`,
+and `Ownership: True™ Tick`. It uses `Unknown` when no observation is
 available. Raw HNS and full event details remain in the diagnostic window.
 Controller and app state carry observations through query, request, release,
 and power reconciliation. A current value at or below the requested interval

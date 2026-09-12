@@ -56,28 +56,11 @@ numerically smallest supported boundary. It does not use a universal fixed
 and `maximum_hns=5000` select `5000 HNS`, or `0.500 ms`, when that boundary is
 reported by the current system. The adapter retains raw boundary values and
 selected HNS in diagnostics, then validates the selected value before requesting
-it. The compact tray menu starts with a clickable `True™ Tick v<version>` header sourced from Cargo package metadata. It then exposes `Start`, a `Pause` submenu, `Stop`, `Auto-start: On/Off`, `Auto-time: On/Off`, a disabled concise status summary, a clickable `Logs` command, and `Quit`. Auto-start controls launch at Windows login. Auto-time controls automatic timer acquisition after launch. The current defaults are `startup_enabled = true` and `automatic = false`, so login launch does not acquire timing until the user manually starts it. The summary row does not dispatch commands. `Logs` opens a normal taskbar
-diagnostic window titled `True™ Tick Status and Diagnostics` without changing timer
-state. It is a normal taskbar window with standard title-bar controls, a resizable
-read-only status and session log view, and snapshot refresh on reopen. The native
-window uses a normal overlapped style with `WS_EX_APPWINDOW`, no
-`WS_EX_TOOLWINDOW`, no child style, and no owner, so it is intended to appear in
-the taskbar with minimize, maximize, restore, close, and resize behavior. Closing it only destroys the diagnostic
-window and does not change timer state. The native menu keeps Start, Stop, and both setting toggles open after successful
-or failed handling. Each reopen uses the original popup anchor POINT, so the menu
-does not jump when the cursor moves. While a command is highlighted, the native
-menu-selection path shows a short standard Windows tooltip. Start, Stop, startup,
-automatic timing, Logs, Pause, and Quit use the descriptions `Request the best supported
-timing`, `Release True Tick timing`, `Launch True Tick when you sign in`, `Request
-timing automatically on AC power`, `Open status and session logs`, and `Stop safely
-and quit`. The tooltip is destroyed when the popup closes and it never changes timer
-state. Logs closes the menu when it opens the diagnostic window. Quit is dispatched
-from the returned `TPM_RETURNCMD` command. Tray
-left-button-up and right-button-up
-notifications open this same menu. Button-down and double-click notifications are
-ignored, so one Windows notification does not create duplicate menus. Start and Stop
-remain manual controls and use the same guarded policy and ownership lifecycle as
-automatic activation. Start remains yellow through query, request, and verification, and turns green only after a verified request. Quit logs its request, active-state decision, dialog result, cleanup result, and exit permission. If timing is running, starting, stopping, pending, degraded, unverified, or ownership is uncertain, the warning offers exactly `Cancel` and `Stop and Quit`. Cancel leaves timing, the application, and the popup command loop unchanged. Stop and Quit uses the same guarded release path as Stop and exits only after release verification. A failed or uncertain release keeps the app open, updates status and diagnostics, and allows retry. If the state is definitely stopped with no pending ownership, Quit exits without a warning. The diagnostic window shows a bounded, local in-memory session log.
+it. The compact tray menu starts with a clickable `True™ Tick v<version>` header sourced from Cargo package metadata. It then exposes `Start`, `Stop`, a `Duration` submenu, `Auto-start: On/Off`, `Auto-time: On/Off`, a read-only `Status` submenu, and `Quit`. `Duration` contains fixed `Start in`, `Stop in`, and `Pause for` submenus plus `Cancel scheduled action`. Start and stop offer 1 minute, 5 minutes, 15 minutes, 30 minutes, and 1 hour. Pause offers 5 minutes, 15 minutes, 30 minutes, and 1 hour. There is no custom duration, persistence, stacking, or indefinite pause. Auto-start controls launch at Windows login. Auto-time controls automatic timer acquisition after launch. The current defaults are `startup_enabled = true` and `automatic = false`, so login launch does not acquire timing until the user manually starts it.
+
+`Status` contains disabled State, Timing, Running for, Next action, and Ownership rows. `Logs` is the only clickable row in that submenu. Status and Logs do not change timer state. The Status Timing row uses the latest valid authoritative effective observation and displays `Unknown` when evidence is invalid or stale. Running for uses monotonic time from the last verified Running transition. The diagnostic window remains titled `True™ Tick Status and Diagnostics`, with a read-only session view and snapshot refresh on reopen. It uses a normal taskbar window with standard title-bar controls and does not change timer state when closed.
+
+The native menu keeps Start, Stop, and both setting toggles open after successful or failed handling. Each reopen uses the original popup anchor POINT. Highlighting a command uses a standard Windows tooltip. Descriptions cover Duration, Start in, Stop in, Pause for, Cancel scheduled action, Status, Logs, Start, Stop, startup, automatic timing, and Quit. The tooltip is destroyed when the popup closes and never changes timer state. Logs closes the menu when it opens diagnostics. Quit is dispatched from the returned `TPM_RETURNCMD` command. Tray left-button-up and right-button-up notifications open this same menu. Button-down and double-click notifications are ignored. Start and Stop remain manual controls and use the same guarded policy and ownership lifecycle as automatic activation. Start remains yellow through query, request, and verification, then turns green only after a verified request. Quit logs its request, active-state decision, dialog result, cleanup result, and exit permission. If timing is running, starting, stopping, pending, degraded, unverified, or ownership is uncertain, the warning offers exactly `Cancel` and `Stop and Quit`. A failed or uncertain release keeps the app open and allows retry. The diagnostic window shows a bounded local in-memory session log.
 
 The quit warning now uses the built-in warning-style `MessageBoxW` as its primary
 path because the captured `TaskDialogIndirect` HRESULT was `0x80070057`. `Yes`
@@ -90,15 +73,14 @@ It excludes raw pointers, private tokens, credentials, arbitrary secrets, and
 unbounded sensitive paths. The branded tooltip uses short runtime values such as
 `True™ Tick: Running 0.497 ms`, `True™ Tick: Stopped 0.997 ms`,
 `True™ Tick: Starting 0.500 ms`, `True™ Tick: Stopping`, `True™ Tick: Warning`,
-and `True™ Tick: Error`. The disabled menu summary uses concise labels such as
-`Status: Running (0.497 ms)`, `Status: Stopped (0.997 ms)`,
-`Status: Starting (0.500 ms)`, `Status: Stopping (external timing)`, or
-`Status: Error (invalid interval)`. Values use the selected request and the latest verified effective
+and `True™ Tick: Error`. The read-only Status submenu uses concise rows such as
+`State: Running`, `Timing: 0.497 ms`, `Running for: 4m 12s`, and
+`Ownership: True™ Tick`. Values use the selected request and the latest verified effective
 observation as distinct fields, and another platform boundary is allowed. After a
-successful request, the returned effective observation replaces the preflight
-current value in controller and app state. After release, the returned current
-observation is retained as effective external state when another client remains
-finer or otherwise active, without implying Tick ownership. After True™ Tick releases
+	successful request, the returned effective observation replaces the preflight
+	current value in controller and app state. After release, the returned current
+	observation is retained as effective external state when another client remains
+	finer or otherwise active, without implying Tick ownership. After True™ Tick releases
 its request, a finer effective value enters yellow `Stopping (waiting for handoff)`.
 The app queries the effective value only while that handoff is pending, using a
 250 ms Windows timer for at most 12 observations. A non-finer observation completes
@@ -111,7 +93,9 @@ The captured `current_hns=9966` value was about `0.997 ms` because the old confi
 
 Power broadcasts refresh timing and recalculate the visible state for both Auto-time settings. With Auto-time off, AC and no owned request show stopped current timing and wait for manual Start. Battery, Battery Saver, and unknown power remain conservative and release owned timing when policy requires it. Returning to AC with Auto-time on attempts acquisition. Returning to AC with Auto-time off shows stopped current timing rather than leaving a stale blocked state.
 
-The display uses `unknown` when no observation is available. Raw HNS and full event details remain in the diagnostic window. The local diagnostic session records automatic selection,
+Duration scheduling is session-only and uses monotonic deadlines. Only one scheduled action or pause exists. A new selection logs the replacement before it replaces the old generation. Cancellation invalidates the generation and kills the bounded coordinator timer, so stale timer events do nothing. Start in queues a future acquire intent, refreshes current power at the deadline, and applies AC, battery, Battery Saver, and unknown policy again. A blocked start is logged as suppressed and does not acquire. Stop in uses the guarded release path, records a no-op when already released, and uses the existing yellow handoff watcher when release leaves finer external timing. Pause for immediately suppresses acquisition and releases through ownership logic. Expiry or cancellation refreshes policy and re-evaluates it through the same serialized path. The coordinator uses at most one bounded Windows timer and does not poll permanently.
+
+The display uses `Unknown` when no valid observation is available. Raw HNS and full event details remain in the diagnostic window. The read-only Status submenu records current state, effective timing, monotonic running duration, next action, and ownership. The local diagnostic session records automatic selection,
 raw native boundaries, selected HNS, requested HNS, effective HNS, raw status,
 and an `equal`, `finer`, or `unverified` effective relation. The tooltip, status
 summary, and diagnostic header use the latest verified effective observation from
