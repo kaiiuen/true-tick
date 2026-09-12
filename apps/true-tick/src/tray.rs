@@ -35,6 +35,7 @@ mod list_view_native {
     pub const LVS_EX_FULLROWSELECT: usize = 0x0000_0020;
     pub const LVS_EX_DOUBLEBUFFER: usize = 0x0001_0000;
     pub const LVM_FIRST: u32 = 0x1000;
+    pub const LVM_SETBKCOLOR: u32 = LVM_FIRST + 1;
     pub const LVM_DELETEALLITEMS: u32 = LVM_FIRST + 9;
     pub const LVM_GETITEMCOUNT: u32 = LVM_FIRST + 4;
     pub const LVM_GETNEXTITEM: u32 = LVM_FIRST + 12;
@@ -43,6 +44,8 @@ mod list_view_native {
     pub const LVM_INSERTITEMW: u32 = LVM_FIRST + 77;
     pub const LVM_SETITEMTEXTW: u32 = LVM_FIRST + 116;
     pub const LVM_INSERTCOLUMNW: u32 = LVM_FIRST + 97;
+    pub const LVM_SETTEXTCOLOR: u32 = LVM_FIRST + 36;
+    pub const LVM_SETTEXTBKCOLOR: u32 = LVM_FIRST + 38;
     pub const LVM_SETEXTENDEDLISTVIEWSTYLE: u32 = LVM_FIRST + 54;
     pub const LVM_SETCOLUMNWIDTH: u32 = LVM_FIRST + 30;
     pub const LVSCW_AUTOSIZE: i32 = -1;
@@ -463,6 +466,25 @@ const fn diagnostic_window_extended_style() -> u32 {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
+struct LogFontW {
+    height: i32,
+    width: i32,
+    escapement: i32,
+    orientation: i32,
+    weight: i32,
+    italic: u8,
+    underline: u8,
+    strike_out: u8,
+    charset: u8,
+    out_precision: u8,
+    clip_precision: u8,
+    quality: u8,
+    pitch_and_family: u8,
+    face_name: [u16; 32],
+}
+
+#[repr(C)]
 struct PaintStruct {
     hdc: *mut c_void,
     erase: i32,
@@ -558,6 +580,7 @@ struct App {
     desired_intent: DesiredIntentQueue,
     diagnostics: Arc<DiagnosticStore>,
     diagnostic_window: Option<*mut c_void>,
+    diagnostic_state_font: Option<*mut c_void>,
     diagnostic_hud_state: Option<*mut c_void>,
     diagnostic_summary: Option<*mut c_void>,
     diagnostic_hud_separator: Option<*mut c_void>,
@@ -754,6 +777,7 @@ pub fn run() {
             desired_intent: DesiredIntentQueue::new(),
             diagnostics,
             diagnostic_window: None,
+            diagnostic_state_font: None,
             diagnostic_hud_state: None,
             diagnostic_summary: None,
             diagnostic_hud_separator: None,
@@ -1111,6 +1135,11 @@ unsafe fn remove_tray_icon(app: &mut App) {
 }
 
 fn clear_diagnostic_state(app: &mut App) {
+    unsafe {
+        if let Some(font) = app.diagnostic_state_font.take() {
+            let _ = DeleteObject(font);
+        }
+    }
     app.diagnostic_window = None;
     app.diagnostic_hud_state = None;
     app.diagnostic_summary = None;
@@ -5601,7 +5630,7 @@ unsafe fn set_diagnostic_control_font(control: *mut c_void) {
     }
 }
 
-unsafe fn set_diagnostic_control_fonts(app: &App) {
+unsafe fn set_diagnostic_control_fonts(app: &mut App) {
     for control in [
         app.diagnostic_hud_state,
         app.diagnostic_summary,
@@ -5623,6 +5652,88 @@ unsafe fn set_diagnostic_control_fonts(app: &App) {
     {
         set_diagnostic_control_font(control);
     }
+    let Some(state) = app.diagnostic_hud_state else {
+        return;
+    };
+    let stock = GetStockObject(DEFAULT_GUI_FONT);
+    if stock.is_null() {
+        return;
+    }
+    let mut log_font = LogFontW {
+        height: 0,
+        width: 0,
+        escapement: 0,
+        orientation: 0,
+        weight: 0,
+        italic: 0,
+        underline: 0,
+        strike_out: 0,
+        charset: 0,
+        out_precision: 0,
+        clip_precision: 0,
+        quality: 0,
+        pitch_and_family: 0,
+        face_name: [0; 32],
+    };
+    if GetObjectW(
+        stock,
+        size_of::<LogFontW>() as i32,
+        (&mut log_font as *mut LogFontW).cast::<c_void>(),
+    ) == 0
+    {
+        return;
+    }
+    log_font.height = -scale_logical(14, GetDpiForWindow(state).max(96));
+    log_font.weight = 700;
+    let font = CreateFontIndirectW(&log_font);
+    if font.is_null() {
+        return;
+    }
+    if let Some(previous) = app.diagnostic_state_font.replace(font) {
+        let _ = DeleteObject(previous);
+    }
+    let _ = SendMessageW(state, WM_SETFONT, font as usize, 1);
+}
+
+fn diagnostic_presentation_message(message: u32) -> bool {
+    matches!(
+        message,
+        WM_THEMECHANGED | WM_SYSCOLORCHANGE | WM_SETTINGCHANGE
+    )
+}
+
+unsafe fn refresh_diagnostic_presentation(hwnd: *mut c_void, app: &mut App) {
+    set_diagnostic_control_fonts(app);
+    let background = GetSysColor(COLOR_WINDOW);
+    let text = GetSysColor(COLOR_WINDOWTEXT);
+    if let Some(list) = app.diagnostic_list {
+        let _ = SendMessageW(list, LVM_SETBKCOLOR, 0, background as isize);
+        let _ = SendMessageW(list, LVM_SETTEXTCOLOR, 0, text as isize);
+        let _ = SendMessageW(list, LVM_SETTEXTBKCOLOR, 0, background as isize);
+    }
+    for control in [
+        app.diagnostic_hud_state,
+        app.diagnostic_summary,
+        app.diagnostic_hud_separator,
+        app.diagnostic_toolbar_separator,
+        app.diagnostic_display_label,
+        app.diagnostic_display_input,
+        app.diagnostic_show_all_button,
+        app.diagnostic_toolbar_label,
+        app.diagnostic_selection_summary,
+        app.diagnostic_range_input,
+        app.diagnostic_copy_button,
+        app.diagnostic_export_button,
+        app.diagnostic_message,
+        app.diagnostic_list,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let _ = InvalidateRect(control, std::ptr::null(), 1);
+    }
+    let _ = InvalidateRect(hwnd, std::ptr::null(), 1);
+    let _ = UpdateWindow(hwnd);
 }
 
 unsafe extern "system" fn diagnostic_window_proc(
@@ -5995,12 +6106,16 @@ unsafe extern "system" fn diagnostic_window_proc(
             (*app).diagnostic_export_button = Some(export_button);
             (*app).diagnostic_message = Some(message);
             (*app).diagnostic_list = Some(list);
+            refresh_diagnostic_presentation(hwnd, &mut *app);
             let _ = layout_diagnostic_controls(hwnd, &*app);
         }
         return 0;
     }
     if !app.is_null() {
-        if message == WM_ERASEBKGND {
+        if diagnostic_presentation_message(message) {
+            refresh_diagnostic_presentation(hwnd, &mut *app);
+            return 0;
+        } else if message == WM_ERASEBKGND {
             let brush = GetSysColorBrush(COLOR_WINDOW);
             let mut rect = Rect {
                 left: 0,
@@ -6096,7 +6211,7 @@ unsafe extern "system" fn diagnostic_window_proc(
                     );
                 }
             }
-            set_diagnostic_control_fonts(&*app);
+            set_diagnostic_control_fonts(&mut *app);
             let _ = layout_diagnostic_controls(hwnd, &*app);
             return 0;
         } else if message == WM_SIZE {
@@ -6632,6 +6747,8 @@ extern "system" {
 #[link(name = "gdi32")]
 extern "system" {
     fn GetStockObject(index: i32) -> *mut c_void;
+    fn GetObjectW(object: *mut c_void, count: i32, object_data: *mut c_void) -> i32;
+    fn CreateFontIndirectW(log_font: *const LogFontW) -> *mut c_void;
     fn CreateBitmap(
         width: i32,
         height: i32,
@@ -6761,6 +6878,19 @@ mod tests {
         ] {
             assert!(!name.is_empty());
         }
+    }
+
+    #[test]
+    fn diagnostic_theme_contract_refreshes_only_presentation_messages() {
+        for message in [WM_THEMECHANGED, WM_SYSCOLORCHANGE, WM_SETTINGCHANGE] {
+            assert!(diagnostic_presentation_message(message));
+        }
+        for message in [WM_SIZE, WM_DPICHANGED, WM_TIMER, WM_COMMAND] {
+            assert!(!diagnostic_presentation_message(message));
+        }
+        assert_eq!(LVM_SETBKCOLOR, LVM_FIRST + 1);
+        assert_eq!(LVM_SETTEXTCOLOR, LVM_FIRST + 36);
+        assert_eq!(LVM_SETTEXTBKCOLOR, LVM_FIRST + 38);
     }
 
     #[test]
