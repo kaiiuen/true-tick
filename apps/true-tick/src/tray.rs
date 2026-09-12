@@ -1094,6 +1094,59 @@ unsafe fn remove_tray_icon(app: &mut App) {
     }
 }
 
+fn clear_diagnostic_state(app: &mut App) {
+    app.diagnostic_window = None;
+    app.diagnostic_summary = None;
+    app.diagnostic_display_label = None;
+    app.diagnostic_display_input = None;
+    app.diagnostic_show_all_button = None;
+    app.diagnostic_toolbar_label = None;
+    app.diagnostic_selection_summary = None;
+    app.diagnostic_range_input = None;
+    app.diagnostic_copy_button = None;
+    app.diagnostic_export_button = None;
+    app.diagnostic_message = None;
+    app.diagnostic_list = None;
+    app.diagnostic_selection = None;
+    app.diagnostic_selection_sequences = None;
+    app.diagnostic_grid_selection_sequences.clear();
+    app.diagnostic_grid_selection_reset = false;
+    app.diagnostic_selection_reset = false;
+    app.diagnostic_message_text.clear();
+    app.diagnostic_refresh_pending = false;
+    app.diagnostic_refreshing = false;
+    app.diagnostic_layout_stable = false;
+    app.diagnostic_snapshot_key = None;
+    app.diagnostic_snapshot_generation = 0;
+    app.diagnostic_auto_fit_generation = None;
+}
+
+unsafe fn destroy_created_diagnostic_controls(controls: [*mut c_void; 11]) {
+    for control in controls {
+        if !control.is_null() {
+            let _ = DestroyWindow(control);
+        }
+    }
+}
+
+unsafe fn diagnostic_children_ready(app: &App) -> bool {
+    [
+        app.diagnostic_summary,
+        app.diagnostic_display_label,
+        app.diagnostic_display_input,
+        app.diagnostic_show_all_button,
+        app.diagnostic_toolbar_label,
+        app.diagnostic_selection_summary,
+        app.diagnostic_range_input,
+        app.diagnostic_copy_button,
+        app.diagnostic_export_button,
+        app.diagnostic_message,
+        app.diagnostic_list,
+    ]
+    .into_iter()
+    .all(|control| control.is_some_and(|value| IsWindow(value) != 0))
+}
+
 unsafe fn destroy_diagnostic_window(app: &mut App) {
     if let Some(window) = app.diagnostic_window.take() {
         if IsWindow(window) != 0 {
@@ -1108,6 +1161,7 @@ unsafe fn destroy_diagnostic_window(app: &mut App) {
             );
         }
     }
+    clear_diagnostic_state(app);
 }
 
 unsafe fn show_shutdown_warning(hwnd: *mut c_void, message: &str) {
@@ -3642,7 +3696,18 @@ unsafe fn open_github_page(hwnd: *mut c_void, app: &mut App) {
 unsafe fn open_diagnostic_window(app: &mut App) {
     if let Some(window) = app.diagnostic_window {
         if IsWindow(window) == 0 {
-            app.diagnostic_window = None;
+            app.diagnostics.record(
+                "diagnostic.window.invalid",
+                "result=cleared reason=parent_not_a_window",
+            );
+            clear_diagnostic_state(app);
+        } else if !diagnostic_children_ready(app) {
+            app.diagnostics.record(
+                "diagnostic.window.invalid",
+                "result=destroyed reason=required_child_missing",
+            );
+            let _ = DestroyWindow(window);
+            clear_diagnostic_state(app);
         } else {
             if IsIconic(window) != 0 {
                 ShowWindow(window, SW_RESTORE);
@@ -3686,7 +3751,24 @@ unsafe fn open_diagnostic_window(app: &mut App) {
             return;
         }
         app.diagnostic_window = Some(window);
-        layout_diagnostic_controls(window, app);
+        if !diagnostic_children_ready(app) {
+            app.diagnostics.record(
+                "diagnostic.window.invalid",
+                "result=destroyed reason=create_returned_without_required_children",
+            );
+            let _ = DestroyWindow(window);
+            clear_diagnostic_state(app);
+            return;
+        }
+        if !layout_diagnostic_controls(window, app) {
+            app.diagnostics.record(
+                "diagnostic.window.invalid",
+                "result=destroyed reason=initial_layout_failed",
+            );
+            let _ = DestroyWindow(window);
+            clear_diagnostic_state(app);
+            return;
+        }
         ShowWindow(window, SW_SHOWNORMAL);
         UpdateWindow(window);
         SetForegroundWindow(window);
@@ -5304,6 +5386,10 @@ unsafe fn handle_diagnostic_notify(app: &mut App, l_param: isize) -> bool {
     }
 }
 
+const fn diagnostic_create_failure_result() -> isize {
+    -1
+}
+
 unsafe fn set_diagnostic_control_font(control: *mut c_void) {
     if control.is_null() {
         return;
@@ -5324,6 +5410,9 @@ unsafe extern "system" fn diagnostic_window_proc(
     if message == WM_CREATE {
         let create = l_param as *const CreateStruct;
         let app_ptr = app_create_params(create);
+        if app_ptr.is_null() {
+            return diagnostic_create_failure_result();
+        }
         let app = app_ptr as *mut App;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, app_ptr as isize);
         let static_class = wide("STATIC");
@@ -5550,7 +5639,7 @@ unsafe extern "system" fn diagnostic_window_proc(
                     ),
                 );
             }
-            for control in [
+            destroy_created_diagnostic_controls([
                 summary,
                 display_label,
                 display_input,
@@ -5562,12 +5651,8 @@ unsafe extern "system" fn diagnostic_window_proc(
                 export_button,
                 message,
                 list,
-            ] {
-                if !control.is_null() {
-                    DestroyWindow(control);
-                }
-            }
-            return 1;
+            ]);
+            return diagnostic_create_failure_result();
         }
         for control in [
             summary,
@@ -5591,11 +5676,22 @@ unsafe extern "system" fn diagnostic_window_proc(
                     format!("raw_status={raw_error}"),
                 );
             }
-            DestroyWindow(summary);
-            DestroyWindow(list);
-            return 1;
+            destroy_created_diagnostic_controls([
+                summary,
+                display_label,
+                display_input,
+                show_all_button,
+                label,
+                selection_summary,
+                range_input,
+                copy_button,
+                export_button,
+                message,
+                list,
+            ]);
+            return diagnostic_create_failure_result();
         }
-        if !app_ptr.is_null() {
+        {
             (*app).diagnostic_summary = Some(summary);
             (*app).diagnostic_display_label = Some(display_label);
             (*app).diagnostic_display_input = Some(display_input);
@@ -5607,7 +5703,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             (*app).diagnostic_export_button = Some(export_button);
             (*app).diagnostic_message = Some(message);
             (*app).diagnostic_list = Some(list);
-            layout_diagnostic_controls(hwnd, &*app);
+            let _ = layout_diagnostic_controls(hwnd, &*app);
         }
         return 0;
     }
@@ -5698,30 +5794,8 @@ unsafe extern "system" fn diagnostic_window_proc(
         } else if message == WM_SETFOCUS {
             request_diagnostic_refresh(&mut *app);
         } else if message == WM_NCDESTROY {
-            (*app).diagnostic_window = None;
-            (*app).diagnostic_summary = None;
-            (*app).diagnostic_display_label = None;
-            (*app).diagnostic_display_input = None;
-            (*app).diagnostic_show_all_button = None;
-            (*app).diagnostic_toolbar_label = None;
-            (*app).diagnostic_selection_summary = None;
-            (*app).diagnostic_range_input = None;
-            (*app).diagnostic_copy_button = None;
-            (*app).diagnostic_export_button = None;
-            (*app).diagnostic_message = None;
-            (*app).diagnostic_list = None;
-            (*app).diagnostic_selection = None;
-            (*app).diagnostic_selection_sequences = None;
-            (*app).diagnostic_grid_selection_sequences.clear();
-            (*app).diagnostic_grid_selection_reset = false;
-            (*app).diagnostic_selection_reset = false;
-            (*app).diagnostic_message_text.clear();
-            (*app).diagnostic_refresh_pending = false;
-            (*app).diagnostic_refreshing = false;
-            (*app).diagnostic_layout_stable = false;
-            (*app).diagnostic_snapshot_key = None;
-            (*app).diagnostic_snapshot_generation = 0;
-            (*app).diagnostic_auto_fit_generation = None;
+            clear_diagnostic_state(&mut *app);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         }
     }
     DefWindowProcW(hwnd, message, w_param, l_param)
@@ -6281,6 +6355,22 @@ unsafe fn initialize_common_controls() -> Result<(), u32> {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiagnosticLayoutPath {
+    Deferred,
+    Fallback,
+}
+
+#[cfg(test)]
+fn diagnostic_layout_path(begin_ok: bool, defer_ok: bool, end_ok: bool) -> DiagnosticLayoutPath {
+    if begin_ok && defer_ok && end_ok {
+        DiagnosticLayoutPath::Deferred
+    } else {
+        DiagnosticLayoutPath::Fallback
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -6348,6 +6438,31 @@ mod tests {
         assert_ne!(style & SS_NOPREFIX, 0);
         assert_eq!(style & (0x0020_0000 | 0x0040 | 0x0004), 0);
         assert!(DIAGNOSTIC_SUMMARY_HEIGHT >= 10 * 18);
+    }
+
+    #[test]
+    fn diagnostic_create_failure_returns_documented_failure_value() {
+        assert_eq!(diagnostic_create_failure_result(), -1);
+    }
+
+    #[test]
+    fn diagnostic_layout_falls_back_after_any_deferred_position_failure() {
+        assert_eq!(
+            diagnostic_layout_path(true, true, true),
+            DiagnosticLayoutPath::Deferred
+        );
+        assert_eq!(
+            diagnostic_layout_path(false, true, true),
+            DiagnosticLayoutPath::Fallback
+        );
+        assert_eq!(
+            diagnostic_layout_path(true, false, true),
+            DiagnosticLayoutPath::Fallback
+        );
+        assert_eq!(
+            diagnostic_layout_path(true, true, false),
+            DiagnosticLayoutPath::Fallback
+        );
     }
 
     #[test]
