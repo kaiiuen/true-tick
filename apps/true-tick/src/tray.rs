@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use tick_core::{DesiredIntent, DesiredIntentQueue};
 use tick_diagnostics::{
-    diagnostic_grid_row, parse_row_selection, truncate_utf8, DiagnosticOutcome, DiagnosticPhase,
-    DiagnosticRecord, DiagnosticSource, DiagnosticStore, NativeOutcome, OperationContext,
-    RowSelection, DEFAULT_MAX_EVENTS, REPORT_COLUMNS,
+    diagnostic_grid_row, format_tsv, parse_row_selection, truncate_utf8, DiagnosticOutcome,
+    DiagnosticPhase, DiagnosticRecord, DiagnosticSource, DiagnosticStore, NativeOutcome,
+    OperationContext, RowSelection, DEFAULT_MAX_EVENTS, REPORT_COLUMNS,
 };
 use tick_observation_windows::{ObservationSource, WindowsObservation};
 use tick_ownership::{OwnershipState, TimerController, TimingSnapshot, Verification};
@@ -148,6 +148,16 @@ const MB_ICONWARNING: u32 = 0x0000_0030;
 const MB_YESNO: u32 = 0x0000_0004;
 const MB_DEFBUTTON2: u32 = 0x0000_0100;
 const IDYES: i32 = 6;
+const CF_UNICODETEXT: u32 = 13;
+const GMEM_MOVEABLE: u32 = 0x0002;
+const MOVEFILE_REPLACE_EXISTING: u32 = 0x00000001;
+const MOVEFILE_WRITE_THROUGH: u32 = 0x00000008;
+const OFN_OVERWRITEPROMPT: u32 = 0x00000002;
+const OFN_HIDEREADONLY: u32 = 0x00000004;
+const OFN_NOCHANGEDIR: u32 = 0x00000008;
+const OFN_PATHMUSTEXIST: u32 = 0x00000800;
+const OFN_EXPLORER: u32 = 0x00080000;
+const MAX_EXPORT_PATH_UTF16: usize = 32_768;
 
 const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 const WS_POPUP: u32 = 0x8000_0000;
@@ -167,6 +177,39 @@ const TTM_UPDATETIPTEXTW: u32 = WM_USER + 57;
 enum NativeResult {
     Succeeded,
     Failed { raw_error: u32 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiagnosticNativeAction {
+    Completed,
+    Cancelled,
+    Failed { raw_error: u32 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeFailure {
+    stage: &'static str,
+    raw_error: u32,
+}
+
+fn map_native_action(success: bool, raw_error: u32) -> DiagnosticNativeAction {
+    if success {
+        DiagnosticNativeAction::Completed
+    } else {
+        DiagnosticNativeAction::Failed { raw_error }
+    }
+}
+
+fn map_save_dialog_result(result: i32, extended_error: u32) -> DiagnosticNativeAction {
+    if result != 0 {
+        DiagnosticNativeAction::Completed
+    } else if extended_error == 0 {
+        DiagnosticNativeAction::Cancelled
+    } else {
+        DiagnosticNativeAction::Failed {
+            raw_error: extended_error,
+        }
+    }
 }
 
 fn native_bool_result(result: i32, raw_error: u32) -> NativeResult {
@@ -3837,16 +3880,406 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
     layout_diagnostic_controls(window, app);
 }
 
-fn diagnostic_toolbar_action(app: &mut App, action: &str) {
-    app.begin_operation(DiagnosticSource::Diagnostic);
-    app.record(
-        "diagnostic.toolbar.request",
-        format!("action={action} result=deferred"),
-    );
-    unsafe {
-        set_diagnostic_message(app, "Native report actions are being prepared.");
+#[repr(C)]
+struct OpenFileNameW {
+    struct_size: u32,
+    owner: *mut c_void,
+    instance: *mut c_void,
+    filter: *const u16,
+    custom_filter: *mut u16,
+    maximum_custom_filter: u32,
+    filter_index: u32,
+    file: *mut u16,
+    maximum_file: u32,
+    file_title: *mut u16,
+    maximum_file_title: u32,
+    initial_directory: *const u16,
+    title: *const u16,
+    flags: u32,
+    file_offset: u16,
+    file_extension: u16,
+    default_extension: *const u16,
+    custom_data: usize,
+    hook: *mut c_void,
+    template_name: *const u16,
+    reserved: *mut c_void,
+    reserved_flags: u32,
+    flags_ex: u32,
+}
+
+unsafe fn copy_tsv_to_clipboard(owner: *mut c_void, text: &str) -> Result<(), NativeFailure> {
+    if OpenClipboard(owner) == 0 {
+        return Err(NativeFailure {
+            stage: "OpenClipboard",
+            raw_error: GetLastError(),
+        });
     }
-    app.finish_operation(DiagnosticOutcome::Completed);
+    if EmptyClipboard() == 0 {
+        let raw_error = GetLastError();
+        let _ = CloseClipboard();
+        return Err(NativeFailure {
+            stage: "EmptyClipboard",
+            raw_error,
+        });
+    }
+    let mut utf16 = text.encode_utf16().collect::<Vec<_>>();
+    utf16.push(0);
+    let bytes = utf16.len().saturating_mul(size_of::<u16>());
+    let memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if memory.is_null() {
+        let raw_error = GetLastError();
+        let _ = CloseClipboard();
+        return Err(NativeFailure {
+            stage: "GlobalAlloc",
+            raw_error,
+        });
+    }
+    let locked = GlobalLock(memory);
+    if locked.is_null() {
+        let raw_error = GetLastError();
+        let _ = GlobalFree(memory);
+        let _ = CloseClipboard();
+        return Err(NativeFailure {
+            stage: "GlobalLock",
+            raw_error,
+        });
+    }
+    std::ptr::copy_nonoverlapping(utf16.as_ptr().cast::<u8>(), locked.cast::<u8>(), bytes);
+    let _ = GlobalUnlock(memory);
+    if SetClipboardData(CF_UNICODETEXT, memory).is_null() {
+        let raw_error = GetLastError();
+        let _ = GlobalFree(memory);
+        let _ = CloseClipboard();
+        return Err(NativeFailure {
+            stage: "SetClipboardData",
+            raw_error,
+        });
+    }
+    if CloseClipboard() == 0 {
+        return Err(NativeFailure {
+            stage: "CloseClipboard",
+            raw_error: GetLastError(),
+        });
+    }
+    Ok(())
+}
+
+unsafe fn choose_export_path(owner: *mut c_void) -> Result<Option<PathBuf>, NativeFailure> {
+    let filter = wide("TSV files (*.tsv)\0*.tsv\0All files (*.*)\0*.*\0\0");
+    let title = wide("Export True™ Tick diagnostic log");
+    let default_extension = wide("tsv");
+    let mut file = wide("true-tick-log.tsv");
+    file.resize(MAX_EXPORT_PATH_UTF16, 0);
+    let mut dialog = OpenFileNameW {
+        struct_size: size_of::<OpenFileNameW>() as u32,
+        owner,
+        instance: std::ptr::null_mut(),
+        filter: filter.as_ptr(),
+        custom_filter: std::ptr::null_mut(),
+        maximum_custom_filter: 0,
+        filter_index: 1,
+        file: file.as_mut_ptr(),
+        maximum_file: file.len() as u32,
+        file_title: std::ptr::null_mut(),
+        maximum_file_title: 0,
+        initial_directory: std::ptr::null(),
+        title: title.as_ptr(),
+        flags: OFN_EXPLORER
+            | OFN_HIDEREADONLY
+            | OFN_NOCHANGEDIR
+            | OFN_OVERWRITEPROMPT
+            | OFN_PATHMUSTEXIST,
+        file_offset: 0,
+        file_extension: 0,
+        default_extension: default_extension.as_ptr(),
+        custom_data: 0,
+        hook: std::ptr::null_mut(),
+        template_name: std::ptr::null(),
+        reserved: std::ptr::null_mut(),
+        reserved_flags: 0,
+        flags_ex: 0,
+    };
+    let result = GetSaveFileNameW(&mut dialog);
+    let extended_error = if result == 0 {
+        CommDlgExtendedError()
+    } else {
+        0
+    };
+    match map_save_dialog_result(result, extended_error) {
+        DiagnosticNativeAction::Completed => {
+            let length = file.iter().position(|value| *value == 0).unwrap_or(0);
+            Ok(Some(PathBuf::from(String::from_utf16_lossy(
+                &file[..length],
+            ))))
+        }
+        DiagnosticNativeAction::Cancelled => Ok(None),
+        DiagnosticNativeAction::Failed { raw_error } => Err(NativeFailure {
+            stage: "GetSaveFileNameW",
+            raw_error,
+        }),
+    }
+}
+
+fn export_io_error(error: &std::io::Error) -> u32 {
+    error.raw_os_error().unwrap_or(1).try_into().unwrap_or(1)
+}
+
+unsafe fn write_export_tsv(path: &Path, text: &str) -> Result<(), NativeFailure> {
+    let temporary = PathBuf::from(format!("{}.tmp", path.to_string_lossy()));
+    if let Err(error) = std::fs::write(&temporary, text.as_bytes()) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(NativeFailure {
+            stage: "write_temporary",
+            raw_error: export_io_error(&error),
+        });
+    }
+    let temporary_wide = wide(&temporary.to_string_lossy());
+    let path_wide = wide(&path.to_string_lossy());
+    if MoveFileExW(
+        temporary_wide.as_ptr(),
+        path_wide.as_ptr(),
+        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+    ) == 0
+    {
+        let raw_error = GetLastError();
+        let _ = std::fs::remove_file(&temporary);
+        return Err(NativeFailure {
+            stage: "MoveFileExW",
+            raw_error,
+        });
+    }
+    Ok(())
+}
+
+fn diagnostic_range_details(selection: RowSelection, retained_rows: usize) -> String {
+    format!(
+        "selected_range={}-{} retained_rows={} row_count={} format=TSV",
+        selection.start(),
+        selection.end(),
+        retained_rows,
+        selection.row_count()
+    )
+}
+
+fn diagnostic_toolbar_action(app: &mut App, action: &str) {
+    let events = app.diagnostics.snapshot();
+    let retained_rows = events.len();
+    let input = unsafe { diagnostic_range_text(app) };
+    let parsed = parse_row_selection(&input, retained_rows);
+    app.begin_operation(DiagnosticSource::Diagnostic);
+    let selection = match parsed {
+        Ok(selection) if !selection.is_empty() => selection,
+        Ok(selection) => {
+            app.record(
+                "diagnostic.range.parsed",
+                format!(
+                    "result=empty {}",
+                    diagnostic_range_details(selection, retained_rows)
+                ),
+            );
+            app.record(
+                "diagnostic.validation_failure",
+                "reason=no_retained_events format=TSV row_count=0",
+            );
+            unsafe {
+                set_diagnostic_message(app, "No retained events.");
+            }
+            app.finish_operation(DiagnosticOutcome::Failed);
+            return;
+        }
+        Err(error) => {
+            app.record(
+                "diagnostic.range.parsed",
+                format!("result=invalid retained_rows={retained_rows} format=TSV error={error}"),
+            );
+            app.record(
+                "diagnostic.validation_failure",
+                format!("result=invalid retained_rows={retained_rows} format=TSV error={error}"),
+            );
+            unsafe {
+                set_diagnostic_message(app, format!("Invalid range: {error}"));
+            }
+            app.finish_operation(DiagnosticOutcome::Failed);
+            return;
+        }
+    };
+    app.diagnostic_selection = Some(selection);
+    let rows = events
+        .iter()
+        .skip(selection.start().saturating_sub(1))
+        .take(selection.row_count())
+        .map(diagnostic_grid_row)
+        .collect::<Vec<_>>();
+    let tsv = format_tsv(&rows);
+    let details = diagnostic_range_details(selection, retained_rows);
+    app.record(
+        "diagnostic.range.parsed",
+        format!("result=success {details}"),
+    );
+    match action {
+        "copy" => {
+            app.record("diagnostic.copy.request", details.clone());
+            let result = unsafe {
+                copy_tsv_to_clipboard(app.diagnostic_window.unwrap_or(std::ptr::null_mut()), &tsv)
+            };
+            match result {
+                Ok(()) => {
+                    if !matches!(
+                        map_native_action(true, 0),
+                        DiagnosticNativeAction::Completed
+                    ) {
+                        unreachable!("successful clipboard operation must map to completed");
+                    }
+                    unsafe {
+                        set_diagnostic_message(app, format!("Copied {} rows as TSV.", rows.len()));
+                    }
+                    app.record(
+                        "diagnostic.copy.result",
+                        format!("result=success {details}"),
+                    );
+                    app.finish_operation(DiagnosticOutcome::Completed);
+                }
+                Err(error) => {
+                    let DiagnosticNativeAction::Failed { raw_error } =
+                        map_native_action(false, error.raw_error)
+                    else {
+                        unreachable!("failed clipboard operation must map to failed");
+                    };
+                    app.record(
+                        "native.clipboard.error",
+                        format!("stage={} raw_status={raw_error}", error.stage),
+                    );
+                    unsafe {
+                        set_diagnostic_message(
+                            app,
+                            format!("Copy failed (native error {}).", error.raw_error),
+                        );
+                    }
+                    app.record(
+                        "diagnostic.copy.result",
+                        format!("result=failed {details} raw_status={}", error.raw_error),
+                    );
+                    app.finish_operation(DiagnosticOutcome::Failed);
+                }
+            }
+        }
+        "export" => {
+            app.record("diagnostic.export.request", details.clone());
+            let path = match unsafe {
+                choose_export_path(app.diagnostic_window.unwrap_or(std::ptr::null_mut()))
+            } {
+                Ok(Some(path)) => path,
+                Ok(None) => {
+                    unsafe {
+                        set_diagnostic_message(app, "Export cancelled.");
+                    }
+                    app.record(
+                        "diagnostic.export.cancelled",
+                        format!("result=cancelled {details}"),
+                    );
+                    app.record(
+                        "diagnostic.export.result",
+                        format!("result=cancelled {details}"),
+                    );
+                    app.finish_operation(DiagnosticOutcome::Cancelled);
+                    return;
+                }
+                Err(error) => {
+                    app.record(
+                        "native.GetSaveFileNameW.error",
+                        format!("raw_status={}", error.raw_error),
+                    );
+                    unsafe {
+                        set_diagnostic_message(
+                            app,
+                            format!("Export dialog failed (native error {}).", error.raw_error),
+                        );
+                    }
+                    app.record(
+                        "diagnostic.export.result",
+                        format!("result=failed {details} raw_status={}", error.raw_error),
+                    );
+                    app.finish_operation(DiagnosticOutcome::Failed);
+                    return;
+                }
+            };
+            let write_result = unsafe { write_export_tsv(&path, &tsv) };
+            match write_result {
+                Ok(()) => {
+                    unsafe {
+                        set_diagnostic_message(
+                            app,
+                            format!("Exported {} rows as TSV.", rows.len()),
+                        );
+                    }
+                    app.record(
+                        "diagnostic.export.result",
+                        format!("result=success {details} path=redacted"),
+                    );
+                    app.finish_operation(DiagnosticOutcome::Completed);
+                }
+                Err(error) => {
+                    app.record(
+                        "native.export.file.error",
+                        format!("stage={} raw_status={}", error.stage, error.raw_error),
+                    );
+                    unsafe {
+                        set_diagnostic_message(
+                            app,
+                            format!("Export failed (native error {}).", error.raw_error),
+                        );
+                    }
+                    app.record(
+                        "diagnostic.export.result",
+                        format!(
+                            "result=failed {details} path=redacted raw_status={}",
+                            error.raw_error
+                        ),
+                    );
+                    app.finish_operation(DiagnosticOutcome::Failed);
+                }
+            }
+        }
+        _ => {
+            app.record(
+                "diagnostic.toolbar.request",
+                format!("action={action} result=ignored"),
+            );
+            app.finish_operation(DiagnosticOutcome::Suppressed);
+        }
+    }
+}
+
+fn diagnostic_range_changed(app: &mut App) {
+    let retained_rows = app.diagnostics.snapshot().len();
+    let input = unsafe { diagnostic_range_text(app) };
+    app.begin_operation(DiagnosticSource::Diagnostic);
+    match parse_row_selection(&input, retained_rows) {
+        Ok(selection) => {
+            app.record(
+                "diagnostic.range.parsed",
+                format!(
+                    "result=success {}",
+                    diagnostic_range_details(selection, retained_rows)
+                ),
+            );
+            app.finish_operation(DiagnosticOutcome::Completed);
+        }
+        Err(error) => {
+            app.record(
+                "diagnostic.range.parsed",
+                format!("result=invalid retained_rows={retained_rows} format=TSV error={error}"),
+            );
+            app.record(
+                "diagnostic.validation_failure",
+                format!("result=invalid retained_rows={retained_rows} format=TSV error={error}"),
+            );
+            app.finish_operation(DiagnosticOutcome::Failed);
+        }
+    }
+    unsafe {
+        refresh_diagnostic_controls(app, retained_rows);
+    }
 }
 
 fn request_diagnostic_refresh(app: &mut App) {
@@ -4083,7 +4516,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             let command = w_param & 0xffff;
             let notification = (w_param >> 16) & 0xffff;
             if command == ID_DIAGNOSTIC_RANGE && notification == EN_CHANGE {
-                refresh_diagnostic_controls(&mut *app, (*app).diagnostics.snapshot().len());
+                diagnostic_range_changed(&mut *app);
                 return 0;
             }
             if command == ID_DIAGNOSTIC_COPY && notification == BN_CLICKED {
@@ -4557,6 +4990,10 @@ extern "system" {
     fn UpdateWindow(window: *mut c_void) -> i32;
 
     fn SetWindowTextW(window: *mut c_void, text: *const u16) -> i32;
+    fn OpenClipboard(owner: *mut c_void) -> i32;
+    fn EmptyClipboard() -> i32;
+    fn SetClipboardData(format: u32, data: *mut c_void) -> *mut c_void;
+    fn CloseClipboard() -> i32;
     fn GetWindowTextLengthW(window: *mut c_void) -> i32;
     fn GetWindowTextW(window: *mut c_void, text: *mut u16, maximum: i32) -> i32;
     fn EnableWindow(window: *mut c_void, enable: i32) -> i32;
@@ -4631,6 +5068,17 @@ unsafe fn get_module_file_name_w_path() -> PathBuf {
 extern "system" {
     fn GetModuleFileNameW(module: *mut c_void, filename: *mut u16, size: u32) -> u32;
     fn GetLastError() -> u32;
+    fn GlobalAlloc(flags: u32, bytes: usize) -> *mut c_void;
+    fn GlobalLock(memory: *mut c_void) -> *mut c_void;
+    fn GlobalUnlock(memory: *mut c_void) -> i32;
+    fn GlobalFree(memory: *mut c_void) -> *mut c_void;
+    fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
+}
+
+#[link(name = "comdlg32")]
+extern "system" {
+    fn GetSaveFileNameW(file_name: *mut OpenFileNameW) -> i32;
+    fn CommDlgExtendedError() -> u32;
 }
 
 unsafe fn initialize_common_controls() -> Result<(), u32> {
