@@ -14,8 +14,9 @@ use tick_startup_windows::{
 };
 
 use crate::tray_surface::{
-    dpi_to_icon_canvas, icon_pixel_color, menu_action_keeps_open, menu_items, tooltip,
-    tray_click_action, TimingValues, TrayClickAction, TrayStatus, STATUS_COMMAND_ID,
+    dpi_to_icon_canvas, icon_pixel_color, menu_action_keeps_open, menu_command_dispatch_allowed,
+    menu_command_is_enabled, menu_items, tooltip, tray_notification_opens_menu, TimingValues,
+    TrayStatus, STATUS_COMMAND_ID,
 };
 
 const WM_APP: u32 = 0x8000;
@@ -261,6 +262,7 @@ struct App {
     invalid_interval: bool,
     diagnostics: Arc<DiagnosticStore>,
     diagnostic_window: Option<*mut c_void>,
+    menu_active: bool,
     shutdown_cleanup_done: bool,
 }
 
@@ -406,6 +408,7 @@ pub fn run() {
             invalid_interval: false,
             diagnostics,
             diagnostic_window: None,
+            menu_active: false,
             shutdown_cleanup_done: false,
         });
         let app_ptr = Box::into_raw(app);
@@ -758,15 +761,17 @@ unsafe extern "system" fn window_proc(
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, app_ptr as isize);
         return 0;
     }
+    if !app.is_null()
+        && (*app).menu_active
+        && matches!(message, WM_TRAY | WM_COMMAND | WM_POWERBROADCAST)
+        && !menu_command_dispatch_allowed(true, false)
+    {
+        return 0;
+    }
     if !app.is_null() {
         let app = &mut *app;
         match message {
-            WM_TRAY
-                if matches!(
-                    tray_click_action(l_param as usize),
-                    Some(TrayClickAction::OpenMenu)
-                ) =>
-            {
+            WM_TRAY if tray_notification_opens_menu(l_param as usize, app.menu_active) => {
                 show_menu(hwnd, app)
             }
             WM_COMMAND => {
@@ -799,6 +804,10 @@ unsafe extern "system" fn window_proc(
 }
 
 unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
+    if app.menu_active {
+        return;
+    }
+    app.menu_active = true;
     let mut anchor = Point { x: 0, y: 0 };
     GetCursorPos(&mut anchor);
     loop {
@@ -864,13 +873,28 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
             "tray.command.dispatch",
             format!("source=TPM_RETURNCMD id={command}"),
         );
-        if !handle_menu_command(hwnd, app, command) {
+        if !menu_command_dispatch_allowed(app.menu_active, true)
+            || !handle_menu_command(hwnd, app, command)
+        {
             break;
         }
     }
+    app.menu_active = false;
 }
 
 unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) -> bool {
+    if !menu_command_is_enabled(
+        command,
+        app.tray_status,
+        app.config.startup_enabled,
+        app.config.automatic,
+    ) {
+        app.record(
+            "tray.command.rejected",
+            format!("id={command} reason=disabled_or_unknown"),
+        );
+        return false;
+    }
     app.record("tray.command.id", format!("id={command}"));
     match command {
         ID_START => manual_start(app),

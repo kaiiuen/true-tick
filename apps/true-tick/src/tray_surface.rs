@@ -140,6 +140,39 @@ pub(crate) const fn menu_action_keeps_open(command_id: usize) -> bool {
     matches!(command_id, 1001 | 1002 | 1005..=1008)
 }
 
+pub(crate) const fn tray_notification_opens_menu(notification: usize, menu_active: bool) -> bool {
+    !menu_active
+        && matches!(
+            tray_click_action(notification),
+            Some(TrayClickAction::OpenMenu)
+        )
+}
+
+pub(crate) const fn menu_command_dispatch_allowed(
+    menu_active: bool,
+    from_popup_return: bool,
+) -> bool {
+    from_popup_return || !menu_active
+}
+
+pub(crate) const fn menu_command_is_enabled(
+    command_id: usize,
+    status: TrayStatus,
+    startup_enabled: bool,
+    automatic: bool,
+) -> bool {
+    match command_id {
+        1001 => !matches!(status, TrayStatus::Running | TrayStatus::Starting),
+        1002 => !matches!(status, TrayStatus::Stopped | TrayStatus::Stopping),
+        1005 => !startup_enabled,
+        1006 => startup_enabled,
+        1007 => !automatic,
+        1008 => automatic,
+        STATUS_COMMAND_ID | 1004 => true,
+        _ => false,
+    }
+}
+
 pub(crate) fn menu_items(
     status: TrayStatus,
     startup_enabled: bool,
@@ -235,6 +268,139 @@ mod tests {
         for command in [STATUS_COMMAND_ID, 1004] {
             assert!(!menu_action_keeps_open(command));
         }
+    }
+
+    #[test]
+    fn notification_bursts_open_only_one_menu() {
+        let mut menu_active = false;
+        let mut opened = 0;
+        for notification in [0x0202, 0x0205, 0x0202, 0x0205] {
+            if tray_notification_opens_menu(notification, menu_active) {
+                opened += 1;
+                menu_active = true;
+            }
+        }
+        assert_eq!(opened, 1);
+        assert!(!tray_notification_opens_menu(0x0205, true));
+        assert!(!tray_notification_opens_menu(0x0202, true));
+    }
+
+    #[test]
+    fn commands_during_menu_activity_are_ignored_except_popup_return() {
+        assert!(!menu_command_dispatch_allowed(true, false));
+        assert!(menu_command_dispatch_allowed(true, true));
+        assert!(menu_command_dispatch_allowed(false, false));
+    }
+
+    #[test]
+    fn quit_is_valid_during_menu_activity_and_closes_the_loop() {
+        assert!(menu_command_dispatch_allowed(true, true));
+        assert!(menu_command_is_enabled(
+            1004,
+            TrayStatus::Running,
+            true,
+            true
+        ));
+        assert!(!menu_action_keeps_open(1004));
+    }
+
+    #[test]
+    fn command_validation_rejects_stale_and_unknown_commands() {
+        assert!(!menu_command_is_enabled(
+            1001,
+            TrayStatus::Running,
+            true,
+            false
+        ));
+        assert!(!menu_command_is_enabled(
+            1006,
+            TrayStatus::Stopped,
+            false,
+            false
+        ));
+        assert!(!menu_command_is_enabled(
+            1008,
+            TrayStatus::Stopped,
+            false,
+            false
+        ));
+        assert!(!menu_command_is_enabled(
+            9999,
+            TrayStatus::Stopped,
+            false,
+            false
+        ));
+        assert!(menu_command_is_enabled(
+            1001,
+            TrayStatus::Stopped,
+            false,
+            false
+        ));
+        assert!(menu_command_is_enabled(
+            1006,
+            TrayStatus::Stopped,
+            true,
+            false
+        ));
+        assert!(menu_command_is_enabled(
+            1008,
+            TrayStatus::Stopped,
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn repeated_commands_follow_the_current_state_without_duplicate_actions() {
+        let mut status = TrayStatus::Stopped;
+        assert!(menu_command_is_enabled(1001, status, false, false));
+        status = TrayStatus::Running;
+        assert!(!menu_command_is_enabled(1001, status, false, false));
+        assert!(menu_command_is_enabled(1002, status, false, false));
+        status = TrayStatus::Stopped;
+        assert!(!menu_command_is_enabled(1002, status, false, false));
+
+        let mut startup_enabled = false;
+        assert!(menu_command_is_enabled(
+            1005,
+            status,
+            startup_enabled,
+            false
+        ));
+        startup_enabled = true;
+        assert!(!menu_command_is_enabled(
+            1005,
+            status,
+            startup_enabled,
+            false
+        ));
+        assert!(menu_command_is_enabled(
+            1006,
+            status,
+            startup_enabled,
+            false
+        ));
+
+        let mut automatic = false;
+        assert!(menu_command_is_enabled(
+            1007,
+            status,
+            startup_enabled,
+            automatic
+        ));
+        automatic = true;
+        assert!(!menu_command_is_enabled(
+            1007,
+            status,
+            startup_enabled,
+            automatic
+        ));
+        assert!(menu_command_is_enabled(
+            1008,
+            status,
+            startup_enabled,
+            automatic
+        ));
     }
 
     #[test]
