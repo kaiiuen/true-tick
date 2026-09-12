@@ -2,6 +2,16 @@
 
 This repository contains an internal v1 runtime, not a production release.
 
+## Runtime invariants
+
+The ownership lifecycle is the source of truth for visible timer status. An active release handoff always derives to yellow `Stopping` and remains protected from unrelated startup, configuration, logging, or power diagnostic publication. Handoff completion clears the tracker and publishes red `Stopped` with the observed current timing. A bounded timeout clears the tracker and publishes red `Stopped, external timing`. The icon uses the same derived lifecycle status as the text.
+
+A latest-wins desired intent queue contains `Acquire` or `Release`. Start, Stop, automatic changes, and power transitions submit intent through the same serialized path. Requests received during `Starting` or `Stopping` are not dropped. Repeated native operations are idempotent, and only the ownership manager calls the native request and release operations.
+
+`tick-ownership` owns one synchronized timing snapshot. It is the source for tray tooltip text, menu status, diagnostic headers, handoff classification, and timer logs. Requested interval, selected interval, effective timing, native bounds, raw status, and current validity remain separate. A failed current query invalidates effective timing. Handoff observation uses the recorded release boundary without resolving a new request.
+
+Timer-resolution selection is always query-driven. Zero is the automatic-selection sentinel. The explicitly named legacy migration value is accepted only while migrating old configuration. Numeric resolution examples and fixture values are restricted to tests or migration fixtures. Handoff polling interval and observation budget are separate policy constants and must not become timer-resolution defaults.
+
 - `tick-core` contains platform-neutral HNS and lifecycle/status/event/error types.
 - `tick-policy` contains pure policy decisions and deduplicated logical reasons.
 - `tick-ownership` models one serialized runtime instance's tracked contribution and idempotent transitions.

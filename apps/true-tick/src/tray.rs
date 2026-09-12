@@ -383,7 +383,10 @@ pub fn run() {
         if config_migrated {
             diagnostics.record(
                 "config.migration",
-                "legacy_request_hns=10000 result=automatic_selection",
+                format!(
+                    "legacy_request_hns={} result=automatic_selection",
+                    config::LEGACY_ONE_MILLISECOND_REQUEST_INTERVAL.value()
+                ),
             );
         }
         diagnostics.record(

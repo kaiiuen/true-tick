@@ -12,7 +12,7 @@ const MAX_CONFIG_ERROR_BYTES: usize = 256;
 /// Zero is the persisted sentinel for selecting the current native boundary.
 pub const AUTOMATIC_REQUEST_INTERVAL: Hns = Hns::ZERO;
 /// Legacy one-millisecond config value accepted only during migration.
-const LEGACY_ONE_MILLISECOND_REQUEST_INTERVAL: Hns = Hns::new(10_000);
+pub const LEGACY_ONE_MILLISECOND_REQUEST_INTERVAL: Hns = Hns::new(10_000);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {

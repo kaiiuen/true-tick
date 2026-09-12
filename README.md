@@ -3,6 +3,16 @@
 True™ Tick is an internal v1 tray-only Windows application. It is not a
 production release and is not authorized for publication.
 
+## Lifecycle and timing invariants
+
+The timer lifecycle is authoritative for the tray status. While a release handoff is active, the derived status is always yellow `Stopping` and unrelated configuration, startup, logging, or power diagnostics cannot replace it with red `Error`, `Stopped`, or `Blocked`. The icon color is derived from that same lifecycle status. A handoff completion clears the tracker and publishes red `Stopped` with the current timing. A bounded timeout clears the tracker and publishes red `Stopped, external timing`.
+
+Manual and automatic changes use a latest-wins desired intent queue with only `Acquire` and `Release`. An intent received during `Starting` or `Stopping` is retained and processed after the transition. Native request and release calls remain serialized and idempotent. Power policy is applied when the queued intent is processed. Auto-time off on AC therefore remains stopped when no release is pending.
+
+All tray text, menu status, diagnostic headers, handoff classification, and timer logs read from one synchronized timing snapshot. The snapshot keeps requested, selected, effective, raw bounds, and raw status distinct. A failed current query invalidates effective timing and displays `unknown` rather than retaining stale current data. Handoff polling observes the stored release boundary and never selects a new request interval.
+
+Live timer selection is query-driven. The persisted zero value is the automatic-selection sentinel. The named legacy migration value is accepted only while migrating old configuration. Timer-resolution examples and fixture values belong only in tests or migration fixtures. Handoff polling intervals and observation budgets are separate handoff policy constants and are not timer-resolution defaults.
+
 ## Development commands
 
 The workspace has two app packages, so commands from the workspace root select
@@ -14,6 +24,7 @@ cargo metadata --no-deps --format-version 1
 cargo check --workspace --all-targets
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+py -3 scripts/check_live_timer_values.py
 ```
 
 To launch the tray app during an explicitly authorized development run, use:
