@@ -4499,6 +4499,10 @@ fn diagnostic_transfer_source(
     }
 }
 
+const fn diagnostic_list_style() -> u32 {
+    WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS
+}
+
 fn diagnostic_toolbar_action(app: &mut App, action: &str) {
     let events = app.diagnostics.snapshot();
     let retained_rows = events.len();
@@ -5083,7 +5087,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             0,
             list_class.as_ptr(),
             std::ptr::null(),
-            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS,
+            diagnostic_list_style(),
             0,
             DIAGNOSTIC_SUMMARY_HEIGHT + DIAGNOSTIC_TOOLBAR_HEIGHT,
             800,
@@ -5858,6 +5862,66 @@ mod tests {
         ] {
             assert!(!name.is_empty());
         }
+    }
+
+    #[test]
+    fn transfer_source_precedence_is_shared_by_ctrl_c_copy_and_export() {
+        for action in ["ctrl-c", "copy", "export"] {
+            assert_eq!(
+                diagnostic_transfer_source(3, 8),
+                Some(DiagnosticTransferSource::GridSelection),
+                "grid selection must win for {action}"
+            );
+            assert_eq!(
+                diagnostic_transfer_source(0, 8),
+                Some(DiagnosticTransferSource::RangeSelection),
+                "range fallback must apply for {action}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_selection_has_no_transfer_source_and_the_range_parser_is_empty() {
+        assert_eq!(diagnostic_transfer_source(0, 0), None);
+        assert_eq!(parse_row_selection("", 0), Ok(RowSelection::all(0)));
+        assert_eq!(
+            diagnostic_transfer_details(DiagnosticTransferSource::GridSelection, 3, 8, None),
+            "source=grid-selection selected_row_count=3 retained_rows=8 format=TSV"
+        );
+        assert_eq!(
+            diagnostic_transfer_details(
+                DiagnosticTransferSource::RangeSelection,
+                2,
+                8,
+                Some(RowSelection::new(3, 4)),
+            ),
+            "source=range-selection selected_row_count=2 retained_rows=8 format=TSV selected_range=3-4"
+        );
+    }
+
+    #[test]
+    fn diagnostic_grid_style_supports_visible_multi_row_drag_selection() {
+        let style = diagnostic_list_style();
+        assert_ne!(style & LVS_REPORT, 0);
+        assert_ne!(style & LVS_SHOWSELALWAYS, 0);
+        assert_eq!(LVN_ITEMCHANGED, -101);
+        assert_eq!(LVN_KEYDOWN, -155);
+        assert_eq!(WM_NOTIFY, 0x004E);
+        assert!(
+            size_of::<NotifyHeader>()
+                >= size_of::<*mut c_void>() + size_of::<usize>() + size_of::<i32>()
+        );
+        assert!(
+            size_of::<ListViewNotification>()
+                >= size_of::<NotifyHeader>()
+                    + 3 * size_of::<i32>()
+                    + size_of::<Point>()
+                    + size_of::<isize>()
+        );
+        assert!(
+            size_of::<ListViewKeyDownNotification>()
+                >= size_of::<NotifyHeader>() + size_of::<u16>() + size_of::<u32>()
+        );
     }
 
     #[test]

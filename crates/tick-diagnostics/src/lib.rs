@@ -991,6 +991,39 @@ mod tests {
     }
 
     #[test]
+    fn refresh_preserves_valid_multi_row_selection_after_retention_shift() {
+        let old_events = (1..=5).map(test_event).collect::<Vec<_>>();
+        let selected = selected_event_sequences_for_sequences(&old_events, &[2, 4]);
+        let new_events = (2..=6).map(test_event).collect::<Vec<_>>();
+        assert_eq!(
+            selected_event_sequences_for_sequences(&new_events, &selected),
+            [2, 4]
+        );
+        assert_eq!(
+            visible_positions_for_sequences(&new_events, RowSelection::all(5), &selected),
+            [0, 2]
+        );
+    }
+
+    #[test]
+    fn truncation_invalidates_only_missing_selected_sequences() {
+        let old_events = (1..=5).map(test_event).collect::<Vec<_>>();
+        let selected = selected_event_sequences_for_sequences(&old_events, &[1, 3, 5]);
+        let retained = (3..=7).map(test_event).collect::<Vec<_>>();
+        assert_eq!(
+            selected_event_sequences_for_sequences(&retained, &selected),
+            [3, 5]
+        );
+        let rows = diagnostic_grid_rows_for_sequences(&retained, &[3, 5]);
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.cells[0].as_str(), row.cells[1].as_str()))
+                .collect::<Vec<_>>(),
+            [("1", "3"), ("3", "5")]
+        );
+    }
+
+    #[test]
     fn truncation_keeps_report_rows_numbered_from_the_retained_snapshot() {
         let store = DiagnosticStore::new(4);
         for sequence in 1..=8 {

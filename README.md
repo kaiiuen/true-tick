@@ -56,6 +56,19 @@ bounded typed snapshot and records only snapshot row count, inserted row count,
 item count, insert failures, and set-text failures. Common Controls initialization
 remains explicit before the list and tooltip controls are created.
 
+The report grid uses normal Windows multi-row selection with full-row selection,
+visible selection, gridlines, and normal mouse drag selection. The selected summary
+near the toolbar reports `Selected: N rows`. Row order in a transfer follows the
+retained chronological event order, even when selection input arrives in another
+order. `Row` is the retained snapshot position and `Sequence` is the event identity.
+Ctrl+C works when the grid has focus. Copy and Export use selected grid rows first.
+When no grid rows are selected, both use the separate `Rows to copy/export:` range
+input over the full retained snapshot. The `Show rows:` display limit never changes
+transfer selection. Ctrl+A selects all currently displayed rows when the grid has
+focus. A refresh preserves selected event sequences when retained. Truncation drops
+invalid selections, preserves valid selected events, and shows and logs a concise
+selection reset. These UI actions do not change timer state.
+
 The commands above are not runtime validation of
 tray behavior, startup registration, or launcher handoff.
 
