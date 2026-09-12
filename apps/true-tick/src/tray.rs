@@ -3891,17 +3891,30 @@ fn diagnostic_visible_selection(app: &App, retained_rows: usize) -> RowSelection
     }
 }
 
-fn diagnostic_hud_field_text(
-    effective: &str,
-    ownership: &str,
-    power: &str,
-    startup: &str,
-    running_duration: &str,
-    next_action: &str,
-    history: &str,
+struct DiagnosticHudFields<'a> {
+    effective: &'a str,
+    ownership: &'a str,
+    power: &'a str,
+    startup: &'a str,
+    running_duration: &'a str,
+    next_action: &'a str,
+    history: &'a str,
     visible: usize,
     retained: usize,
-) -> String {
+}
+
+fn diagnostic_hud_field_text(fields: DiagnosticHudFields<'_>) -> String {
+    let DiagnosticHudFields {
+        effective,
+        ownership,
+        power,
+        startup,
+        running_duration,
+        next_action,
+        history,
+        visible,
+        retained,
+    } = fields;
     format!(
         "Effective timing: {effective}\r\nOwnership: {ownership}\r\nPower: {power}\r\nStartup: {startup}\r\nRunning duration: {running_duration}\r\nNext action: {next_action}\r\nHistory: {history}\r\nShowing {visible} of {retained} retained rows\r\n"
     )
@@ -3922,33 +3935,33 @@ fn diagnostic_summary_text(app: &App, retained: usize) -> String {
         app.diagnostics.maximum_events(),
         snapshot_is_truncated(&app.diagnostics.snapshot()),
     );
-    diagnostic_hud_field_text(
-        status[1]
+    diagnostic_hud_field_text(DiagnosticHudFields {
+        effective: status[1]
             .label
             .strip_prefix("Timing: ")
             .unwrap_or(&status[1].label),
-        status[4]
+        ownership: status[4]
             .label
             .strip_prefix("Ownership: ")
             .unwrap_or(&status[4].label),
-        power_state_label(app.observation.power().state),
-        if app.config.startup_enabled {
+        power: power_state_label(app.observation.power().state),
+        startup: if app.config.startup_enabled {
             "On"
         } else {
             "Off"
         },
-        status[2]
+        running_duration: status[2]
             .label
             .strip_prefix("Running for: ")
             .unwrap_or(&status[2].label),
-        status[3]
+        next_action: status[3]
             .label
             .strip_prefix("Next action: ")
             .unwrap_or(&status[3].label),
-        &history,
+        history: &history,
         visible,
         retained,
-    )
+    })
 }
 
 fn diagnostic_open_operation_outcome(opened: bool) -> DiagnosticOutcome {
@@ -7138,17 +7151,17 @@ mod tests {
 
     #[test]
     fn hud_field_formatting_keeps_key_values_and_snapshot_evidence_visible() {
-        let text = diagnostic_hud_field_text(
-            "0.500 ms",
-            "True™ Tick",
-            "AC",
-            "On",
-            "4m 12s",
-            "None",
-            "retained_events=12 retention_cap=512 truncated=true",
-            4,
-            12,
-        );
+        let text = diagnostic_hud_field_text(DiagnosticHudFields {
+            effective: "0.500 ms",
+            ownership: "True™ Tick",
+            power: "AC",
+            startup: "On",
+            running_duration: "4m 12s",
+            next_action: "None",
+            history: "retained_events=12 retention_cap=512 truncated=true",
+            visible: 4,
+            retained: 12,
+        });
         for field in [
             "Effective timing: 0.500 ms",
             "Ownership: True™ Tick",
