@@ -573,6 +573,8 @@ struct App {
     diagnostic_message_text: String,
     diagnostic_refresh_pending: bool,
     diagnostic_refreshing: bool,
+    diagnostic_refresh_direct_recorded: bool,
+    diagnostic_refresh_follow_up_scheduled: bool,
     diagnostic_layout_stable: bool,
     diagnostic_snapshot_key: Option<(usize, u64)>,
     diagnostic_snapshot_generation: u64,
@@ -764,6 +766,8 @@ pub fn run() {
             diagnostic_message_text: String::new(),
             diagnostic_refresh_pending: false,
             diagnostic_refreshing: false,
+            diagnostic_refresh_direct_recorded: false,
+            diagnostic_refresh_follow_up_scheduled: false,
             diagnostic_layout_stable: false,
             diagnostic_snapshot_key: None,
             diagnostic_snapshot_generation: 0,
@@ -1115,6 +1119,8 @@ fn clear_diagnostic_state(app: &mut App) {
     app.diagnostic_message_text.clear();
     app.diagnostic_refresh_pending = false;
     app.diagnostic_refreshing = false;
+    app.diagnostic_refresh_direct_recorded = false;
+    app.diagnostic_refresh_follow_up_scheduled = false;
     app.diagnostic_layout_stable = false;
     app.diagnostic_snapshot_key = None;
     app.diagnostic_snapshot_generation = 0;
@@ -3840,6 +3846,7 @@ struct DiagnosticLayoutRect {
     height: i32,
 }
 
+#[cfg(test)]
 impl DiagnosticLayoutRect {
     fn right(self) -> i32 {
         self.left.saturating_add(self.width)
@@ -4001,6 +4008,13 @@ unsafe fn diagnostic_range_text(app: &App) -> String {
     String::from_utf16_lossy(&buffer[..copied as usize])
 }
 
+fn record_diagnostic_refresh_event(app: &mut App, name: &str, details: impl AsRef<str>) {
+    if app.diagnostic_refreshing {
+        app.diagnostic_refresh_direct_recorded = true;
+    }
+    app.diagnostics.record(name, details);
+}
+
 unsafe fn set_diagnostic_message(app: &mut App, message: impl Into<String>) {
     app.diagnostic_message_text = message.into();
     if let Some(control) = app.diagnostic_message {
@@ -4096,7 +4110,8 @@ unsafe fn refresh_diagnostic_controls(
                 app,
                 "Selection reset: selected rows are no longer retained.",
             );
-            app.diagnostics.record(
+            record_diagnostic_refresh_event(
+                app,
                 "diagnostic.selection.reset",
                 format!("reason=range_rows_not_retained retained_rows={retained_rows}"),
             );
@@ -4198,7 +4213,8 @@ fn preserve_diagnostic_grid_selection(app: &mut App, events: &[tick_diagnostics:
         unsafe {
             set_diagnostic_message(app, message);
         }
-        app.diagnostics.record(
+        record_diagnostic_refresh_event(
+            app,
             "diagnostic.selection.reset",
             format!(
                 "source=grid-selection invalid_rows={invalid_count} retained_rows={}",
@@ -4428,6 +4444,10 @@ fn diagnostic_refresh_is_coalesced(pending: bool, refreshing: bool) -> bool {
     pending || refreshing
 }
 
+fn diagnostic_follow_up_needed(generated_direct_records: bool, follow_up_refresh: bool) -> bool {
+    generated_direct_records && !follow_up_refresh
+}
+
 #[cfg(test)]
 fn diagnostic_auto_fit_reason_allows(reason: DiagnosticRefreshReason) -> bool {
     matches!(
@@ -4580,6 +4600,9 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
         return;
     }
     app.diagnostic_refreshing = true;
+    let follow_up_refresh = app.diagnostic_refresh_follow_up_scheduled;
+    app.diagnostic_refresh_follow_up_scheduled = false;
+    app.diagnostic_refresh_direct_recorded = false;
     set_diagnostic_redraw(app, false);
     let events = app.diagnostics.snapshot();
     let retained_rows = events.len();
@@ -4609,7 +4632,7 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
         app.diagnostics
             .record("diagnostic.grid.refresh.error", "list_handle_null");
         finish_diagnostic_redraw(window, app);
-        finish_diagnostic_refresh(app);
+        finish_diagnostic_refresh(app, false);
         return;
     };
     let snapshot_rows = events.len();
@@ -4645,7 +4668,8 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
         );
         if insert_result < 0 {
             insert_failures = insert_failures.saturating_add(1);
-            app.diagnostics.record(
+            record_diagnostic_refresh_event(
+                app,
                 "native.LVM_INSERTITEMW.error",
                 format!(
                     "row={row_index} result={insert_result} raw_status={}",
@@ -4682,7 +4706,8 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
             );
             if set_text_result == 0 {
                 set_text_failures = set_text_failures.saturating_add(1);
-                app.diagnostics.record(
+                record_diagnostic_refresh_event(
+                    app,
                     "native.LVM_SETITEMTEXTW.error",
                     format!(
                         "row={row_index} column={column_index} result={set_text_result} raw_status={}",
@@ -4727,8 +4752,12 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
         let _ = SetWindowTextW(summary, text.as_ptr());
     }
     app.diagnostic_layout_stable = true;
+    let generated_direct_records = app.diagnostic_refresh_direct_recorded;
     finish_diagnostic_redraw(window, app);
-    finish_diagnostic_refresh(app);
+    finish_diagnostic_refresh(
+        app,
+        diagnostic_follow_up_needed(generated_direct_records, follow_up_refresh),
+    );
 }
 
 #[repr(C)]
@@ -5312,9 +5341,12 @@ fn request_diagnostic_refresh(app: &mut App) {
     }
 }
 
-fn finish_diagnostic_refresh(app: &mut App) {
+fn finish_diagnostic_refresh(app: &mut App, follow_up_needed: bool) {
     app.diagnostic_refreshing = false;
-    if app.diagnostic_refresh_pending {
+    if follow_up_needed {
+        app.diagnostic_refresh_follow_up_scheduled = true;
+    }
+    if app.diagnostic_refresh_pending || follow_up_needed {
         app.diagnostic_refresh_pending = false;
         request_diagnostic_refresh(app);
     }
@@ -5397,6 +5429,27 @@ unsafe fn set_diagnostic_control_font(control: *mut c_void) {
     let font = GetStockObject(DEFAULT_GUI_FONT);
     if !font.is_null() {
         let _ = SendMessageW(control, WM_SETFONT, font as usize, 1);
+    }
+}
+
+unsafe fn set_diagnostic_control_fonts(app: &App) {
+    for control in [
+        app.diagnostic_summary,
+        app.diagnostic_display_label,
+        app.diagnostic_display_input,
+        app.diagnostic_show_all_button,
+        app.diagnostic_toolbar_label,
+        app.diagnostic_selection_summary,
+        app.diagnostic_range_input,
+        app.diagnostic_copy_button,
+        app.diagnostic_export_button,
+        app.diagnostic_message,
+        app.diagnostic_list,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        set_diagnostic_control_font(control);
     }
 }
 
@@ -5778,8 +5831,38 @@ unsafe extern "system" fn diagnostic_window_proc(
             (*app).diagnostic_refresh_pending = false;
             refresh_diagnostic_window(hwnd, &mut *app);
             return 0;
+        } else if message == WM_DPICHANGED {
+            let suggested = l_param as *const Rect;
+            if suggested.is_null() {
+                (*app).diagnostics.record(
+                    "diagnostic.dpi.error",
+                    format!("stage=suggested_rect_missing dpi={}", w_param & 0xffff),
+                );
+            } else {
+                let width = ((*suggested).right - (*suggested).left).max(0);
+                let height = ((*suggested).bottom - (*suggested).top).max(0);
+                if SetWindowPos(
+                    hwnd,
+                    std::ptr::null_mut(),
+                    (*suggested).left,
+                    (*suggested).top,
+                    width,
+                    height,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                ) == 0
+                {
+                    (*app).diagnostics.record(
+                        "diagnostic.dpi.error",
+                        format!("stage=SetWindowPos raw_status={}", GetLastError()),
+                    );
+                }
+            }
+            set_diagnostic_control_fonts(&*app);
+            let _ = layout_diagnostic_controls(hwnd, &*app);
+            return 0;
         } else if message == WM_SIZE {
-            layout_diagnostic_controls(hwnd, &*app);
+            let _ = layout_diagnostic_controls(hwnd, &*app);
+            return 0;
         } else if message == WM_GETMINMAXINFO {
             let limits = l_param as *mut MinMaxInfo;
             if !limits.is_null() {
@@ -6437,7 +6520,14 @@ mod tests {
         assert_ne!(style & WS_VISIBLE, 0);
         assert_ne!(style & SS_NOPREFIX, 0);
         assert_eq!(style & (0x0020_0000 | 0x0040 | 0x0004), 0);
-        assert!(DIAGNOSTIC_SUMMARY_HEIGHT >= 10 * 18);
+        assert_eq!(DIAGNOSTIC_SUMMARY_HEIGHT, 220);
+    }
+
+    #[test]
+    fn diagnostic_refresh_follow_up_is_bounded_to_one_extra_pass() {
+        assert!(diagnostic_follow_up_needed(true, false));
+        assert!(!diagnostic_follow_up_needed(true, true));
+        assert!(!diagnostic_follow_up_needed(false, false));
     }
 
     #[test]
