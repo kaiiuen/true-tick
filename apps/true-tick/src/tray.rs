@@ -172,10 +172,15 @@ const BS_PUSHBUTTON: u32 = 0x00000000;
 const SS_LEFT: u32 = 0x00000000;
 
 const WM_SIZE: u32 = 0x0005;
+const WM_PAINT: u32 = 0x000F;
 const WM_CLOSE: u32 = 0x0010;
+const WM_ERASEBKGND: u32 = 0x0014;
 const WM_NCDESTROY: u32 = 0x0082;
 const WM_SETFOCUS: u32 = 0x0007;
 const WM_GETMINMAXINFO: u32 = 0x0024;
+const WM_CTLCOLOREDIT: u32 = 0x0133;
+const WM_CTLCOLORSTATIC: u32 = 0x0138;
+const WM_SETFONT: u32 = 0x0030;
 const GWL_STYLE: i32 = -16;
 const GWL_EXSTYLE: i32 = -20;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf0000;
@@ -187,17 +192,25 @@ const WS_EX_TOOLWINDOW: u32 = 0x00000080;
 const WS_EX_APPWINDOW: u32 = 0x00040000;
 const SW_SHOWNORMAL: i32 = 1;
 const SW_RESTORE: i32 = 9;
-const DIAGNOSTIC_MIN_WIDTH: i32 = 420;
+const DIAGNOSTIC_MIN_WIDTH: i32 = 820;
 const DIAGNOSTIC_MIN_HEIGHT: i32 = 260;
 const DIAGNOSTIC_WINDOW_TITLE: &str = "True™ Tick Status and Diagnostics";
 const MAX_STARTUP_STATUS_BYTES: usize = 512;
 const DIAGNOSTIC_WINDOW_PARENT: *mut c_void = std::ptr::null_mut();
 const DIAGNOSTIC_SUMMARY_HEIGHT: i32 = 148;
-const DIAGNOSTIC_TOOLBAR_HEIGHT: i32 = 72;
+const DIAGNOSTIC_TOOLBAR_HEIGHT: i32 = 44;
 const DIAGNOSTIC_COLUMN_WIDTHS: [i32; 11] = [54, 70, 78, 78, 70, 86, 82, 90, 86, 160, 240];
+const DIAGNOSTIC_DEFAULT_WIDTH: i32 = 980;
+const DIAGNOSTIC_DEFAULT_HEIGHT: i32 = 600;
+const COLOR_WINDOW: i32 = 5;
+const COLOR_WINDOWTEXT: i32 = 8;
+const DEFAULT_GUI_FONT: i32 = 17;
+const SW_HIDE: i32 = 0;
 const DIAGNOSTIC_RANGE_INPUT_LIMIT: usize = 64;
 const WS_CHILD: u32 = 0x40000000;
+const WS_HSCROLL: u32 = 0x00100000;
 const WS_VSCROLL: u32 = 0x00200000;
+const WS_EX_CLIENTEDGE: u32 = 0x00000200;
 
 const ES_MULTILINE: u32 = 0x0004;
 const ES_READONLY: u32 = 0x0800;
@@ -427,6 +440,16 @@ const fn diagnostic_window_style() -> u32 {
 
 const fn diagnostic_window_extended_style() -> u32 {
     WS_EX_APPWINDOW
+}
+
+#[repr(C)]
+struct PaintStruct {
+    hdc: *mut c_void,
+    erase: i32,
+    paint: Rect,
+    restore: i32,
+    inc_update: i32,
+    reserved: [u8; 32],
 }
 
 #[repr(C)]
@@ -832,7 +855,7 @@ pub fn run() {
             instance: wnd_class.instance,
             icon: wnd_class.icon,
             cursor: std::ptr::null_mut(),
-            background: std::ptr::null_mut(),
+            background: GetSysColorBrush(COLOR_WINDOW),
             menu_name: std::ptr::null(),
             class_name: diagnostic_class_name.as_ptr(),
         };
@@ -3619,8 +3642,8 @@ unsafe fn open_diagnostic_window(app: &mut App) {
         diagnostic_window_style(),
         120,
         120,
-        820,
-        560,
+        DIAGNOSTIC_DEFAULT_WIDTH,
+        DIAGNOSTIC_DEFAULT_HEIGHT,
         DIAGNOSTIC_WINDOW_PARENT,
         std::ptr::null_mut(),
         GetModuleHandleW(std::ptr::null()),
@@ -3996,114 +4019,54 @@ unsafe fn layout_diagnostic_controls(window: *mut c_void, app: &App) {
     if let Some(summary) = app.diagnostic_summary {
         let _ = MoveWindow(summary, 0, 0, width, summary_height, 1);
     }
-    let row_one_top = toolbar_top.saturating_add(scale_logical(7, dpi));
-    let row_two_top = toolbar_top.saturating_add(scale_logical(39, dpi));
+
+    let row_height = scale_logical(26, dpi);
+    let row_top = toolbar_top.saturating_add((toolbar_height - row_height).max(0) / 2);
+    let y_label = row_top.saturating_add(scale_logical(1, dpi));
+    let position = |logical: i32| scale_logical(logical, dpi);
     if let Some(label) = app.diagnostic_display_label {
-        let _ = MoveWindow(
-            label,
-            scale_logical(8, dpi),
-            row_one_top.saturating_add(scale_logical(3, dpi)),
-            scale_logical(76, dpi),
-            scale_logical(20, dpi),
-            1,
-        );
+        let _ = MoveWindow(label, position(8), y_label, position(68), row_height, 1);
     }
     if let Some(input) = app.diagnostic_display_input {
-        let _ = MoveWindow(
-            input,
-            scale_logical(88, dpi),
-            row_one_top,
-            scale_logical(64, dpi),
-            scale_logical(24, dpi),
-            1,
-        );
+        let _ = MoveWindow(input, position(84), row_top, position(52), row_height, 1);
     }
     if let Some(button) = app.diagnostic_show_all_button {
-        let _ = MoveWindow(
-            button,
-            scale_logical(160, dpi),
-            row_one_top,
-            scale_logical(76, dpi),
-            scale_logical(24, dpi),
-            1,
-        );
-    }
-    if let Some(message) = app.diagnostic_message {
-        let message_left = scale_logical(244, dpi);
-        let message_width = width.saturating_sub(message_left).max(0);
-        let _ = MoveWindow(
-            message,
-            message_left,
-            row_one_top.saturating_add(scale_logical(3, dpi)),
-            message_width,
-            scale_logical(20, dpi),
-            1,
-        );
+        let _ = MoveWindow(button, position(144), row_top, position(72), row_height, 1);
     }
     if let Some(label) = app.diagnostic_toolbar_label {
-        let _ = MoveWindow(
-            label,
-            scale_logical(8, dpi),
-            row_two_top.saturating_add(scale_logical(3, dpi)),
-            scale_logical(132, dpi),
-            scale_logical(20, dpi),
-            1,
-        );
+        let _ = MoveWindow(label, position(228), y_label, position(132), row_height, 1);
     }
     if let Some(input) = app.diagnostic_range_input {
-        let _ = MoveWindow(
-            input,
-            scale_logical(145, dpi),
-            row_two_top,
-            scale_logical(90, dpi),
-            scale_logical(24, dpi),
-            1,
-        );
+        let _ = MoveWindow(input, position(368), row_top, position(88), row_height, 1);
     }
     if let Some(summary) = app.diagnostic_selection_summary {
         let _ = MoveWindow(
             summary,
-            scale_logical(243, dpi),
-            row_two_top.saturating_add(scale_logical(3, dpi)),
-            scale_logical(148, dpi),
-            scale_logical(20, dpi),
+            position(464),
+            y_label,
+            position(180),
+            row_height,
             1,
         );
     }
     if let Some(copy) = app.diagnostic_copy_button {
-        let _ = MoveWindow(
-            copy,
-            scale_logical(400, dpi),
-            row_two_top,
-            scale_logical(68, dpi),
-            scale_logical(24, dpi),
-            1,
-        );
+        let _ = MoveWindow(copy, position(652), row_top, position(64), row_height, 1);
     }
     if let Some(export) = app.diagnostic_export_button {
-        let _ = MoveWindow(
-            export,
-            scale_logical(476, dpi),
-            row_two_top,
-            scale_logical(68, dpi),
-            scale_logical(24, dpi),
-            1,
-        );
+        let _ = MoveWindow(export, position(724), row_top, position(64), row_height, 1);
+    }
+    if let Some(message) = app.diagnostic_message {
+        let message_left = position(796);
+        let message_width = width.saturating_sub(message_left).max(0);
+        if message_width > 0 {
+            ShowWindow(message, SW_SHOWNORMAL);
+        } else {
+            ShowWindow(message, SW_HIDE);
+        }
+        let _ = MoveWindow(message, message_left, y_label, message_width, row_height, 1);
     }
     if let Some(list) = app.diagnostic_list {
         let _ = MoveWindow(list, 0, list_top, width, height.saturating_sub(list_top), 1);
-        let fixed_width: i32 = DIAGNOSTIC_COLUMN_WIDTHS[..10]
-            .iter()
-            .map(|value| scale_logical(*value, dpi))
-            .sum();
-        for (index, logical_width) in DIAGNOSTIC_COLUMN_WIDTHS.iter().enumerate() {
-            let column_width = if index == 10 {
-                scale_logical(240, dpi).max(width.saturating_sub(fixed_width))
-            } else {
-                scale_logical(*logical_width, dpi)
-            };
-            let _ = SendMessageW(list, LVM_SETCOLUMNWIDTH, index, column_width as isize);
-        }
     }
 }
 
@@ -4500,7 +4463,13 @@ fn diagnostic_transfer_source(
 }
 
 const fn diagnostic_list_style() -> u32 {
-    WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS
+    WS_CHILD
+        | WS_VISIBLE
+        | WS_CLIPCHILDREN
+        | WS_BORDER
+        | WS_HSCROLL
+        | LVS_REPORT
+        | LVS_SHOWSELALWAYS
 }
 
 fn diagnostic_toolbar_action(app: &mut App, action: &str) {
@@ -4912,6 +4881,16 @@ unsafe fn handle_diagnostic_notify(app: &mut App, l_param: isize) -> bool {
     }
 }
 
+unsafe fn set_diagnostic_control_font(control: *mut c_void) {
+    if control.is_null() {
+        return;
+    }
+    let font = GetStockObject(DEFAULT_GUI_FONT);
+    if !font.is_null() {
+        let _ = SendMessageW(control, WM_SETFONT, font as usize, 1);
+    }
+}
+
 unsafe extern "system" fn diagnostic_window_proc(
     hwnd: *mut c_void,
     message: u32,
@@ -4963,7 +4942,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             std::ptr::null_mut(),
         );
         let display_input = CreateWindowExW(
-            0,
+            WS_EX_CLIENTEDGE,
             wide("EDIT").as_ptr(),
             wide("100").as_ptr(),
             WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
@@ -5023,7 +5002,7 @@ unsafe extern "system" fn diagnostic_window_proc(
         );
         let range_class = wide("EDIT");
         let range_input = CreateWindowExW(
-            0,
+            WS_EX_CLIENTEDGE,
             range_class.as_ptr(),
             std::ptr::null(),
             WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
@@ -5175,6 +5154,21 @@ unsafe extern "system" fn diagnostic_window_proc(
             }
             return 1;
         }
+        for control in [
+            summary,
+            display_label,
+            display_input,
+            show_all_button,
+            label,
+            selection_summary,
+            range_input,
+            copy_button,
+            export_button,
+            message,
+            list,
+        ] {
+            set_diagnostic_control_font(control);
+        }
         if let Err(raw_error) = initialize_diagnostic_list(list) {
             if !app_ptr.is_null() {
                 (*(app_ptr as *mut App)).diagnostics.record(
@@ -5204,7 +5198,46 @@ unsafe extern "system" fn diagnostic_window_proc(
         return 0;
     }
     if !app.is_null() {
-        if message == WM_NOTIFY {
+        if message == WM_ERASEBKGND {
+            let brush = GetSysColorBrush(COLOR_WINDOW);
+            let mut rect = Rect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            if !brush.is_null() && GetClientRect(hwnd, &mut rect) != 0 {
+                let _ = FillRect(w_param as *mut c_void, &rect, brush);
+            }
+            return 1;
+        } else if message == WM_PAINT {
+            let mut paint = PaintStruct {
+                hdc: std::ptr::null_mut(),
+                erase: 0,
+                paint: Rect {
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 0,
+                },
+                restore: 0,
+                inc_update: 0,
+                reserved: [0; 32],
+            };
+            let hdc = BeginPaint(hwnd, &mut paint);
+            if !hdc.is_null() {
+                let brush = GetSysColorBrush(COLOR_WINDOW);
+                let _ = FillRect(hdc, &paint.paint, brush);
+            }
+            let _ = EndPaint(hwnd, &paint);
+            return 0;
+        } else if message == WM_CTLCOLOREDIT || message == WM_CTLCOLORSTATIC {
+            let hdc = w_param as *mut c_void;
+            let brush = GetSysColorBrush(COLOR_WINDOW);
+            let _ = SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
+            let _ = SetBkColor(hdc, GetSysColor(COLOR_WINDOW));
+            return brush as isize;
+        } else if message == WM_NOTIFY {
             if handle_diagnostic_notify(&mut *app, l_param) {
                 return 0;
             }
@@ -5240,8 +5273,9 @@ unsafe extern "system" fn diagnostic_window_proc(
         } else if message == WM_GETMINMAXINFO {
             let limits = l_param as *mut MinMaxInfo;
             if !limits.is_null() {
-                (*limits).minimum_track_size.x = DIAGNOSTIC_MIN_WIDTH;
-                (*limits).minimum_track_size.y = DIAGNOSTIC_MIN_HEIGHT;
+                let dpi = GetDpiForWindow(hwnd).max(96);
+                (*limits).minimum_track_size.x = scale_logical(DIAGNOSTIC_MIN_WIDTH, dpi);
+                (*limits).minimum_track_size.y = scale_logical(DIAGNOSTIC_MIN_HEIGHT, dpi);
             }
             return 0;
         } else if message == WM_CLOSE {
@@ -5701,6 +5735,12 @@ extern "system" {
     fn DestroyWindow(window: *mut c_void) -> i32;
     fn ShowWindow(window: *mut c_void, command: i32) -> i32;
     fn UpdateWindow(window: *mut c_void) -> i32;
+    fn BeginPaint(window: *mut c_void, paint: *mut PaintStruct) -> *mut c_void;
+    fn EndPaint(window: *mut c_void, paint: *const PaintStruct) -> i32;
+    fn GetSysColor(index: i32) -> u32;
+    fn GetSysColorBrush(index: i32) -> *mut c_void;
+    fn SetTextColor(hdc: *mut c_void, color: u32) -> u32;
+    fn SetBkColor(hdc: *mut c_void, color: u32) -> u32;
 
     fn SetWindowTextW(window: *mut c_void, text: *const u16) -> i32;
     fn OpenClipboard(owner: *mut c_void) -> i32;
@@ -5725,6 +5765,7 @@ extern "system" {
     fn LoadIconW(instance: *mut c_void, name: *const u16) -> *mut c_void;
     fn GetModuleHandleW(name: *const u16) -> *mut c_void;
     fn GetDpiForWindow(window: *mut c_void) -> u32;
+    fn FillRect(hdc: *mut c_void, rect: *const Rect, brush: *mut c_void) -> i32;
     fn CreateIconIndirect(info: *const IconInfo) -> *mut c_void;
     fn DestroyIcon(icon: *mut c_void) -> i32;
 }
@@ -5749,6 +5790,7 @@ extern "system" {
 
 #[link(name = "gdi32")]
 extern "system" {
+    fn GetStockObject(index: i32) -> *mut c_void;
     fn CreateBitmap(
         width: i32,
         height: i32,
