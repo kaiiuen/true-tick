@@ -935,6 +935,23 @@ mod tests {
     }
 
     #[test]
+    fn transfer_selection_is_independent_and_can_include_hidden_retained_rows() {
+        let events = (1..=10).map(test_event).collect::<Vec<_>>();
+        let display = latest_row_selection(3, events.len());
+        let transfer = parse_row_selection("1-2", events.len()).expect("hidden transfer range");
+        assert_eq!(display, RowSelection::new(8, 10));
+        let rows = diagnostic_grid_rows(&events, transfer);
+        assert_eq!(rows[0].cells[0], "1");
+        assert_eq!(rows[0].cells[1], "1");
+        assert_eq!(rows[1].cells[0], "2");
+        assert_eq!(rows[1].cells[1], "2");
+        let output = format_tsv(&rows);
+        assert!(output.contains("1\t1\t"));
+        assert!(output.contains("2\t2\t"));
+        assert!(!output.contains("8\t8\t"));
+    }
+
+    #[test]
     fn selected_tsv_contains_row_and_sequence_for_only_the_selected_rows() {
         let events = (401..=912).map(test_event).collect::<Vec<_>>();
         let selection = RowSelection::new(353, 354);

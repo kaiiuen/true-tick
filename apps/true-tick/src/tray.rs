@@ -3611,7 +3611,7 @@ fn diagnostic_summary_text(app: &App, retained: usize) -> String {
     );
     let visible = diagnostic_visible_selection(app, retained).row_count();
     format!(
-        "{}\r\n{}\r\n{}\r\n{}\r\n{}\r\nPower: {}\r\nStartup: {}\r\nShowing {visible} of {retained} retained rows\r\nRetention cap: {} events. Newest retained events are shown in chronological order. Timing is current only when the latest observation is valid, otherwise it is Unknown.\r\n",
+        "{}\r\n{}\r\n{}\r\n{}\r\n{}\r\nPower: {}\r\nStartup: {}\r\nShowing {visible} of {retained} retained rows\r\nTransfer selection is independent of Show rows. Hidden retained rows can be copied or exported intentionally.\r\nRetention cap: {} events. Newest retained events are shown in chronological order. Timing is current only when the latest observation is valid, otherwise it is Unknown.\r\n",
         status[0].label,
         status[1].label,
         status[2].label,
