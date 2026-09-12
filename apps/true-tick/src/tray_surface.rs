@@ -59,6 +59,7 @@ pub(crate) const fn automatic_label(enabled: bool) -> &'static str {
 pub(crate) struct TimingValues {
     pub(crate) requested: Option<Hns>,
     pub(crate) effective: Option<Hns>,
+    pub(crate) external: bool,
     pub(crate) invalid_interval: bool,
 }
 
@@ -67,10 +68,22 @@ fn format_ms(value: Hns) -> String {
     format!("{}.{:03}", thousandths / 1_000, thousandths % 1_000)
 }
 
-fn current_label(prefix: &str, effective: Option<Hns>) -> String {
+fn current_label(prefix: &str, effective: Option<Hns>, external: bool) -> String {
     effective.map_or_else(
-        || format!("{prefix} (unknown)"),
-        |value| format!("{prefix} (current: {} ms)", format_ms(value)),
+        || {
+            if prefix == "Stopped" {
+                format!("{prefix} (timing unknown)")
+            } else {
+                format!("{prefix} (unknown)")
+            }
+        },
+        |value| {
+            let external_label = if external { ", external" } else { "" };
+            format!(
+                "{prefix} (current: {} ms{external_label})",
+                format_ms(value)
+            )
+        },
     )
 }
 
@@ -83,19 +96,19 @@ pub(crate) fn tooltip(status: TrayStatus, timing: TimingValues) -> String {
             (_, Some(effective)) => format!("Running ({} ms)", format_ms(effective)),
             (_, None) => "Running (unknown)".to_owned(),
         },
-        TrayStatus::Stopped => current_label("Stopped", timing.effective),
-        TrayStatus::Blocked => current_label("Blocked", timing.effective),
+        TrayStatus::Stopped => current_label("Stopped", timing.effective, timing.external),
+        TrayStatus::Blocked => current_label("Blocked", timing.effective, timing.external),
         TrayStatus::Unsupported => "Unsupported (timing unavailable)".to_owned(),
         TrayStatus::Error if timing.invalid_interval => "Error (invalid interval)".to_owned(),
-        TrayStatus::Error => current_label("Error", timing.effective),
+        TrayStatus::Error => current_label("Error", timing.effective, timing.external),
         TrayStatus::Starting => timing.requested.map_or_else(
             || "Starting (unknown)".to_owned(),
             |requested| format!("Starting ({} ms)", format_ms(requested)),
         ),
-        TrayStatus::Stopping => current_label("Stopping", timing.effective),
+        TrayStatus::Stopping => current_label("Stopping", timing.effective, timing.external),
         TrayStatus::Pending => "Pending (timing unknown)".to_owned(),
-        TrayStatus::Degraded => current_label("Degraded", timing.effective),
-        TrayStatus::Unverified => current_label("Unverified", timing.effective),
+        TrayStatus::Degraded => current_label("Degraded", timing.effective, timing.external),
+        TrayStatus::Unverified => current_label("Unverified", timing.effective, timing.external),
     }
 }
 
@@ -236,6 +249,38 @@ mod tests {
         assert_eq!(dpi_to_icon_canvas(175), 32);
         assert_eq!(dpi_to_icon_canvas(288), 32);
         assert_eq!(dpi_to_icon_canvas(289), 64);
+    }
+
+    #[test]
+    fn stopped_status_reports_unknown_timing_without_a_claimed_value() {
+        assert_eq!(
+            tooltip(
+                TrayStatus::Stopped,
+                TimingValues {
+                    requested: None,
+                    effective: None,
+                    external: false,
+                    invalid_interval: false,
+                },
+            ),
+            "Stopped (timing unknown)"
+        );
+    }
+
+    #[test]
+    fn stopped_finer_observation_is_labeled_external() {
+        assert_eq!(
+            tooltip(
+                TrayStatus::Stopped,
+                TimingValues {
+                    requested: Some(Hns::new(5_000)),
+                    effective: Some(Hns::new(4_966)),
+                    external: true,
+                    invalid_interval: false,
+                },
+            ),
+            "Stopped (current: 0.497 ms, external)"
+        );
     }
 
     #[test]
@@ -427,11 +472,13 @@ mod tests {
         let exact = TimingValues {
             requested: Some(Hns::new(5_000)),
             effective: Some(Hns::new(5_000)),
+            external: false,
             invalid_interval: false,
         };
         let finer = TimingValues {
             requested: Some(Hns::new(5_000)),
             effective: Some(Hns::new(4_966)),
+            external: false,
             invalid_interval: false,
         };
         assert_eq!(tooltip(TrayStatus::Running, exact), "Running (0.500 ms)");

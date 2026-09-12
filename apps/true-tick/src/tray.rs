@@ -435,7 +435,7 @@ pub fn run() {
             } else if power_observation_error.is_some() {
                 TrayStatus::Degraded
             } else {
-                TrayStatus::Pending
+                TrayStatus::Stopped
             },
             config_path,
             executable,
@@ -588,6 +588,8 @@ pub fn run() {
             return;
         }
         app.tray_icon = Some(icon);
+        app.record("policy.recalculate", "trigger=startup");
+        refresh_timing_observation(app);
         if app.config.automatic {
             app.record("policy.startup_automatic", "enabled=true");
             reconcile(app);
@@ -884,17 +886,21 @@ impl App {
     }
 
     fn timing_values(&self) -> TimingValues {
+        let requested = self
+            .timing_observation
+            .map(|observation| observation.requested)
+            .or_else(|| {
+                (self.config.request_interval != config::AUTOMATIC_REQUEST_INTERVAL)
+                    .then_some(self.config.request_interval)
+            });
+        let effective = self
+            .timing_observation
+            .map(|observation| observation.reported_current);
         TimingValues {
-            requested: self
-                .timing_observation
-                .map(|observation| observation.requested)
-                .or_else(|| {
-                    (self.config.request_interval != config::AUTOMATIC_REQUEST_INTERVAL)
-                        .then_some(self.config.request_interval)
-                }),
-            effective: self
-                .timing_observation
-                .map(|observation| observation.reported_current),
+            requested,
+            effective,
+            external: self.controller.ownership() == OwnershipState::Released
+                && matches!((requested, effective), (Some(requested), Some(effective)) if effective < requested),
             invalid_interval: self.invalid_interval,
         }
     }

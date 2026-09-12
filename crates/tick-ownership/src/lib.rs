@@ -221,6 +221,7 @@ mod tests {
     struct FixturePlatform {
         request_observation: TimerObservation,
         release_result: Result<TimerObservation, TimerError>,
+        query_results: Vec<Result<TimerQuery, TimerError>>,
     }
 
     impl FixturePlatform {
@@ -234,15 +235,23 @@ mod tests {
                 raw_status: 0,
             }
         }
+
+        fn next_query(&mut self, interval: Hns) -> Result<TimerQuery, TimerError> {
+            if self.query_results.is_empty() {
+                Ok(self.query_result(interval))
+            } else {
+                self.query_results.remove(0)
+            }
+        }
     }
 
     impl TimerPlatform for FixturePlatform {
         fn query(&mut self, interval: Hns) -> Result<TimerQuery, TimerError> {
-            Ok(self.query_result(interval))
+            self.next_query(interval)
         }
 
         fn preflight(&mut self, interval: Hns) -> Result<TimerQuery, TimerError> {
-            Ok(self.query_result(interval))
+            self.next_query(interval)
         }
 
         fn request(&mut self, _interval: Hns) -> Result<TimerObservation, TimerError> {
@@ -264,9 +273,10 @@ mod tests {
                 },
                 release_result: Ok(TimerObservation {
                     requested: Hns::new(5_000),
-                    reported_current: Hns::new(4_000),
+                    reported_current: Hns::new(4_966),
                     raw_status: 0,
                 }),
+                query_results: Vec::new(),
             },
             Hns::new(5_000),
         )
@@ -308,6 +318,41 @@ mod tests {
     }
 
     #[test]
+    fn startup_query_observes_current_timing_without_ownership() {
+        let mut controller = fixture_controller();
+        let observation = controller.query().unwrap();
+        assert_eq!(observation.reported_current, Hns::new(9_966));
+        assert_eq!(controller.ownership(), OwnershipState::Released);
+        assert_eq!(controller.observation(), Some(observation));
+    }
+
+    #[test]
+    fn startup_query_failure_keeps_timing_unknown_and_released() {
+        let mut controller = TimerController::new(
+            FixturePlatform {
+                request_observation: TimerObservation {
+                    requested: Hns::new(5_000),
+                    reported_current: Hns::new(4_966),
+                    raw_status: 0,
+                },
+                release_result: Ok(TimerObservation {
+                    requested: Hns::new(5_000),
+                    reported_current: Hns::new(4_966),
+                    raw_status: 0,
+                }),
+                query_results: vec![Err(TimerError::QueryFailed { raw_status: -7 })],
+            },
+            Hns::new(5_000),
+        );
+        assert_eq!(
+            controller.query(),
+            Err(TimerError::QueryFailed { raw_status: -7 })
+        );
+        assert_eq!(controller.observation(), None);
+        assert_eq!(controller.ownership(), OwnershipState::Released);
+    }
+
+    #[test]
     fn successful_request_replaces_preflight_effective_observation() {
         let mut controller = fixture_controller();
         assert_eq!(
@@ -328,7 +373,7 @@ mod tests {
         controller.start().unwrap();
         assert_eq!(controller.stop(), Ok(true));
         let observation = controller.observation().unwrap();
-        assert_eq!(observation.reported_current, Hns::new(4_000));
+        assert_eq!(observation.reported_current, Hns::new(4_966));
         assert_eq!(observation.requested, Hns::new(5_000));
         assert_eq!(observation.raw_status, 0);
         assert_eq!(controller.ownership(), OwnershipState::Released);
@@ -344,6 +389,7 @@ mod tests {
                     raw_status: 0,
                 },
                 release_result: Err(TimerError::ReleaseFailed { raw_status: -1 }),
+                query_results: Vec::new(),
             },
             Hns::new(5_000),
         );
