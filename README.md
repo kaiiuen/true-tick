@@ -66,13 +66,14 @@ it. The compact tray menu starts with a clickable `True™ Tick v<version>` head
 
 The native menu keeps Start, Stop, and both setting toggles open after successful or failed handling. Each reopen uses the original popup anchor POINT. Highlighting a command uses a standard Windows tooltip. Descriptions cover Duration, Start in, Stop in, Pause for, Cancel scheduled action, Status, Logs, Start, Stop, startup, automatic timing, and Quit. The tooltip is destroyed when the popup closes and never changes timer state. Logs closes the menu when it opens diagnostics. Quit is dispatched from the returned `TPM_RETURNCMD` command. Tray left-button-up and right-button-up notifications open this same menu. Button-down and double-click notifications are ignored. Start and Stop remain manual controls and use the same guarded policy and ownership lifecycle as automatic activation. Start remains yellow through query, request, and verification, then turns green only after a verified request. Quit logs its request, active-state decision, dialog result, cleanup result, and exit permission. If timing is running, starting, stopping, pending, degraded, unverified, or ownership is uncertain, the warning offers exactly `Cancel` and `Stop and Quit`. A failed or uncertain release keeps the app open and allows retry. The diagnostic window shows a bounded local in-memory session log.
 
-The quit warning now uses the built-in warning-style `MessageBoxW` as its primary
-path because the captured `TaskDialogIndirect` HRESULT was `0x80070057`. `Yes`
-means Stop and Quit and `No`, close, zero, unknown, or MessageBox failure means
-Cancel. The exact MessageBox result and final fail-closed decision are logged. The
-retained Task Dialog implementation is explicitly secondary and is not invoked before
-the reliable MessageBox path. If no warning is shown, the menu is closed rather than
-silently reopened.
+The quit warning uses only the built-in warning-style `MessageBoxW`. When Tick owns
+an active request it says `True™ Tick is currently controlling timer resolution. Stop
+timing and quit?`. When ownership is uncertain it says `True™ Tick could not verify
+that timing is fully released. Keep the app open and retry cleanup?`. `Yes` maps to
+Stop and Quit. `No`, close, zero, unknown, and MessageBox failure map to Cancel. The
+exact result and fail-closed decision are logged. A released post-release handoff is
+observational only, so normal Quit records remaining external timing and does not
+wait for another application.
 It excludes raw pointers, private tokens, credentials, arbitrary secrets, and
 unbounded sensitive paths. The branded tooltip uses short runtime values such as
 `True™ Tick: Running · 0.497 ms`, `True™ Tick: Stopped · 0.997 ms`,
@@ -266,6 +267,6 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) and [`STATUS.md`](STATUS.md).
 
 The current True™ Tick menu order is `True™ Tick v<version>`, `Start`, `Pause >`, `Stop`, `Schedule >`, `Auto-start`, `Auto-time`, `Status >`, `Logs`, and `Quit`, with separators matching the native layout. Pause offers only 5 minutes, 15 minutes, 30 minutes, and 1 hour. Schedule offers only Start in, Stop in, and Cancel scheduled action. There is no custom duration, persistence, stacking, or indefinite pause. Start is disabled while paused. Status is read-only and contains State, Timing, Running for, Next action, and Ownership. Logs is a separate top-level action.
 
-While the popup is open, True™ Tick retains its root, Schedule, Pause, and Status menu handles and runs a popup-only 500 ms UI refresh timer. The timer updates countdown text, dynamic Status rows, ownership, enabled states, and cancellation state. It is killed before menu destruction and never acquires or releases timing. Positive fractional remaining seconds round upward, so a new five-minute pause initially displays `5m 0s`. Elapsed durations remain floored.
+While the popup is open, True™ Tick retains its root, Schedule, Pause, and Status menu handles and runs a popup-only 500 ms UI refresh timer. The timer updates dynamic Status rows, ownership, enabled states, and cancellation state. A separate one-second UI timer runs only while a schedule or pause is active. Its publication key includes the action generation and the rounded remaining-second bucket, so `Shell_NotifyIconW(NIM_MODIFY)` publishes each displayed countdown change without a high-frequency loop. Positive fractional remaining seconds round upward, so a new five-minute pause initially displays `5m 0s`. Elapsed durations remain floored.
 
-Logs opens a normal taskbar window with a concise summary above a read-only native `SysListView32` report. Columns are `Sequence`, `Elapsed`, `Operation`, `Parent`, `Correlation`, `Phase`, `Source`, `Outcome`, `Event`, and `Details`. Rows are converted from typed diagnostic events. Details retain raw HNS, NTSTATUS, Win32 last-error, pause and schedule generations, and timing observations. The session is local and bounded to 512 retained events with a truncation marker. It is not persisted or public telemetry. Invalid current timing is shown as `Unknown`, never as an old current value.
+Logs opens a normal taskbar window with a concise summary above a read-only native `SysListView32` report. Columns are `Sequence`, `Elapsed`, `Operation`, `Parent`, `Correlation`, `Phase`, `Source`, `Outcome`, `Event`, and `Details`. Each snapshot row is converted from typed diagnostic fields, inserted with `LVM_INSERTITEMW` on the list HWND, then filled with `LVM_SETITEMTEXTW` for each remaining column. The native control copies the bounded UTF-16 text during each synchronous message. Refresh is posted and coalesced on the diagnostic window UI thread. The session is local and bounded to 512 retained events with a truncation marker. It is not persisted or public telemetry. Invalid current timing is shown as `Unknown`, never as an old current value.

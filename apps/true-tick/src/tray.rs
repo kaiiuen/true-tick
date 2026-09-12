@@ -1442,6 +1442,7 @@ fn arm_duration_timer(app: &mut App) -> bool {
             }),
         );
         let _ = app.pause.cancel();
+        kill_schedule_display_timer(app);
         app.duration_timer_id = None;
         app.duration_timer_generation = None;
         app.tray_status = TrayStatus::Error;

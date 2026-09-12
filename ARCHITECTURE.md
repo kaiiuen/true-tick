@@ -85,7 +85,7 @@ Duration scheduling is session-only with fixed choices. Start in and Stop in off
 An inconclusive adapter postcondition enters an explicit uncertain ownership state
 and suppresses repeat acquisition. The adapter retains enough request identity for
 a controlled matching release or recovery attempt. Normal message-loop shutdown
-uses one centralized cleanup guard. The `TPM_RETURNCMD` return ID is dispatched once by the tray command handler and Quit is not swallowed by the persistent-menu loop. Tray Quit records the active-state decision and shows a native warning when timing is running, starting, stopping, pending, degraded, unverified, or ownership is uncertain. The primary warning is the built-in warning-style `MessageBoxW` because the captured Task Dialog HRESULT was `0x80070057`. `Yes` maps to Stop and Quit. `No`, close, zero, unknown, and MessageBox failure map to Cancel. The exact result is logged, and the retained Task Dialog path is explicitly secondary and is not invoked before MessageBox. `Cancel` leaves timing and the menu command loop unchanged. `Stop and Quit` uses the same guarded release path as Stop and exits only after ownership release and any pending handoff are verified. A failed release leaves the app alive, updates the icon and diagnostic log, and allows retry. Normal cleanup preserves an unverified warning when cleanup cannot be confirmed. The runtime does not use a busy loop,
+uses one centralized cleanup guard. The `TPM_RETURNCMD` return ID is dispatched once by the tray command handler and Quit is not swallowed by the persistent-menu loop. Tray Quit records the active-state decision and uses only a concise built-in `MessageBoxW` warning. An owned request uses `True™ Tick is currently controlling timer resolution. Stop timing and quit?`. Uncertain ownership uses `True™ Tick could not verify that timing is fully released. Keep the app open and retry cleanup?`. `Yes` maps to Stop and Quit. `No`, close, zero, unknown, and MessageBox failure map to Cancel. A released post-release handoff is observational only and does not block normal Quit. The exact result, external timing, and cleanup decision are logged. A failed release leaves the app alive, updates the icon and diagnostic log, and allows retry. Normal cleanup preserves an unverified warning when cleanup cannot be confirmed. The runtime does not use a busy loop,
 
 high priority, affinity, QoS, execution-state requests, power-plan changes,
 registry tuning beyond the explicit current-user startup boundary, driver,
@@ -116,13 +116,12 @@ Native class, window, menu, tray, icon, bitmap, diagnostic edit, text, and layou
 results are checked. Partial native resources are released in reverse order, and
 startup stops before timing acquisition if the tray surface is unavailable.
 
-The quit warning uses the built-in warning-style `MessageBoxW` as its primary path
-because the captured `TaskDialogIndirect` HRESULT was `0x80070057`. Its text maps
-`Yes` to Stop and Quit and `No` to Cancel. Close, unknown or zero results, and
-MessageBox failure are fail-closed Cancel decisions. The exact MessageBox result is
-logged. The retained Task Dialog implementation is explicitly secondary and is not
-invoked before MessageBox. A failed warning path closes the menu without silently
-reopening it.
+The quit warning uses only the built-in warning-style `MessageBoxW`. Its owned and
+uncertain text is concise and its `Yes` result maps to Stop and Quit. `No`, close,
+unknown or zero results, and MessageBox failure are fail-closed Cancel decisions. A
+released handoff is already outside Tick ownership, so shutdown stops its watcher,
+records that external timing remains, and exits without waiting for another client.
+A failed owned release keeps the app open and allows retry.
 Boot startup registration is a per-user Run-key operation controlled by
 `startup_enabled` in the local config. Portable A/B mode registers the buildable
 `Launcher.exe` entry point, not `true-tick.exe` from either slot. Normal debug
@@ -174,6 +173,6 @@ Tray rendering consumes one derived lifecycle state and one authoritative timing
 
 The current native menu is ordered as `True™ Tick v<version>`, `Start`, `Pause >`, `Stop`, `Schedule >`, `Auto-start`, `Auto-time`, `Status >`, `Logs`, and `Quit`. Pause has fixed 5 minute, 15 minute, 30 minute, and 1 hour choices. Schedule has Start in, Stop in, and Cancel scheduled action. There is no custom duration, persistence, stacking, or indefinite pause. Start is disabled while paused and the read-only Status rows explain the paused state. Logs is not duplicated inside Status.
 
-The active popup retains its root, Pause, Schedule, and Status handles. A popup-only 500 ms UI timer refreshes countdown text, Status rows, ownership, Next action, Start and Stop enabled states, and cancellation state. It is active only during `TrackPopupMenu`, is killed before menu destruction, and does not touch the authoritative deadline or handoff timers. Positive fractional remaining seconds are rounded upward, while elapsed durations remain floored.
+The active popup retains its root, Pause, Schedule, and Status handles. A popup-only 500 ms UI timer refreshes Status rows, ownership, Next action, Start and Stop enabled states, and cancellation state. A separate one-second UI timer runs only while a schedule or pause is active. Its publication key contains the action generation and rounded remaining-second bucket, so the shell tooltip receives `Shell_NotifyIconW(NIM_MODIFY)` for displayed countdown changes. Both timers are bounded and do not touch the authoritative deadline or handoff timer. Positive fractional remaining seconds are rounded upward, while elapsed durations remain floored.
 
-The diagnostic window has an explicit summary control and a native `SysListView32` report control. Its columns are `Sequence`, `Elapsed`, `Operation`, `Parent`, `Correlation`, `Phase`, `Source`, `Outcome`, `Event`, and `Details`. Typed `DiagnosticEvent` fields populate the rows directly. The bounded Details cell preserves raw HNS, typed NTSTATUS and Win32 last-error values, timing observations, schedule generations, and operation lineage. Refreshes are posted and coalesced on the UI message loop. The report is read-only, session-local, newest-retained, capped at 512 events, and marked when truncation occurs. A failed timing observation is `Unknown` rather than stale current data. Closing Logs does not change timer state.
+The diagnostic window has an explicit summary control and a native `SysListView32` report control. Its columns are `Sequence`, `Elapsed`, `Operation`, `Parent`, `Correlation`, `Phase`, `Source`, `Outcome`, `Event`, and `Details`. Typed `DiagnosticEvent` fields populate each row. The native path inserts the first cell with `LVM_INSERTITEMW` on the list HWND and fills remaining cells with `LVM_SETITEMTEXTW`, whose synchronous control messages copy the bounded UTF-16 text. The bounded Details cell preserves raw HNS, typed NTSTATUS and Win32 last-error values, timing observations, schedule generations, and operation lineage. Refreshes are posted and coalesced on the diagnostic window UI message loop. The report is read-only, session-local, newest-retained, capped at 512 events, and marked when truncation occurs. A failed timing observation is `Unknown` rather than stale current data. Closing Logs does not change timer state.
