@@ -4757,6 +4757,12 @@ fn diagnostic_loading_summary_is_nonblank() -> bool {
     !DIAGNOSTIC_LOADING_SUMMARY.trim().is_empty()
 }
 
+#[cfg(test)]
+fn diagnostic_summary_is_non_loading(summary: &str) -> bool {
+    let summary = summary.trim();
+    !summary.is_empty() && summary != DIAGNOSTIC_LOADING_SUMMARY
+}
+
 unsafe fn auto_fit_diagnostic_columns(list: *mut c_void, client_width: i32, dpi: u32) {
     let mut measured = [0i32; REPORT_COLUMNS.len()];
     for (index, value) in measured.iter_mut().enumerate() {
@@ -7096,7 +7102,7 @@ mod tests {
 
     #[test]
     fn diagnostic_toolbar_layout_is_one_row_and_derived_from_flow() {
-        let layout = diagnostic_layout(980, 600, 96);
+        let layout = diagnostic_layout(944, 480, 96);
         let toolbar = layout.toolbar;
         let controls = [
             toolbar.display_label,
@@ -7120,9 +7126,30 @@ mod tests {
             toolbar.display_input.left - toolbar.display_label.right(),
             8
         );
-        assert_eq!(toolbar.message.width, 204);
+        assert_eq!(toolbar.message.width, 168);
         assert_eq!(diagnostic_toolbar_min_width(96), 916);
         assert!(toolbar.message.width >= DIAGNOSTIC_TOOLBAR_MIN_MESSAGE_WIDTH);
+    }
+
+    #[test]
+    fn compact_default_outer_size_keeps_one_row_toolbar_and_grid_usable() {
+        assert_eq!(
+            (DIAGNOSTIC_DEFAULT_WIDTH, DIAGNOSTIC_DEFAULT_HEIGHT),
+            (960, 520)
+        );
+        let frame = Rect {
+            left: -8,
+            top: -31,
+            right: 8,
+            bottom: 9,
+        };
+        let minimum = outer_size_from_client(916, 324, frame);
+        assert!(DIAGNOSTIC_DEFAULT_WIDTH >= minimum.x);
+        assert!(DIAGNOSTIC_DEFAULT_HEIGHT >= minimum.y);
+        let layout = diagnostic_layout(944, 480, 96);
+        assert!(layout.toolbar.message.width >= DIAGNOSTIC_TOOLBAR_MIN_MESSAGE_WIDTH);
+        assert!(layout.list.height >= DIAGNOSTIC_GRID_MIN_HEIGHT);
+        assert!(layout.toolbar.display_input.top == layout.toolbar.export.top);
     }
 
     #[test]
@@ -7444,10 +7471,25 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_initialization_phase_has_visible_loading_before_deferred_render() {
+    fn diagnostic_initialization_phase_renders_real_data_before_first_show() {
         assert!(diagnostic_loading_summary_is_nonblank());
+        assert!(!diagnostic_summary_is_non_loading(
+            DIAGNOSTIC_LOADING_SUMMARY
+        ));
+        assert!(diagnostic_summary_is_non_loading(
+            "Stopped\r\nEffective timing: Unknown\r\nHistory: retained_events=4"
+        ));
         assert_eq!(diagnostic_window_style() & WS_VISIBLE, 0);
         assert_eq!(WM_DIAGNOSTIC_REFRESH, WM_APP + 2);
+    }
+
+    #[test]
+    fn diagnostic_manifest_declares_per_monitor_v2_for_windows_10_and_11() {
+        let manifest = include_str!("../windows/true-tick.manifest");
+        assert!(manifest.contains("supportedOS Id=\"{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}\""));
+        assert!(manifest.contains(">true/pm</dpiAware>"));
+        assert!(manifest.contains(">PerMonitorV2</dpiAwareness>"));
+        assert!(manifest.contains("level=\"asInvoker\""));
     }
 
     #[test]
@@ -7457,9 +7499,13 @@ mod tests {
             .find("unsafe extern \"system\" fn diagnostic_window_proc(")
             .expect("diagnostic window procedure must exist");
         let create_source = &source[create_start..];
+        let columns_initialized = create_source
+            .find("initialize_diagnostic_list(list)")
+            .expect("diagnostic list columns must initialize during creation");
         let assignments_start = create_source
             .find("(*app).diagnostic_hud_state = Some(hud_state);")
             .expect("diagnostic child assignment block must exist");
+        assert!(columns_initialized < assignments_start);
         let render_start = create_source[assignments_start..]
             .find("refresh_diagnostic_presentation(hwnd, &mut *app);")
             .map(|offset| assignments_start + offset)
@@ -7496,14 +7542,40 @@ mod tests {
         let parent_assignment = open_source
             .find("app.diagnostic_window = Some(window);")
             .expect("diagnostic parent assignment must exist");
-        let shown = open_source[parent_assignment..]
-            .find("ShowWindow(window, SW_SHOWNORMAL);")
+        let layout = open_source[parent_assignment..]
+            .find("if !layout_diagnostic_controls(window, app)")
             .map(|offset| parent_assignment + offset)
-            .expect("new diagnostic window must be shown");
-        let ready_check = open_source[parent_assignment..shown]
+            .expect("initial diagnostic layout must succeed before rendering");
+        let first_render = open_source[parent_assignment..]
+            .find("refresh_diagnostic_window(window, app, false);")
+            .map(|offset| parent_assignment + offset)
+            .expect("hidden diagnostic window must render synchronously");
+        let shown = open_source[first_render..]
+            .find("ShowWindow(window, SW_SHOWNORMAL);")
+            .map(|offset| first_render + offset)
+            .expect("new diagnostic window must be shown after first render");
+        let update = open_source[shown..]
+            .find("UpdateWindow(window);")
+            .map(|offset| shown + offset)
+            .expect("new diagnostic window must update after showing");
+        let foreground = open_source[update..]
+            .find("SetForegroundWindow(window);")
+            .map(|offset| update + offset)
+            .expect("new diagnostic window must activate after updating");
+        let later_refresh = open_source[foreground..]
+            .find("request_diagnostic_refresh(app);")
+            .map(|offset| foreground + offset)
+            .expect("later diagnostic refresh must be posted after first visibility");
+        let ready_check = open_source[parent_assignment..layout]
             .find("if !diagnostic_children_ready(app)")
-            .expect("required diagnostic children must be checked before showing");
-        assert!(ready_check < shown - parent_assignment);
+            .expect("required diagnostic children must be checked before layout");
+        assert!(parent_assignment < layout);
+        assert!(ready_check < layout - parent_assignment);
+        assert!(layout < first_render);
+        assert!(first_render < shown);
+        assert!(shown < update);
+        assert!(update < foreground);
+        assert!(foreground < later_refresh);
 
         let clear_start = source
             .find("fn clear_diagnostic_state(app: &mut App)")
@@ -7544,6 +7616,9 @@ mod tests {
 
     #[test]
     fn diagnostic_refreshes_coalesce_and_redraw_is_batched() {
+        let source = include_str!("tray.rs");
+        assert!(source.contains("native.SetWindowTextW.diagnostic_hud.error"));
+        assert!(source.contains("native.SetWindowTextW.diagnostic_summary.error"));
         assert!(diagnostic_refresh_is_coalesced(true, false));
         assert!(diagnostic_refresh_is_coalesced(false, true));
         assert!(!diagnostic_refresh_is_coalesced(false, false));

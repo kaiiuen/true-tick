@@ -70,11 +70,15 @@ invalid selections, preserves valid selected events, and shows and logs a concis
 selection reset. These UI actions do not change timer state.
 
 The diagnostic window uses a stable native rendering pipeline. Common Controls and
-all child HWNDs are created before the parent is shown. The summary starts with
-`Loading True™ Tick diagnostics...`, then one bounded snapshot is queued through
-the UI message loop. That snapshot supplies the summary and grid rows, converts each
-event to its eleven bounded cells once, and replaces the loading text after the first
-render. Refresh requests are coalesced, and the retained event bound remains 512.
+all child HWNDs are created before the parent is shown. Its compact resizable default
+outer request is 960x520 at 96 DPI. The intended client minimum remains 916x324
+logical pixels, including the one-row toolbar and a 96 pixel grid viewport, and
+`WM_GETMINMAXINFO` derives the outer minimum from DPI-aware frame metrics. The
+initial loading text is replaced by one synchronous bounded snapshot while the
+parent is still hidden. That snapshot supplies the real HUD, summary, and grid rows,
+converts each event to its eleven bounded cells once, and completes before the first
+`ShowWindow`. Later refresh requests remain coalesced, and the retained event bound
+remains 512.
 
 A refresh suspends redraw while controls and the list are updated, then re-enables
 redraw, explicitly invalidates and updates the summary `STATIC` and `ListView`, and
@@ -90,7 +94,7 @@ The diagnostic summary is a restrained native HUD. A lifecycle-derived State lin
 
 Layout failure handling records `BeginDeferWindowPos`, every failed `DeferWindowPos`, and `EndDeferWindowPos`. It then positions every child with individual `SetWindowPos` calls. Child creation returns `-1` after every partial child set is destroyed. Reuse verifies the parent and every required child before showing the window.
 
-`WM_SIZE` performs layout and Details viewport fitting only. `WM_DPICHANGED` applies the suggested parent rectangle, reapplies the system GUI font, recalculates layout, and preserves horizontal scroll when possible. Content auto-fit is limited to initial data load or a material snapshot generation. A refresh uses one snapshot and permits at most one follow-up pass for records written during that refresh. The retained session remains capped at 512 events.
+`WM_SIZE` performs layout and Details viewport fitting only. `WM_DPICHANGED` applies the suggested parent rectangle, reapplies the system GUI font, recalculates layout, and preserves horizontal scroll when possible. The embedded Windows manifest declares Per-Monitor V2 with a `true/pm` fallback for the Windows 10 and Windows 11 target. `GetDpiForWindow` and `WM_DPICHANGED` are runtime paths, but DPI compatibility remains unverified until a Windows run. System colors and high-contrast behavior remain authoritative. Content auto-fit is limited to initial data load or a material snapshot generation. A refresh uses one snapshot and permits at most one follow-up pass for records written during that refresh. The retained session remains capped at 512 events.
 
 The rendering contract is source-tested. Actual first-open paint timing, interactive
 resize behavior, horizontal scroll appearance, and native taskbar window behavior
