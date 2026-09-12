@@ -24,8 +24,12 @@ cargo metadata --no-deps --format-version 1
 cargo check --workspace --all-targets
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-py -3 scripts/check_live_timer_values.py
+py -3 ..\tools\true-tick-dev\check_live_timer_values.py
 ```
+
+The timer and documentation validation scripts are private workspace development
+tools stored outside this repository at `..\tools\true-tick-dev\`. They are not
+part of the GitHub project payload. Run the tools from the repository root.
 
 To launch the tray app during an explicitly authorized development run, use:
 
@@ -184,9 +188,11 @@ exit attempts the guarded owned-request cleanup. Unresolved cleanup keeps a usab
 message loop alive for retry or produces a built-in warning before an irrecoverable
 exit. Tray and diagnostic resources are destroyed before `App` is dropped.
 
-Active documentation is checked with `scripts/check_doc_punctuation.py`. The
-checker rejects em dash and semicolon characters and skips historical archive
-material.
+Active documentation is checked with the private workspace tool
+`..\tools\true-tick-dev\check_doc_punctuation.py`. Run it from the repository
+root against the active documentation files. The checker rejects em dash and
+semicolon characters and skips historical archive material. The tool is outside
+the GitHub project payload.
 
 ## Windows DLL boundary
 

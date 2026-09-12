@@ -1,1 +1,11 @@
 target/
+
+*.toml.tmp
+*.log
+*.bak
+*.dmp
+.env
+.env.*
+__pycache__/
+.pytest_cache/
+.mypy_cache/
