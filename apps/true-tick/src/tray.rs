@@ -131,10 +131,7 @@ const MB_ICONWARNING: u32 = 0x0000_0030;
 const MB_YESNO: u32 = 0x0000_0004;
 const MB_DEFBUTTON2: u32 = 0x0000_0100;
 const IDYES: i32 = 6;
-const TASKDIALOG_BUTTON_CANCEL: i32 = 2001;
-const TASKDIALOG_BUTTON_STOP_AND_QUIT: i32 = 2002;
-const TASKDIALOG_ICON_WARNING: *const u16 = (-1isize) as *const u16;
-const TDF_ALLOW_DIALOG_CANCELLATION: u32 = 0x0008;
+
 const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 const WS_POPUP: u32 = 0x8000_0000;
 const WS_EX_TOPMOST: u32 = 0x0000_0008;
@@ -194,7 +191,6 @@ enum QuitDialogDecision {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct QuitWarningResult {
     decision: QuitDialogDecision,
-    task_dialog_hresult: Option<i32>,
     message_box_result: Option<i32>,
     dialog_shown: bool,
 }
@@ -223,39 +219,6 @@ struct NotifyIconData {
     dw_info_flags: u32,
     guid: [u8; 16],
     h_balloon_icon: *mut c_void,
-}
-
-#[repr(C)]
-struct TaskDialogButton {
-    button_id: i32,
-    button_text: *const u16,
-}
-
-#[repr(C)]
-struct TaskDialogConfig {
-    size: u32,
-    parent: *mut c_void,
-    instance: *mut c_void,
-    flags: u32,
-    common_buttons: u32,
-    window_title: *const u16,
-    main_icon: *const u16,
-    main_instruction: *const u16,
-    content: *const u16,
-    button_count: u32,
-    buttons: *const TaskDialogButton,
-    default_button: i32,
-    radio_button_count: u32,
-    radio_buttons: *const c_void,
-    default_radio_button: i32,
-    verification_text: *const u16,
-    expanded_information: *const u16,
-    expanded_control_text: *const u16,
-    collapsed_control_text: *const u16,
-    footer: *const u16,
-    callback: *const c_void,
-    callback_data: isize,
-    width: u32,
 }
 
 #[repr(C)]
@@ -1939,6 +1902,29 @@ impl App {
                 self.shutdown_gate.attempts() + 1
             ),
         );
+        if self.handoff.is_some() && self.controller.ownership() == OwnershipState::Released {
+            finish_handoff_timer(self);
+            self.handoff = None;
+            self.handoff_operation = None;
+            self.controller.clear_release_boundary();
+            self.sync_timing_snapshot();
+            self.external_timing = true;
+            self.tray_status = TrayStatus::Stopped;
+            self.record(
+                "handoff.quit",
+                "ownership=released external_timing_remains=true watcher=stopped",
+            );
+            self.publish();
+            self.shutdown_gate
+                .attempt(|| Ok::<(), String>(()))
+                .expect("cleanup gate bookkeeping cannot fail");
+            self.record(
+                "shutdown.cleanup.result",
+                "result=verified ownership=released external_timing_remains=true",
+            );
+            self.finish_operation(DiagnosticOutcome::Completed);
+            return Ok(());
+        }
         let result = guarded_release(self, "shutdown", TrayStatus::Stopped);
         if result.is_ok() && self.handoff.is_some() {
             let error = "handoff remains pending after ownership release".to_owned();
@@ -3301,12 +3287,11 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
                 }
                 QuitDecision::RequireSafetyDialog { reason } => {
                     app.record("quit.warning.shown", format!("reason={reason:?}"));
-                    let warning = show_quit_warning(hwnd);
+                    let warning = show_quit_warning(hwnd, reason);
                     app.record(
                         "quit.dialog.result",
                         format!(
-                            "dialog_path=message_box task_dialog=secondary_not_invoked task_dialog_hresult={:?} task_dialog_hresult_hex=not_invoked message_box_result={:?} final_decision={:?} dialog_shown={}",
-                            warning.task_dialog_hresult,
+                            "dialog_path=message_box reason={reason:?} message_box_result={:?} final_decision={:?} dialog_shown={}",
                             warning.message_box_result,
                             warning.decision,
                             warning.dialog_shown
@@ -3970,12 +3955,27 @@ fn set_startup(app: &mut App, enabled: bool) {
 }
 
 fn quit_decision(app: &App) -> QuitDecision {
-    if app.handoff.is_some() {
+    quit_decision_for_handoff(
+        app.lifecycle_status(),
+        app.controller.ownership(),
+        app.handoff.is_some(),
+    )
+}
+
+fn quit_decision_for_handoff(
+    status: TrayStatus,
+    ownership: OwnershipState,
+    handoff_active: bool,
+) -> QuitDecision {
+    if handoff_active && ownership == OwnershipState::Released {
+        return QuitDecision::ExitNormally;
+    }
+    if handoff_active {
         return QuitDecision::RequireSafetyDialog {
             reason: QuitSafetyReason::TimingNotSettled,
         };
     }
-    quit_decision_for(app.lifecycle_status(), app.controller.ownership())
+    quit_decision_for(status, ownership)
 }
 
 fn quit_decision_for(status: TrayStatus, ownership: OwnershipState) -> QuitDecision {
@@ -4008,112 +4008,35 @@ fn quit_decision_for(status: TrayStatus, ownership: OwnershipState) -> QuitDecis
     QuitDecision::ExitNormally
 }
 
-unsafe fn show_quit_warning(hwnd: *mut c_void) -> QuitWarningResult {
-    let title = wide("True™ Tick quit warning");
-    let text = wide(
-        "True™ Tick is still active or its ownership is uncertain.\n\nYes = Stop and Quit\nNo = Cancel\n\nOnly Yes will stop timing and quit after verification.",
-    );
+fn quit_warning_text(reason: QuitSafetyReason) -> &'static str {
+    match reason {
+        QuitSafetyReason::OwnershipUncertain => {
+            "True™ Tick could not verify that timing is fully released. Keep the app open and retry cleanup?"
+        }
+        QuitSafetyReason::OwnedActive | QuitSafetyReason::TimingNotSettled => {
+            "True™ Tick is currently controlling timer resolution. Stop timing and quit?"
+        }
+    }
+}
+
+unsafe fn show_quit_warning(hwnd: *mut c_void, reason: QuitSafetyReason) -> QuitWarningResult {
+    let title = wide("True™ Tick");
+    let text = wide(quit_warning_text(reason));
     let result = MessageBoxW(
         hwnd,
         text.as_ptr(),
         title.as_ptr(),
         MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
     );
-    quit_warning_result(None, 0, Some(result))
+    quit_warning_result(Some(result))
 }
 
-#[allow(dead_code)]
-unsafe fn show_quit_warning_task_dialog_secondary(hwnd: *mut c_void) -> (i32, i32) {
-    let cancel = wide("Cancel");
-    let stop_and_quit = wide("Stop and Quit");
-    let buttons = [
-        TaskDialogButton {
-            button_id: TASKDIALOG_BUTTON_CANCEL,
-            button_text: cancel.as_ptr(),
-        },
-        TaskDialogButton {
-            button_id: TASKDIALOG_BUTTON_STOP_AND_QUIT,
-            button_text: stop_and_quit.as_ptr(),
-        },
-    ];
-    let title = wide("True™ Tick quit warning");
-    let instruction = wide("Stop timing before quitting?");
-    let content = wide(
-        "Timing is active or ownership is uncertain. Quit only after a safe stop is verified.",
-    );
-    let config = TaskDialogConfig {
-        size: size_of::<TaskDialogConfig>() as u32,
-        parent: hwnd,
-        instance: std::ptr::null_mut(),
-        flags: TDF_ALLOW_DIALOG_CANCELLATION,
-        common_buttons: 0,
-        window_title: title.as_ptr(),
-        main_icon: TASKDIALOG_ICON_WARNING,
-        main_instruction: instruction.as_ptr(),
-        content: content.as_ptr(),
-        button_count: buttons.len() as u32,
-        buttons: buttons.as_ptr(),
-        default_button: TASKDIALOG_BUTTON_CANCEL,
-        radio_button_count: 0,
-        radio_buttons: std::ptr::null(),
-        default_radio_button: 0,
-        verification_text: std::ptr::null(),
-        expanded_information: std::ptr::null(),
-        expanded_control_text: std::ptr::null(),
-        collapsed_control_text: std::ptr::null(),
-        footer: std::ptr::null(),
-        callback: std::ptr::null(),
-        callback_data: 0,
-        width: 0,
-    };
-    let mut selected = 0;
-    let hresult = TaskDialogIndirect(
-        &config,
-        &mut selected,
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-    );
-    (hresult, selected)
-}
-
-fn quit_warning_result(
-    task_dialog_hresult: Option<i32>,
-    task_dialog_button: i32,
-    message_box_result: Option<i32>,
-) -> QuitWarningResult {
-    match task_dialog_hresult {
-        Some(hresult) if hresult < 0 => {
-            let result = message_box_result.unwrap_or(0);
-            QuitWarningResult {
-                decision: message_box_decision(result),
-                task_dialog_hresult: Some(hresult),
-                message_box_result,
-                dialog_shown: result != 0,
-            }
-        }
-        Some(hresult) => QuitWarningResult {
-            decision: task_dialog_decision(task_dialog_button),
-            task_dialog_hresult: Some(hresult),
-            message_box_result: None,
-            dialog_shown: true,
-        },
-        None => {
-            let result = message_box_result.unwrap_or(0);
-            QuitWarningResult {
-                decision: message_box_decision(result),
-                task_dialog_hresult: None,
-                message_box_result,
-                dialog_shown: result != 0,
-            }
-        }
-    }
-}
-
-fn task_dialog_decision(button_id: i32) -> QuitDialogDecision {
-    if button_id == TASKDIALOG_BUTTON_STOP_AND_QUIT {
-        QuitDialogDecision::StopAndQuit
-    } else {
-        QuitDialogDecision::Cancel
+fn quit_warning_result(message_box_result: Option<i32>) -> QuitWarningResult {
+    let result = message_box_result.unwrap_or(0);
+    QuitWarningResult {
+        decision: message_box_decision(result),
+        message_box_result,
+        dialog_shown: result != 0,
     }
 }
 
@@ -4287,16 +4210,6 @@ extern "system" {
     fn DestroyIcon(icon: *mut c_void) -> i32;
 }
 
-#[link(name = "comctl32")]
-extern "system" {
-    fn TaskDialogIndirect(
-        config: *const TaskDialogConfig,
-        button: *mut i32,
-        radio_button: *mut i32,
-        verification_flag: *mut i32,
-    ) -> i32;
-}
-
 #[link(name = "shell32")]
 extern "system" {
     fn Shell_NotifyIconW(message: u32, data: *mut NotifyIconData) -> i32;
@@ -4396,47 +4309,29 @@ mod tests {
     }
 
     #[test]
-    fn task_dialog_uses_non_colliding_ids_and_only_stop_id_quits() {
-        assert_eq!(TASKDIALOG_BUTTON_CANCEL, 2001);
-        assert_eq!(TASKDIALOG_BUTTON_STOP_AND_QUIT, 2002);
-        assert_ne!(TASKDIALOG_BUTTON_CANCEL, 2);
-        assert_ne!(TASKDIALOG_BUTTON_STOP_AND_QUIT, 2);
+    fn built_in_quit_warning_uses_concise_active_and_uncertain_messages() {
         assert_eq!(
-            task_dialog_decision(TASKDIALOG_BUTTON_STOP_AND_QUIT),
-            QuitDialogDecision::StopAndQuit
+            quit_warning_text(QuitSafetyReason::OwnedActive),
+            "True™ Tick is currently controlling timer resolution. Stop timing and quit?"
         );
-        for button_id in [TASKDIALOG_BUTTON_CANCEL, 2, 0, -1, 9999] {
-            assert_eq!(task_dialog_decision(button_id), QuitDialogDecision::Cancel);
-        }
+        assert_eq!(
+            quit_warning_text(QuitSafetyReason::OwnershipUncertain),
+            "True™ Tick could not verify that timing is fully released. Keep the app open and retry cleanup?"
+        );
     }
 
     #[test]
-    fn failed_task_dialog_uses_the_message_box_fallback_decision() {
-        let result = quit_warning_result(Some(-0x7ff8_ffff), 0, Some(IDYES));
-        assert_eq!(result.decision, QuitDialogDecision::StopAndQuit);
-        assert_eq!(result.message_box_result, Some(IDYES));
-        assert!(result.dialog_shown);
-        assert_eq!(result.task_dialog_hresult, Some(-0x7ff8_ffff));
-    }
-
-    #[test]
-    fn primary_message_box_path_does_not_claim_task_dialog_was_shown() {
-        let result = quit_warning_result(None, 0, Some(IDYES));
-        assert_eq!(result.decision, QuitDialogDecision::StopAndQuit);
-        assert_eq!(result.task_dialog_hresult, None);
-        assert_eq!(result.message_box_result, Some(IDYES));
-        assert!(result.dialog_shown);
-    }
-
-    #[test]
-    fn message_box_maps_only_yes_to_stop_and_quit() {
+    fn message_box_maps_only_yes_to_stop_and_quit_and_close_to_cancel() {
         assert_eq!(message_box_decision(IDYES), QuitDialogDecision::StopAndQuit);
         for result in [7, 0, 1, -1, 9999] {
             assert_eq!(message_box_decision(result), QuitDialogDecision::Cancel);
         }
-        let failed = quit_warning_result(Some(-1), 0, Some(0));
+        let failed = quit_warning_result(Some(0));
         assert_eq!(failed.decision, QuitDialogDecision::Cancel);
         assert!(!failed.dialog_shown);
+        let accepted = quit_warning_result(Some(IDYES));
+        assert_eq!(accepted.decision, QuitDialogDecision::StopAndQuit);
+        assert!(accepted.dialog_shown);
     }
 
     #[test]
@@ -4460,6 +4355,16 @@ mod tests {
         assert_eq!(
             quit_decision_for(TrayStatus::Stopped, OwnershipState::Released),
             QuitDecision::ExitNormally
+        );
+        assert_eq!(
+            quit_decision_for_handoff(TrayStatus::Stopping, OwnershipState::Released, true),
+            QuitDecision::ExitNormally
+        );
+        assert_eq!(
+            quit_decision_for_handoff(TrayStatus::Stopping, OwnershipState::Owned, true),
+            QuitDecision::RequireSafetyDialog {
+                reason: QuitSafetyReason::TimingNotSettled
+            }
         );
         assert_eq!(
             quit_decision_for(TrayStatus::Blocked, OwnershipState::Released),
