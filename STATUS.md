@@ -26,14 +26,14 @@ executable when no portable launcher path is available. Registration is distinct
 from automatic timer activation after the application has launched. Secure
 signatures and rollback are not implemented.
 
-The tray starts with a disabled `True™ Tick v<version>` header sourced from Cargo
-package metadata. It has compact `Start` and `Stop` manual controls, `Auto-start:
-On/Off` and `Auto-time: On/Off` items, a disabled concise status summary, a
-clickable `Status` command, and Quit. Auto-start launches the app at Windows login.
+The tray starts with a clickable `True™ Tick v<version>` header sourced from Cargo
+package metadata. It has compact `Start`, a fixed-choice `Pause` submenu, and `Stop`
+manual controls, `Auto-start: On/Off` and `Auto-time: On/Off` items, a disabled
+concise timing summary, a clickable `Logs` command, and Quit. Auto-start launches the app at Windows login.
 Auto-time controls automatic timing acquisition and defaults to off. Both tray
 left-button-up and right-button-up notifications open the same compact menu.
 Button-down and double-click notifications are ignored to avoid duplicate menus.
-The summary row does not dispatch a command. The `Status` command opens a normal
+The summary row does not dispatch a command. The `Logs` command opens a normal
 taskbar diagnostic window titled `True™ Tick Status and Diagnostics` without
 changing timer state. It uses a normal overlapped style, `WS_EX_APPWINDOW`, no
 `WS_EX_TOOLWINDOW`, no child style, no owner, standard title-bar controls, a
@@ -41,7 +41,7 @@ resizable read-only status and session log view, and a fresh snapshot each time 
 is reopened. Reopening restores and activates the existing window. The native menu
 keeps Start, Stop, and both setting toggles open after successful or failed
 handling. Reopening after any persistent command reuses the original popup anchor
-POINT, and the returned `TPM_RETURNCMD` ID is dispatched once. Status closes the
+POINT, and the returned `TPM_RETURNCMD` ID is dispatched once. Logs closes the
 menu when it opens diagnostics. Highlighting a command uses `WM_MENUSELECT` to
 show a standard Windows tooltip with `Request the best supported timing`, `Release
 True Tick timing`, `Launch True Tick when you sign in`, `Request timing automatically
@@ -146,7 +146,21 @@ Intentionally absent:
 - interactive runtime validation of the Windows diagnostic window appearance,
   taskbar presence, title-bar controls, restore, and close behavior
 
-The Windows support matrix, exact native API behavior, and runtime confirmation of the loader fix remain bounded internal validation work. The exact tray target is built with `cargo build -p true-tick --bin true-tick` and inspected without launching it. Core Windows DLLs such as `kernel32.dll`, `user32.dll`, `ntdll.dll`, `shell32.dll`, `gdi32.dll`, and `comctl32.dll` are OS components and must not be copied or bundled. The embedded Common Controls v6 manifest is the compatibility mechanism. The current MSVC build has a non-system dependency on the Microsoft Visual C++ runtime and Universal CRT. A static binary scan found `VCRUNTIME140.dll` and `api-ms-win-crt-*` imports. The eventual distribution choice is a documented VC++ Redistributable prerequisite or a validated static CRT build. No installer or arbitrary DLL copy is added. The deterministic PE evidence check uses Visual Studio `dumpbin` for `/DEPENDENTS`, `/IMPORTS`, the `.rsrc` section headers, and `.rsrc` raw data. It must show the ordinal 345 import, a non-empty resource directory, and the embedded Common Controls dependency. No runtime Windows success is claimed here. The diagnostic window style contract is source-tested, but its actual appearance, taskbar registration, title-bar controls, restore, and close behavior remain runtime-unverified because the app is not launched. Power observation does not yet provide full Battery Saver,
+Pause is session-only with fixed choices of 5 min, 15 min, 30 min, and 60 min.
+Repeated Pause does not extend its monotonic deadline. Resume now and timeout
+clear the session state and re-evaluate current policy. Pause suppresses acquisition
+without persistence, stacking, custom duration, or indefinite state. AC, Battery,
+Battery Saver, and unknown power policy remain authoritative. Release stays on the
+serialized ownership path. Pausing and release handoff are yellow, successful pause
+is yellow `Paused`, Resume uses yellow `Starting`, and failed or timed-out cleanup
+remains unverified rather than becoming `Paused`. A bounded coordinator timer uses
+a hard limit and generation IDs.
+
+The header uses a safe fixed Windows shell URL operation for GitHub. Shell failure is
+logged and does not change timer state. Tooltip tracking uses `TTF_ABSOLUTE` and
+signed screen coordinates. Failed `GetCursorPos` deactivates the tooltip.
+
+The Windows support matrix, exact native API behavior, and runtime confirmation of the loader fix remain bounded internal validation work. The exact tray target is built with `cargo build -p true-tick --bin true-tick` and inspected without launching it. Core Windows DLLs such as `kernel32.dll`, `user32.dll`, `ntdll.dll`, `shell32.dll`, `gdi32.dll`, and `comctl32.dll` are OS components and must not be copied or bundled. The embedded Common Controls v6 manifest is the compatibility mechanism. The current MSVC build has a non-system dependency on the Microsoft Visual C++ runtime and Universal CRT. A static binary scan found `VCRUNTIME140.dll` and `api-ms-win-crt-*` imports. The eventual distribution choice is a documented VC++ Redistributable prerequisite or a validated static CRT build. No installer or arbitrary DLL copy is added. The deterministic PE evidence check uses Visual Studio `dumpbin` for `/DEPENDENTS`, `/IMPORTS`, the `.rsrc` section headers, and `.rsrc` raw data. It must show the ordinal 345 import, a non-empty resource directory, and the embedded Common Controls dependency. No runtime Windows success is claimed here. The diagnostic window style contract is source-tested, but its actual appearance, taskbar registration, title-bar controls, restore, and close behavior remain runtime-unverified because the app is not launched. Session events also retain operation_id, optional parent_operation_id, correlation_id, finite phase, finite source, finite outcome, and typed native outcome fields. Retention is hard-capped at 512 events with a truncation marker. Rendered text and fields are bounded and sanitized. Power observation does not yet provide full Battery Saver,
 session, lock, suspend, or resume notification coverage. Unknown observation is
 reported as degraded and blocks acquisition. A/B selection is a safe local
 scaffold. Missing or invalid active-slot metadata requires repair. It does not

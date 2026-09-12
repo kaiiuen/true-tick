@@ -56,7 +56,7 @@ numerically smallest supported boundary. It does not use a universal fixed
 and `maximum_hns=5000` select `5000 HNS`, or `0.500 ms`, when that boundary is
 reported by the current system. The adapter retains raw boundary values and
 selected HNS in diagnostics, then validates the selected value before requesting
-it. The compact tray menu starts with a disabled `True™ Tick v<version>` header sourced from Cargo package metadata. It then exposes `Start`, `Stop`, `Auto-start: On/Off`, `Auto-time: On/Off`, a disabled concise status summary, a clickable `Status` command, and `Quit`. Auto-start controls launch at Windows login. Auto-time controls automatic timer acquisition after launch. The current defaults are `startup_enabled = true` and `automatic = false`, so login launch does not acquire timing until the user manually starts it. The summary row does not dispatch commands. `Status` opens a normal taskbar
+it. The compact tray menu starts with a clickable `True™ Tick v<version>` header sourced from Cargo package metadata. It then exposes `Start`, a `Pause` submenu, `Stop`, `Auto-start: On/Off`, `Auto-time: On/Off`, a disabled concise status summary, a clickable `Logs` command, and `Quit`. Auto-start controls launch at Windows login. Auto-time controls automatic timer acquisition after launch. The current defaults are `startup_enabled = true` and `automatic = false`, so login launch does not acquire timing until the user manually starts it. The summary row does not dispatch commands. `Logs` opens a normal taskbar
 diagnostic window titled `True™ Tick Status and Diagnostics` without changing timer
 state. It is a normal taskbar window with standard title-bar controls, a resizable
 read-only status and session log view, and snapshot refresh on reopen. The native
@@ -67,11 +67,11 @@ window and does not change timer state. The native menu keeps Start, Stop, and b
 or failed handling. Each reopen uses the original popup anchor POINT, so the menu
 does not jump when the cursor moves. While a command is highlighted, the native
 menu-selection path shows a short standard Windows tooltip. Start, Stop, startup,
-automatic timing, Status, and Quit use the descriptions `Request the best supported
+automatic timing, Logs, Pause, and Quit use the descriptions `Request the best supported
 timing`, `Release True Tick timing`, `Launch True Tick when you sign in`, `Request
 timing automatically on AC power`, `Open status and session logs`, and `Stop safely
 and quit`. The tooltip is destroyed when the popup closes and it never changes timer
-state. Status closes the menu when it opens the diagnostic window. Quit is dispatched
+state. Logs closes the menu when it opens the diagnostic window. Quit is dispatched
 from the returned `TPM_RETURNCMD` command. Tray
 left-button-up and right-button-up
 notifications open this same menu. Button-down and double-click notifications are
@@ -139,7 +139,14 @@ and attempts only a controlled matching release. Normal message-loop shutdown
 attempts this cleanup once and preserves an unverified warning when it fails. Events use monotonic sequence numbers and elapsed time
 from process start. The default bound is 512 events. Newest events are retained
 with a truncation marker when the bound is reached. Disk persistence for full
-session logs is deferred.
+session logs is deferred. Session events retain operation_id, optional
+parent_operation_id, correlation_id, finite phase, finite source, finite outcome,
+and typed native NTSTATUS, Win32 last-error, requested HNS, selected HNS, and
+effective HNS fields where available. Rendered text is bounded and sanitized.
+The header uses a fixed safe Windows shell URL operation for GitHub. Tooltip
+tracking uses absolute signed screen coordinates and deactivates on failed
+`GetCursorPos`. Runtime shell, taskbar, and Windows notification behavior remains
+unverified because validation does not launch the app.
 
 Portable A/B boot registration targets the buildable portable `Launcher.exe`
 entry point, never a slot payload. The launcher requires `active-slot.txt`, selects only

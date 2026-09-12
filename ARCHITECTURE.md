@@ -38,11 +38,11 @@ CRT, with `VCRUNTIME140.dll` and `api-ms-win-crt-*` observed in a static binary 
 The eventual distribution choice is a documented VC++ Redistributable prerequisite
 or a validated static CRT build. No installer or copied DLLs are part of this v1.
 
-The internal v1 has no profile configuration, application detection, foreground hooks, or profile hysteresis. The v1 tray menu is intentionally compact. It starts with a disabled `True™ Tick v<version>` header sourced from Cargo package metadata, then contains `Start`, `Stop`, current `Auto-start: On/Off` and `Auto-time: On/Off` toggles, a disabled concise status summary, a clickable `Status` command, and Quit. Auto-start controls Windows login launch. Auto-time controls automatic timer acquisition after launch. Defaults are `startup_enabled = true` and `automatic = false`. Left-button-up and right-button-up tray notifications both open this same menu. Button-down and double-click notifications are ignored, so Windows notification delivery cannot open duplicate menus. Start and Stop remain the core manual controls and use the same guarded
+The internal v1 has no profile configuration, application detection, foreground hooks, or profile hysteresis. The v1 tray menu is intentionally compact. It starts with a clickable `True™ Tick v<version>` header sourced from Cargo package metadata, then contains `Start`, a `Pause` submenu, `Stop`, current `Auto-start: On/Off` and `Auto-time: On/Off` toggles, a disabled concise status summary, a clickable `Logs` command, and Quit. Auto-start controls Windows login launch. Auto-time controls automatic timer acquisition after launch. Defaults are `startup_enabled = true` and `automatic = false`. Left-button-up and right-button-up tray notifications both open this same menu. Button-down and double-click notifications are ignored, so Windows notification delivery cannot open duplicate menus. Start and Stop remain the core manual controls and use the same guarded
 policy and ownership lifecycle as automatic activation. Start, Stop, and both
 setting toggles keep the native context menu open after success or failure. Each
 reopen reuses the original popup anchor POINT. The disabled status summary never
-dispatches a command. The clickable `Status` command opens a normal overlapped taskbar diagnostic window and never changes timer state.
+dispatches a command. The clickable `Logs` command opens a normal overlapped taskbar diagnostic window and never changes timer state.
 The two setting toggles use a non recursive return-command loop so the menu stays
 open after a toggle. The original popup anchor POINT is captured once and reused
 when the menu reopens. Returned command IDs are dispatched once, and toggle
@@ -57,7 +57,7 @@ same window, and refreshes its snapshot. The style contract is source-tested, bu
 actual taskbar appearance and runtime control behavior remain unverified because
 validation does not launch the app. Closing it destroys only the window and
 does not affect timer ownership. Full system reports, config paths, raw HNS values,
-power explanations, and full errors remain excluded from the compact menu and tooltip. The version header and status summary are disabled, while the separate `Status` command opens diagnostics. While a menu command is highlighted, `WM_MENUSELECT` drives a standard Windows tooltip with concise descriptions. The six descriptions are `Request the best supported timing`, `Release True Tick timing`, `Launch True Tick when you sign in`, `Request timing automatically on AC power`, `Open status and session logs`, and `Stop safely and quit`. The tooltip is destroyed when the popup closes and does not change timer state. The local diagnostic session records automatic selection, raw native boundaries, selected HNS, requested HNS, effective HNS, raw status, and an `equal`, `finer`, or `unverified` effective relation. After a successful request, the controller replaces the preflight current observation with the returned verified effective observation. Release also retains its returned current observation so the UI can show a remaining external effective state without claiming Tick ownership. A released finer effective value enters yellow `Stopping (waiting for handoff)`. The active-only watcher queries every 250 ms for at most 12 observations. Completion shows red `Stopped (current: X ms)`. Timeout shows red `Stopped (external: X ms)` and logs released ownership with another or unknown finer client. Battery-policy and other owned-request releases use the same classification.
+power explanations, and full errors remain excluded from the compact menu and tooltip. The version header is clickable, the timing summary is the only disabled status row, and the separate `Logs` command opens diagnostics. While a menu command is highlighted, `WM_MENUSELECT` drives a standard Windows tooltip with concise descriptions. The descriptions include `Request the best supported timing`, `Release True Tick timing`, `Launch True Tick when you sign in`, `Request timing automatically on AC power`, `Open status and session logs`, and `Stop safely and quit`. The tooltip is destroyed when the popup closes and does not change timer state. The local diagnostic session records automatic selection, raw native boundaries, selected HNS, requested HNS, effective HNS, raw status, and an `equal`, `finer`, or `unverified` effective relation. After a successful request, the controller replaces the preflight current observation with the returned verified effective observation. Release also retains its returned current observation so the UI can show a remaining external effective state without claiming Tick ownership. A released finer effective value enters yellow `Stopping (waiting for handoff)`. The active-only watcher queries every 250 ms for at most 12 observations. Completion shows red `Stopped (current: X ms)`. Timeout shows red `Stopped (external: X ms)` and logs released ownership with another or unknown finer client. Battery-policy and other owned-request releases use the same classification.
 
 Startup always performs a current timing query after the tray surface is ready, even when the runtime is stopped and Auto-time is off. A successful query produces stopped current timing. A failed query produces stopped timing unknown and a diagnostic error. Selected or requested boundaries remain separate from the current effective observation.
 
@@ -67,7 +67,11 @@ Detailed evidence is recorded in a local bounded in-memory session log. Events h
 monotonic sequence numbers and elapsed process time. The default limit is 512
 events, with newest-event retention and one truncation marker. The store sanitizes
 control layout and bounds each field. Disk persistence for a full session log is
-deferred. The UI refreshes from a current snapshot and shows the current tray state. The
+deferred. Session events retain operation_id, optional parent_operation_id,
+correlation_id, finite phase, finite source, finite outcome, and typed native
+NTSTATUS, Win32 last-error, requested HNS, selected HNS, and effective HNS fields
+where available. Retention is hard-capped at 512 events with a truncation marker.
+Rendered text and fields are bounded and sanitized. The UI refreshes from a current snapshot and shows the current tray state. The
 status tooltip and diagnostic header use the latest verified effective observation
 in that shared snapshot, not a stale preflight query. Requested, selected,
 effective, raw boundaries, raw status, and relation remain distinct.
@@ -76,6 +80,17 @@ Status icon canvases use the current display DPI where available. The policy map
 then clamps intermediate values to the nearest supported size. Status colors remain
 green for verified running, yellow for transition or uncertainty, and red for
 stopped or failed states. The tray shell may apply its own rendering scale.
+
+Pause is session-only with fixed choices of 5 min, 15 min, 30 min, and 60 min.
+Repeated Pause does not extend its monotonic deadline. Resume now and timeout
+re-evaluate current policy. Pause suppresses acquisition and uses the serialized
+release path while AC, Battery, Battery Saver, and unknown policy rules remain
+authoritative. Pausing and release handoff are yellow, successful pause is yellow
+`Paused`, Resume uses yellow `Starting`, and failed or timed-out cleanup remains
+unverified rather than becoming `Paused`. One bounded coordinator timer uses a hard
+limit and generation IDs. The GitHub header uses a fixed safe shell URL operation.
+Tooltip tracking uses absolute signed screen coordinates and deactivates after a
+failed cursor query.
 
 An inconclusive adapter postcondition enters an explicit uncertain ownership state
 and suppresses repeat acquisition. The adapter retains enough request identity for
