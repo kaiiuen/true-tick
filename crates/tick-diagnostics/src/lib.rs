@@ -502,6 +502,61 @@ pub fn selected_event_sequences(events: &[DiagnosticEvent], selection: RowSelect
         .collect()
 }
 
+pub fn selected_event_sequences_for_positions(
+    events: &[DiagnosticEvent],
+    visible_selection: RowSelection,
+    positions: &[usize],
+) -> Vec<u64> {
+    let mut positions = positions.to_vec();
+    positions.sort_unstable();
+    positions.dedup();
+    positions
+        .into_iter()
+        .filter_map(|position| {
+            let row = visible_selection.start().saturating_add(position);
+            (row > 0 && row <= visible_selection.end())
+                .then(|| {
+                    events
+                        .get(row.saturating_sub(1))
+                        .map(|event| event.sequence)
+                })
+                .flatten()
+        })
+        .collect()
+}
+
+pub fn selected_event_sequences_for_sequences(
+    events: &[DiagnosticEvent],
+    sequences: &[u64],
+) -> Vec<u64> {
+    events
+        .iter()
+        .filter(|event| sequences.contains(&event.sequence))
+        .map(|event| event.sequence)
+        .collect()
+}
+
+pub fn visible_positions_for_sequences(
+    events: &[DiagnosticEvent],
+    visible_selection: RowSelection,
+    sequences: &[u64],
+) -> Vec<usize> {
+    if visible_selection.is_empty() {
+        return Vec::new();
+    }
+    events
+        .iter()
+        .enumerate()
+        .skip(visible_selection.start().saturating_sub(1))
+        .take(visible_selection.row_count())
+        .filter_map(|(index, event)| {
+            sequences
+                .contains(&event.sequence)
+                .then_some(index.saturating_sub(visible_selection.start().saturating_sub(1)))
+        })
+        .collect()
+}
+
 pub fn row_selection_for_sequences(
     events: &[DiagnosticEvent],
     sequences: &[u64],
@@ -897,6 +952,29 @@ mod tests {
         assert_eq!(
             row_selection_for_sequences(&events, &[753, 754]),
             Some(RowSelection::new(353, 354))
+        );
+    }
+
+    #[test]
+    fn multi_row_positions_map_in_chronological_order_even_when_drag_order_is_not_sorted() {
+        let events = (10..=14).map(test_event).collect::<Vec<_>>();
+        let visible = RowSelection::new(2, 5);
+        assert_eq!(
+            selected_event_sequences_for_positions(&events, visible, &[3, 0, 2]),
+            [11, 13, 14]
+        );
+        assert_eq!(
+            visible_positions_for_sequences(&events, visible, &[14, 12]),
+            [1, 3]
+        );
+    }
+
+    #[test]
+    fn selection_sequences_are_retained_in_event_order() {
+        let events = (10..=14).map(test_event).collect::<Vec<_>>();
+        assert_eq!(
+            selected_event_sequences_for_sequences(&events, &[14, 11, 13]),
+            [11, 13, 14]
         );
     }
 

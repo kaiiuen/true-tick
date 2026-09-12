@@ -11,9 +11,11 @@ use std::sync::Arc;
 use tick_core::{DesiredIntent, DesiredIntentQueue};
 use tick_diagnostics::{
     diagnostic_grid_rows, format_tsv, latest_row_selection, parse_display_limit,
-    parse_row_selection, row_selection_for_sequences, selected_event_sequences, truncate_utf8,
-    DiagnosticOutcome, DiagnosticPhase, DiagnosticRecord, DiagnosticSource, DiagnosticStore,
-    NativeOutcome, OperationContext, RowSelection, DEFAULT_MAX_EVENTS, REPORT_COLUMNS,
+    parse_row_selection, row_selection_for_sequences, selected_event_sequences,
+    selected_event_sequences_for_positions, selected_event_sequences_for_sequences, truncate_utf8,
+    visible_positions_for_sequences, DiagnosticOutcome, DiagnosticPhase, DiagnosticRecord,
+    DiagnosticSource, DiagnosticStore, NativeOutcome, OperationContext, RowSelection,
+    DEFAULT_MAX_EVENTS, REPORT_COLUMNS,
 };
 use tick_observation_windows::{ObservationSource, WindowsObservation};
 use tick_ownership::{OwnershipState, TimerController, TimingSnapshot, Verification};
@@ -22,6 +24,98 @@ use tick_policy::{decide, PolicyInput, PowerState};
 use tick_startup_windows::{
     startup_operation, StartupOperation, StartupRegistration, WindowsUserStartup,
 };
+
+mod list_view_native {
+    use super::{c_void, Point};
+
+    pub const LVS_REPORT: u32 = 0x0001;
+    pub const LVS_SHOWSELALWAYS: u32 = 0x0008;
+    pub const LVS_EX_GRIDLINES: usize = 0x0000_0001;
+    pub const LVS_EX_FULLROWSELECT: usize = 0x0000_0020;
+    pub const LVM_FIRST: u32 = 0x1000;
+    pub const LVM_DELETEALLITEMS: u32 = LVM_FIRST + 9;
+    pub const LVM_GETITEMCOUNT: u32 = LVM_FIRST + 4;
+    pub const LVM_GETNEXTITEM: u32 = LVM_FIRST + 12;
+    pub const LVM_SETITEMSTATE: u32 = LVM_FIRST + 43;
+    pub const LVM_INSERTITEMW: u32 = LVM_FIRST + 77;
+    pub const LVM_SETITEMTEXTW: u32 = LVM_FIRST + 116;
+    pub const LVM_INSERTCOLUMNW: u32 = LVM_FIRST + 97;
+    pub const LVM_SETEXTENDEDLISTVIEWSTYLE: u32 = LVM_FIRST + 54;
+    pub const LVM_SETCOLUMNWIDTH: u32 = LVM_FIRST + 30;
+    pub const LVIF_TEXT: u32 = 0x0001;
+    pub const LVIF_STATE: u32 = 0x0008;
+    pub const LVIS_SELECTED: u32 = 0x0002;
+    pub const LVNI_SELECTED: u32 = 0x0002;
+    pub const LVCF_WIDTH: u32 = 0x0002;
+    pub const LVCF_TEXT: u32 = 0x0004;
+    pub const LVCFMT_LEFT: i32 = 0x0000;
+    pub const WM_NOTIFY: u32 = 0x004E;
+    pub const LVN_ITEMCHANGED: i32 = -101;
+    pub const LVN_KEYDOWN: i32 = -155;
+    pub const VK_CONTROL: i32 = 0x11;
+
+    #[repr(C)]
+    pub struct ListViewColumn {
+        pub mask: u32,
+        pub format: i32,
+        pub width: i32,
+        pub text: *mut u16,
+        pub text_maximum: i32,
+        pub subitem: i32,
+        pub image: i32,
+        pub order: i32,
+        pub minimum_width: i32,
+        pub default_width: i32,
+        pub ideal_width: i32,
+    }
+
+    #[repr(C)]
+    pub struct ListViewItem {
+        pub mask: u32,
+        pub item: i32,
+        pub subitem: i32,
+        pub state: u32,
+        pub state_mask: u32,
+        pub text: *mut u16,
+        pub text_maximum: i32,
+        pub image: i32,
+        pub parameter: isize,
+        pub indent: i32,
+        pub group_id: i32,
+        pub columns: u32,
+        pub column_indices: *mut u32,
+        pub column_formats: *mut i32,
+        pub group: i32,
+    }
+
+    #[repr(C)]
+    pub struct NotifyHeader {
+        pub hwnd_from: *mut c_void,
+        pub id_from: usize,
+        pub code: i32,
+    }
+
+    #[repr(C)]
+    pub struct ListViewNotification {
+        pub header: NotifyHeader,
+        pub item: i32,
+        pub subitem: i32,
+        pub new_state: u32,
+        pub old_state: u32,
+        pub changed: u32,
+        pub action_point: Point,
+        pub parameter: isize,
+    }
+
+    #[repr(C)]
+    pub struct ListViewKeyDownNotification {
+        pub header: NotifyHeader,
+        pub virtual_key: u16,
+        pub flags: u32,
+    }
+}
+
+use list_view_native::*;
 
 use crate::shutdown::{
     message_loop_exit, shutdown_disposition, MessageLoopExit, ShutdownDisposition, ShutdownGate,
@@ -109,27 +203,11 @@ const ES_MULTILINE: u32 = 0x0004;
 const ES_READONLY: u32 = 0x0800;
 const ES_AUTOVSCROLL: u32 = 0x0040;
 
-const LVS_REPORT: u32 = 0x0001;
-const LVS_SINGLESEL: u32 = 0x0004;
-const LVS_SHOWSELALWAYS: u32 = 0x0008;
-const LVS_EX_GRIDLINES: usize = 0x00000001;
-const LVS_EX_FULLROWSELECT: usize = 0x00000020;
 const ICC_LISTVIEW_CLASSES: u32 = 0x0000_0001;
 // The standard bar-class group includes the native tooltip control.
 const ICC_BAR_CLASSES: u32 = 0x0000_0004;
 const REQUIRED_COMMON_CONTROL_CLASSES: u32 = ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES;
-const LVM_FIRST: u32 = 0x1000;
-const LVM_DELETEALLITEMS: u32 = LVM_FIRST + 9;
-const LVM_GETITEMCOUNT: u32 = LVM_FIRST + 4;
-const LVM_INSERTITEMW: u32 = LVM_FIRST + 77;
-const LVM_SETITEMTEXTW: u32 = LVM_FIRST + 116;
-const LVM_INSERTCOLUMNW: u32 = LVM_FIRST + 97;
-const LVM_SETEXTENDEDLISTVIEWSTYLE: u32 = LVM_FIRST + 54;
-const LVM_SETCOLUMNWIDTH: u32 = LVM_FIRST + 30;
-const LVIF_TEXT: u32 = 0x0001;
-const LVCF_WIDTH: u32 = 0x0002;
-const LVCF_TEXT: u32 = 0x0004;
-const LVCFMT_LEFT: i32 = 0x0000;
+
 const TPM_RIGHTBUTTON: u32 = 0x0002;
 const TPM_RETURNCMD: u32 = 0x0100;
 const MF_STRING: u32 = 0x0000;
@@ -307,40 +385,6 @@ fn common_controls_initialization_contract() -> InitCommonControlsEx {
 }
 
 #[repr(C)]
-struct ListViewColumn {
-    mask: u32,
-    format: i32,
-    width: i32,
-    text: *mut u16,
-    text_maximum: i32,
-    subitem: i32,
-    image: i32,
-    order: i32,
-    minimum_width: i32,
-    default_width: i32,
-    ideal_width: i32,
-}
-
-#[repr(C)]
-struct ListViewItem {
-    mask: u32,
-    item: i32,
-    subitem: i32,
-    state: u32,
-    state_mask: u32,
-    text: *mut u16,
-    text_maximum: i32,
-    image: i32,
-    parameter: isize,
-    indent: i32,
-    group_id: i32,
-    columns: u32,
-    column_indices: *mut u32,
-    column_formats: *mut i32,
-    group: i32,
-}
-
-#[repr(C)]
 struct ToolInfo {
     cb_size: u32,
     flags: u32,
@@ -484,6 +528,8 @@ struct App {
     diagnostic_list: Option<*mut c_void>,
     diagnostic_selection: Option<RowSelection>,
     diagnostic_selection_sequences: Option<Vec<u64>>,
+    diagnostic_grid_selection_sequences: Vec<u64>,
+    diagnostic_grid_selection_reset: bool,
     diagnostic_selection_reset: bool,
     diagnostic_display_limit: usize,
     diagnostic_display_all: bool,
@@ -669,6 +715,8 @@ pub fn run() {
             diagnostic_list: None,
             diagnostic_selection: None,
             diagnostic_selection_sequences: None,
+            diagnostic_grid_selection_sequences: Vec::new(),
+            diagnostic_grid_selection_reset: false,
             diagnostic_selection_reset: false,
             diagnostic_display_limit: 100,
             diagnostic_display_all: false,
@@ -3695,17 +3743,33 @@ unsafe fn set_diagnostic_message(app: &mut App, message: impl Into<String>) {
     }
 }
 
-fn diagnostic_selection_summary(selection: Option<RowSelection>, retained_rows: usize) -> String {
-    match selection {
-        Some(selection) if selection.is_all(retained_rows) => {
-            format!("Transfer: all {retained_rows} retained rows")
+fn diagnostic_selection_summary(app: &App, retained_rows: usize) -> String {
+    if !app.diagnostic_grid_selection_sequences.is_empty() {
+        if app.diagnostic_grid_selection_reset {
+            format!(
+                "Selected: {} rows (some no longer retained)",
+                app.diagnostic_grid_selection_sequences.len()
+            )
+        } else {
+            format!(
+                "Selected: {} rows",
+                app.diagnostic_grid_selection_sequences.len()
+            )
         }
-        Some(selection) => format!(
-            "Transfer: rows {}-{} of {retained_rows} retained",
-            selection.start(),
-            selection.end()
-        ),
-        None => "Transfer: selection unavailable".to_owned(),
+    } else if app.diagnostic_grid_selection_reset {
+        "Selection reset: selected rows are no longer retained".to_owned()
+    } else {
+        match app.diagnostic_selection {
+            Some(selection) if selection.is_all(retained_rows) => {
+                format!("Selected: 0 rows; range fallback: all {retained_rows}")
+            }
+            Some(selection) => format!(
+                "Selected: 0 rows; range fallback: {}-{}",
+                selection.start(),
+                selection.end()
+            ),
+            None => "Selected: 0 rows; range unavailable".to_owned(),
+        }
     }
 }
 
@@ -3734,8 +3798,8 @@ unsafe fn refresh_diagnostic_controls(
     let input = diagnostic_range_text(app);
     let input_is_all = input.trim().is_empty() || input.trim().eq_ignore_ascii_case("all");
     if preserve_selection && app.diagnostic_selection_reset {
-        set_diagnostic_selection_summary(app, "Selection reset: enter a new retained range");
-        set_diagnostic_action_enabled(app, false);
+        set_diagnostic_selection_summary(app, diagnostic_selection_summary(app, retained_rows));
+        set_diagnostic_action_enabled(app, !app.diagnostic_grid_selection_sequences.is_empty());
         return;
     }
     if preserve_selection && !input_is_all {
@@ -3744,26 +3808,26 @@ unsafe fn refresh_diagnostic_controls(
                 app.diagnostic_selection = Some(selection);
                 set_diagnostic_selection_summary(
                     app,
-                    diagnostic_selection_summary(Some(selection), retained_rows),
+                    diagnostic_selection_summary(app, retained_rows),
                 );
-                set_diagnostic_action_enabled(app, !selection.is_empty());
+                set_diagnostic_action_enabled(
+                    app,
+                    !app.diagnostic_grid_selection_sequences.is_empty() || !selection.is_empty(),
+                );
                 return;
             }
             app.diagnostic_selection = None;
             app.diagnostic_selection_sequences = None;
             app.diagnostic_selection_reset = true;
-            set_diagnostic_selection_summary(
-                app,
-                "Selection reset: selected rows are no longer retained",
-            );
-            set_diagnostic_action_enabled(app, false);
+            set_diagnostic_selection_summary(app, diagnostic_selection_summary(app, retained_rows));
+            set_diagnostic_action_enabled(app, !app.diagnostic_grid_selection_sequences.is_empty());
             set_diagnostic_message(
                 app,
                 "Selection reset: selected rows are no longer retained.",
             );
             app.diagnostics.record(
                 "diagnostic.selection.reset",
-                format!("reason=rows_not_retained retained_rows={retained_rows}"),
+                format!("reason=range_rows_not_retained retained_rows={retained_rows}"),
             );
             request_diagnostic_refresh(app);
             return;
@@ -3777,20 +3841,133 @@ unsafe fn refresh_diagnostic_controls(
             if app.diagnostic_message_text.starts_with("Invalid range:") {
                 set_diagnostic_message(app, "");
             }
-            set_diagnostic_selection_summary(
-                app,
-                diagnostic_selection_summary(Some(selection), retained_rows),
-            );
-            set_diagnostic_action_enabled(app, !selection.is_empty());
         }
         Err(error) => {
             app.diagnostic_selection = None;
             app.diagnostic_selection_sequences = None;
             app.diagnostic_selection_reset = false;
-            set_diagnostic_selection_summary(app, "Selection unavailable");
             set_diagnostic_message(app, format!("Invalid range: {error}"));
-            set_diagnostic_action_enabled(app, false);
         }
+    }
+    set_diagnostic_selection_summary(app, diagnostic_selection_summary(app, retained_rows));
+    set_diagnostic_action_enabled(
+        app,
+        !app.diagnostic_grid_selection_sequences.is_empty()
+            || app
+                .diagnostic_selection
+                .is_some_and(|selection| !selection.is_empty()),
+    );
+}
+
+unsafe fn list_selected_item_positions(list: *mut c_void) -> Vec<usize> {
+    let mut previous = -1i32;
+    let mut positions = Vec::new();
+    loop {
+        let next = SendMessageW(
+            list,
+            LVM_GETNEXTITEM,
+            previous as usize,
+            LVNI_SELECTED as isize,
+        );
+        if next < 0 {
+            break;
+        }
+        let next = next as usize;
+        positions.push(next);
+        previous = next as i32;
+    }
+    positions
+}
+
+unsafe fn update_diagnostic_grid_selection(app: &mut App) {
+    if app.diagnostic_refreshing {
+        return;
+    }
+    let Some(list) = app.diagnostic_list else {
+        return;
+    };
+    let events = app.diagnostics.snapshot();
+    let positions = list_selected_item_positions(list);
+    let selected = selected_event_sequences_for_positions(
+        &events,
+        diagnostic_visible_selection(app, events.len()),
+        &positions,
+    );
+    app.diagnostic_grid_selection_sequences = selected;
+    app.diagnostic_grid_selection_reset = false;
+    set_diagnostic_selection_summary(app, diagnostic_selection_summary(app, events.len()));
+    set_diagnostic_action_enabled(
+        app,
+        !app.diagnostic_grid_selection_sequences.is_empty()
+            || app
+                .diagnostic_selection
+                .is_some_and(|selection| !selection.is_empty()),
+    );
+}
+
+fn preserve_diagnostic_grid_selection(app: &mut App, events: &[tick_diagnostics::DiagnosticEvent]) {
+    if app.diagnostic_grid_selection_sequences.is_empty() {
+        return;
+    }
+    let previous_count = app.diagnostic_grid_selection_sequences.len();
+    let selected =
+        selected_event_sequences_for_sequences(events, &app.diagnostic_grid_selection_sequences);
+    let invalid_count = previous_count.saturating_sub(selected.len());
+    app.diagnostic_grid_selection_sequences = selected;
+    if invalid_count > 0 {
+        app.diagnostic_grid_selection_reset = true;
+        let message = if invalid_count == 1 {
+            "Selection reset: 1 selected row is no longer retained."
+        } else {
+            "Selection reset: selected rows are no longer retained."
+        };
+        unsafe {
+            set_diagnostic_message(app, message);
+        }
+        app.diagnostics.record(
+            "diagnostic.selection.reset",
+            format!(
+                "source=grid-selection invalid_rows={invalid_count} retained_rows={}",
+                events.len()
+            ),
+        );
+    }
+}
+
+unsafe fn apply_diagnostic_grid_selection(
+    app: &App,
+    list: *mut c_void,
+    events: &[tick_diagnostics::DiagnosticEvent],
+) {
+    let positions = visible_positions_for_sequences(
+        events,
+        diagnostic_visible_selection(app, events.len()),
+        &app.diagnostic_grid_selection_sequences,
+    );
+    for position in positions {
+        let item = ListViewItem {
+            mask: LVIF_STATE,
+            item: position as i32,
+            subitem: 0,
+            state: LVIS_SELECTED,
+            state_mask: LVIS_SELECTED,
+            text: std::ptr::null_mut(),
+            text_maximum: 0,
+            image: 0,
+            parameter: 0,
+            indent: 0,
+            group_id: 0,
+            columns: 0,
+            column_indices: std::ptr::null_mut(),
+            column_formats: std::ptr::null_mut(),
+            group: 0,
+        };
+        let _ = SendMessageW(
+            list,
+            LVM_SETITEMSTATE,
+            position,
+            (&item as *const ListViewItem).cast::<c_void>() as isize,
+        );
     }
 }
 
@@ -3981,6 +4158,7 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
     app.diagnostic_refreshing = true;
     let events = app.diagnostics.snapshot();
     let retained_rows = events.len();
+    preserve_diagnostic_grid_selection(app, &events);
     refresh_diagnostic_controls(app, &events, true);
     if let Some(summary) = app.diagnostic_summary {
         let text = wide(&diagnostic_summary_text(app, retained_rows));
@@ -4075,6 +4253,7 @@ unsafe fn refresh_diagnostic_window(window: *mut c_void, app: &mut App) {
             }
         }
     }
+    apply_diagnostic_grid_selection(app, list, &events);
     let item_count = SendMessageW(list, LVM_GETITEMCOUNT, 0, 0);
     app.diagnostics.record(
         "diagnostic.grid.refresh",
@@ -4600,6 +4779,72 @@ fn request_diagnostic_refresh(app: &mut App) {
     }
 }
 
+unsafe fn select_all_diagnostic_rows(app: &mut App) {
+    let Some(list) = app.diagnostic_list else {
+        return;
+    };
+    let item = ListViewItem {
+        mask: LVIF_STATE,
+        item: -1,
+        subitem: 0,
+        state: LVIS_SELECTED,
+        state_mask: LVIS_SELECTED,
+        text: std::ptr::null_mut(),
+        text_maximum: 0,
+        image: 0,
+        parameter: 0,
+        indent: 0,
+        group_id: 0,
+        columns: 0,
+        column_indices: std::ptr::null_mut(),
+        column_formats: std::ptr::null_mut(),
+        group: 0,
+    };
+    let _ = SendMessageW(
+        list,
+        LVM_SETITEMSTATE,
+        usize::MAX,
+        (&item as *const ListViewItem).cast::<c_void>() as isize,
+    );
+    update_diagnostic_grid_selection(app);
+}
+
+unsafe fn handle_diagnostic_notify(app: &mut App, l_param: isize) -> bool {
+    if l_param == 0 || app.diagnostic_refreshing {
+        return false;
+    }
+    let header = &*(l_param as *const NotifyHeader);
+    match header.code {
+        LVN_ITEMCHANGED => {
+            let notification = &*(l_param as *const ListViewNotification);
+            if notification.changed & LVIF_STATE != 0
+                && ((notification.old_state ^ notification.new_state) & LVIS_SELECTED) != 0
+            {
+                update_diagnostic_grid_selection(app);
+            }
+            true
+        }
+        LVN_KEYDOWN => {
+            let notification = &*(l_param as *const ListViewKeyDownNotification);
+            if GetKeyState(VK_CONTROL) < 0 {
+                match notification.virtual_key {
+                    key if key == b'C' as u16 => {
+                        diagnostic_toolbar_action(app, "copy");
+                        return true;
+                    }
+                    key if key == b'A' as u16 => {
+                        select_all_diagnostic_rows(app);
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 unsafe extern "system" fn diagnostic_window_proc(
     hwnd: *mut c_void,
     message: u32,
@@ -4775,13 +5020,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             0,
             list_class.as_ptr(),
             std::ptr::null(),
-            WS_CHILD
-                | WS_VISIBLE
-                | WS_CLIPCHILDREN
-                | WS_BORDER
-                | LVS_REPORT
-                | LVS_SINGLESEL
-                | LVS_SHOWSELALWAYS,
+            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS,
             0,
             DIAGNOSTIC_SUMMARY_HEIGHT + DIAGNOSTIC_TOOLBAR_HEIGHT,
             800,
@@ -4898,7 +5137,11 @@ unsafe extern "system" fn diagnostic_window_proc(
         return 0;
     }
     if !app.is_null() {
-        if message == WM_COMMAND {
+        if message == WM_NOTIFY {
+            if handle_diagnostic_notify(&mut *app, l_param) {
+                return 0;
+            }
+        } else if message == WM_COMMAND {
             let command = w_param & 0xffff;
             let notification = (w_param >> 16) & 0xffff;
             if command == ID_DIAGNOSTIC_DISPLAY_LIMIT && notification == EN_CHANGE {
@@ -4954,6 +5197,8 @@ unsafe extern "system" fn diagnostic_window_proc(
             (*app).diagnostic_list = None;
             (*app).diagnostic_selection = None;
             (*app).diagnostic_selection_sequences = None;
+            (*app).diagnostic_grid_selection_sequences.clear();
+            (*app).diagnostic_grid_selection_reset = false;
             (*app).diagnostic_selection_reset = false;
             (*app).diagnostic_message_text.clear();
             (*app).diagnostic_refresh_pending = false;
@@ -5397,6 +5642,7 @@ extern "system" {
     fn CloseClipboard() -> i32;
     fn GetWindowTextLengthW(window: *mut c_void) -> i32;
     fn GetWindowTextW(window: *mut c_void, text: *mut u16, maximum: i32) -> i32;
+    fn GetKeyState(key: i32) -> i16;
     fn EnableWindow(window: *mut c_void, enable: i32) -> i32;
     fn GetClientRect(window: *mut c_void, rect: *mut Rect) -> i32;
     fn SendMessageW(hwnd: *mut c_void, message: u32, w: usize, l: isize) -> isize;
