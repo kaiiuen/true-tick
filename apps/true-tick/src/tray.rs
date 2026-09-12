@@ -215,7 +215,6 @@ struct TaskDialogConfig {
 }
 
 #[repr(C)]
-#[repr(C)]
 struct Rect {
     left: i32,
     top: i32,
@@ -501,7 +500,7 @@ pub fn run() {
             );
             abort_startup(
                 app_ptr,
-                "True Tick could not obtain its native module handle.",
+                "True™ Tick could not obtain its native module handle.",
             );
             return;
         }
@@ -531,7 +530,10 @@ pub fn run() {
                 "native.RegisterClassW.tray.error",
                 format!("raw_status={tray_class_error}"),
             );
-            abort_startup(app_ptr, "True Tick could not create its tray window class.");
+            abort_startup(
+                app_ptr,
+                "True™ Tick could not create its tray window class.",
+            );
             return;
         }
         if wnd_class.icon.is_null() {
@@ -541,7 +543,7 @@ pub fn run() {
             );
             abort_startup(
                 app_ptr,
-                "True Tick could not create its tray icon resource.",
+                "True™ Tick could not create its tray icon resource.",
             );
             return;
         }
@@ -574,7 +576,7 @@ pub fn run() {
             );
             abort_startup(
                 app_ptr,
-                "True Tick could not create its diagnostic window class.",
+                "True™ Tick could not create its diagnostic window class.",
             );
             return;
         }
@@ -601,7 +603,7 @@ pub fn run() {
                 "native.CreateWindowExW.tray.error",
                 format!("raw_status={hwnd_error}"),
             );
-            abort_startup(app_ptr, "True Tick could not create its tray window.");
+            abort_startup(app_ptr, "True™ Tick could not create its tray window.");
             return;
         }
         let mut icon = match NotifyIconData::new(hwnd, app.tray_status, app.timing_values()) {
@@ -611,7 +613,7 @@ pub fn run() {
                     "native.tray_icon.create.error",
                     format!("raw_status={raw_error}"),
                 );
-                abort_after_window(app_ptr, hwnd, "True Tick could not create its tray icon.");
+                abort_after_window(app_ptr, hwnd, "True™ Tick could not create its tray icon.");
                 return;
             }
         };
@@ -626,7 +628,7 @@ pub fn run() {
                 format!("raw_status={add_error}"),
             );
             drop(icon);
-            abort_after_window(app_ptr, hwnd, "True Tick could not add its tray icon.");
+            abort_after_window(app_ptr, hwnd, "True™ Tick could not add its tray icon.");
             return;
         }
         app.tray_icon = Some(icon);
@@ -923,6 +925,15 @@ fn guarded_release(
 fn manual_start(app: &mut App) {
     app.record("tray.command", "command=start");
     app.record("lifecycle.start_request", "source=manual");
+    if app.handoff.is_some() {
+        app.record(
+            "lifecycle.start_request.deferred",
+            "reason=handoff_pending ownership=released",
+        );
+        return;
+    }
+    app.tray_status = TrayStatus::Starting;
+    app.publish();
     reconcile(app);
 }
 
@@ -1353,7 +1364,7 @@ unsafe extern "system" fn window_proc(
                 handle_menu_command(hwnd, app, w_param & 0xffff);
             }
             WM_MENUSELECT => {
-                update_menu_help(app, (w_param & 0xffff) as usize);
+                update_menu_help(app, w_param & 0xffff);
             }
             WM_TIMER if w_param == HANDOFF_TIMER_ID => {
                 handle_handoff_timer(app);
@@ -2612,6 +2623,15 @@ mod tests {
         assert_eq!(result.message_box_result, Some(IDYES));
         assert!(result.dialog_shown);
         assert_eq!(result.task_dialog_hresult, Some(-0x7ff8_ffff));
+    }
+
+    #[test]
+    fn primary_message_box_path_does_not_claim_task_dialog_was_shown() {
+        let result = quit_warning_result(None, 0, Some(IDYES));
+        assert_eq!(result.decision, QuitDialogDecision::StopAndQuit);
+        assert_eq!(result.task_dialog_hresult, None);
+        assert_eq!(result.message_box_result, Some(IDYES));
+        assert!(result.dialog_shown);
     }
 
     #[test]

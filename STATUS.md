@@ -23,12 +23,12 @@ The tray has compact `Start` and `Stop` manual controls, `Auto-start: On/Off` an
 launches the app at Windows login. Auto-time controls automatic timing acquisition
 and defaults to off. Both tray left-button-up and right-button-up notifications open
 the same compact menu. Button-down and double-click notifications are ignored to
-avoid duplicate menus. The status row opens a normal taskbar diagnostic window titled `True Tick Status and Diagnostics` without changing timer state. It uses a normal overlapped style, `WS_EX_APPWINDOW`, no `WS_EX_TOOLWINDOW`, no child style, no owner, standard title-bar controls, a resizable read-only status and session log view, and a fresh snapshot each time it is reopened. Reopening restores and activates the existing window. The native menu keeps Start, Stop, and both setting toggles open after successful or failed handling. Reopening after any persistent command reuses the original popup anchor POINT, and the returned `TPM_RETURNCMD` ID is dispatched once. Status closes the menu when it opens diagnostics. Cancel keeps the Quit command loop available, while successful Quit closes it.
+avoid duplicate menus. The status row opens a normal taskbar diagnostic window titled `True™ Tick Status and Diagnostics` without changing timer state. It uses a normal overlapped style, `WS_EX_APPWINDOW`, no `WS_EX_TOOLWINDOW`, no child style, no owner, standard title-bar controls, a resizable read-only status and session log view, and a fresh snapshot each time it is reopened. Reopening restores and activates the existing window. The native menu keeps Start, Stop, and both setting toggles open after successful or failed handling. Reopening after any persistent command reuses the original popup anchor POINT, and the returned `TPM_RETURNCMD` ID is dispatched once. Status closes the menu when it opens diagnostics. Highlighting a command uses `WM_MENUSELECT` to show a standard Windows tooltip with `Request the best supported timing`, `Release True Tick timing`, `Launch True Tick when you sign in`, `Request timing automatically on AC power`, `Open status and session logs`, or `Stop safely and quit`. The tooltip is destroyed when the popup closes and does not change timer state. Cancel keeps the Quit command loop available, while successful Quit closes it.
 Start and Stop use the same guarded policy and ownership lifecycle as automatic
-activation. The tray tooltip and status menu use actual concise timing values such
-as `Running (0.500 ms)`, `Running (0.497 ms, finer)`,
-`Stopped (current: 0.497 ms)`, `Starting (0.500 ms)`,
-`Stopping (current: 0.497 ms)`, and `Error (invalid interval)`. They use
+activation. Start remains yellow through query, request, and verification, then turns green only after a verified request. The tray tooltip and status menu use actual concise timing values such
+as `True™ Tick: Running (0.500 ms)`, `True™ Tick: Running (0.497 ms, finer)`,
+`True™ Tick: Stopped (current: 0.497 ms)`, `True™ Tick: Starting (0.500 ms)`,
+`True™ Tick: Stopping (waiting for handoff)`, and `True™ Tick: Error (invalid interval)`. They use
 `unknown` when no observation exists. After a successful request, the returned
 verified effective observation replaces the preflight current value in the
 controller and app snapshot. Release observations update that same snapshot. A
@@ -48,7 +48,13 @@ sanitized and bounded so raw pointers, credentials, private tokens, arbitrary
 secrets, and unbounded sensitive paths are not recorded. Ownership state is
 logged separately from effective system state. After release, a remaining finer
 value is labeled external without claiming Tick ownership, and a later query
-may show the effective value returning to baseline.
+may show the effective value returning to baseline. A successful owned release that
+leaves the effective value finer enters yellow `Stopping (waiting for handoff)`.
+The active-only watcher queries every 250 ms for at most 12 observations. It turns
+red with `Stopped (current: X ms)` when the value is no longer finer. On timeout it
+turns red with `Stopped (external: X ms)` and logs released ownership with another
+or unknown finer client. Battery-policy and other owned-request releases use the same
+handoff classification.
 
 Startup always queries current timing after the tray surface is ready, even when
 Tick is stopped and Auto-time is off. A successful query displays stopped current
@@ -74,14 +80,12 @@ Battery, Battery Saver, and unknown power states remain non-acquiring. A
 restrictive power transition attempts to release owned state. Normal Quit requires
 a safe stop when timing is active or uncertain and reports failed cleanup as an
 unverified warning rather than exiting.
-Quit warnings use the built-in Task Dialog warning icon and standard Windows visual
-style through the Common Controls v6 manifest. Task Dialog IDs are `2001` for
-`Cancel` and `2002` for `Stop and Quit`, and only `2002` can select the guarded stop
-path. The Task Dialog HRESULT is logged in decimal and hexadecimal. A failed Task
-Dialog uses a warning-style `MessageBoxW` fallback with `Yes = Stop and Quit` and
-`No = Cancel`. Only `IDYES` selects Stop and Quit. Cancel, close, unknown or zero
-results, and MessageBox failure keep the application open. A failed warning does not
-silently reopen the context menu.
+Quit warnings use the built-in warning-style `MessageBoxW` as the primary path
+because the captured `TaskDialogIndirect` HRESULT was `0x80070057`. `Yes` maps to
+Stop and Quit. `No`, close, unknown or zero results, and MessageBox failure map to
+Cancel and keep the application open. The exact MessageBox result and fail-closed
+decision are logged. The retained Task Dialog path is explicitly secondary and is not
+invoked before MessageBox. A failed warning does not silently reopen the context menu.
 
 The reliability safeguards now include a non-reentrant popup guard, current-state
 command validation, exactly-once returned-command dispatch, and deterministic

@@ -87,7 +87,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(error) => {
-            eprintln!("True Tick launcher repair required: {error}");
+            eprintln!("True™ Tick launcher repair required: {error}");
             ExitCode::FAILURE
         }
     }

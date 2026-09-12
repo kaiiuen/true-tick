@@ -178,7 +178,7 @@ fn current_label(prefix: &str, effective: Option<Hns>, external: bool) -> String
 }
 
 pub(crate) fn tooltip(status: TrayStatus, timing: TimingValues) -> String {
-    match status {
+    let summary = match status {
         TrayStatus::Running => match (timing.requested, timing.effective) {
             (Some(requested), Some(effective)) if effective < requested => {
                 format!("Running ({} ms, finer)", format_ms(effective))
@@ -202,7 +202,8 @@ pub(crate) fn tooltip(status: TrayStatus, timing: TimingValues) -> String {
         TrayStatus::Pending => "Pending (timing unknown)".to_owned(),
         TrayStatus::Degraded => current_label("Degraded", timing.effective, timing.external),
         TrayStatus::Unverified => current_label("Unverified", timing.effective, timing.external),
-    }
+    };
+    format!("True™ Tick: {summary}")
 }
 
 pub(crate) const STATUS_COMMAND_ID: usize = 1009;
@@ -390,7 +391,7 @@ mod tests {
                     invalid_interval: false,
                 },
             ),
-            "Stopped (timing unknown)"
+            "True™ Tick: Stopped (timing unknown)"
         );
     }
 
@@ -407,7 +408,7 @@ mod tests {
                     invalid_interval: false,
                 },
             ),
-            "Stopped (external: 0.497 ms)"
+            "True™ Tick: Stopped (external: 0.497 ms)"
         );
     }
 
@@ -659,14 +660,17 @@ mod tests {
             handoff_pending: false,
             invalid_interval: false,
         };
-        assert_eq!(tooltip(TrayStatus::Running, exact), "Running (0.500 ms)");
+        assert_eq!(
+            tooltip(TrayStatus::Running, exact),
+            "True™ Tick: Running (0.500 ms)"
+        );
         assert_eq!(
             tooltip(TrayStatus::Running, finer),
-            "Running (0.497 ms, finer)"
+            "True™ Tick: Running (0.497 ms, finer)"
         );
         assert_eq!(
             tooltip(TrayStatus::Stopped, finer),
-            "Stopped (current: 0.497 ms)"
+            "True™ Tick: Stopped (current: 0.497 ms)"
         );
         assert_eq!(
             tooltip(
@@ -676,11 +680,11 @@ mod tests {
                     ..TimingValues::default()
                 }
             ),
-            "Starting (0.500 ms)"
+            "True™ Tick: Starting (0.500 ms)"
         );
         assert_eq!(
             tooltip(TrayStatus::Stopping, finer),
-            "Stopping (current: 0.497 ms)"
+            "True™ Tick: Stopping (current: 0.497 ms)"
         );
         assert_eq!(
             tooltip(
@@ -691,7 +695,7 @@ mod tests {
                     ..TimingValues::default()
                 }
             ),
-            "Stopping (waiting for handoff)"
+            "True™ Tick: Stopping (waiting for handoff)"
         );
         assert_eq!(
             tooltip(
@@ -701,7 +705,7 @@ mod tests {
                     ..TimingValues::default()
                 }
             ),
-            "Error (invalid interval)"
+            "True™ Tick: Error (invalid interval)"
         );
     }
 
@@ -714,7 +718,7 @@ mod tests {
         ] {
             let text = tooltip(status, TimingValues::default());
             assert!(text.contains("unknown"));
-            assert!(!text.contains("True Tick"));
+            assert!(text.starts_with("True™ Tick: "));
             assert!(!text.contains("HNS"));
             assert!(!text.contains('\\'));
         }

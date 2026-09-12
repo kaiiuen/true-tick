@@ -47,7 +47,7 @@ reported by the current system. The adapter retains raw boundary values and
 selected HNS in diagnostics, then validates the selected value before requesting
 it. The compact tray
 menu exposes `Start`, `Stop`, `Auto-start: On/Off`, `Auto-time: On/Off`, a clickable short status item, and `Quit`. Auto-start controls launch at Windows login. Auto-time controls automatic timer acquisition after launch. The current defaults are `startup_enabled = true` and `automatic = false`, so login launch does not acquire timing until the user manually starts it. Status opens a normal taskbar
-diagnostic window titled `True Tick Status and Diagnostics` without changing timer
+diagnostic window titled `True™ Tick Status and Diagnostics` without changing timer
 state. It is a normal taskbar window with standard title-bar controls, a resizable
 read-only status and session log view, and snapshot refresh on reopen. The native
 window uses a normal overlapped style with `WS_EX_APPWINDOW`, no
@@ -55,35 +55,46 @@ window uses a normal overlapped style with `WS_EX_APPWINDOW`, no
 the taskbar with minimize, maximize, restore, close, and resize behavior. Closing it only destroys the diagnostic
 window and does not change timer state. The native menu keeps Start, Stop, and both setting toggles open after successful
 or failed handling. Each reopen uses the original popup anchor POINT, so the menu
-does not jump when the cursor moves. Status closes the menu when it opens the
-diagnostic window. Quit is dispatched from the returned `TPM_RETURNCMD` command. Tray
+does not jump when the cursor moves. While a command is highlighted, the native
+menu-selection path shows a short standard Windows tooltip. Start, Stop, startup,
+automatic timing, Status, and Quit use the descriptions `Request the best supported
+timing`, `Release True Tick timing`, `Launch True Tick when you sign in`, `Request
+timing automatically on AC power`, `Open status and session logs`, and `Stop safely
+and quit`. The tooltip is destroyed when the popup closes and it never changes timer
+state. Status closes the menu when it opens the diagnostic window. Quit is dispatched
+from the returned `TPM_RETURNCMD` command. Tray
 left-button-up and right-button-up
 notifications open this same menu. Button-down and double-click notifications are
 ignored, so one Windows notification does not create duplicate menus. Start and Stop
 remain manual controls and use the same guarded policy and ownership lifecycle as
-automatic activation. Quit logs its request, active-state decision, dialog result, cleanup result, and exit permission. If timing is running, starting, stopping, pending, degraded, unverified, or ownership is uncertain, the warning offers exactly `Cancel` and `Stop and Quit`. Cancel leaves timing, the application, and the popup command loop unchanged. Stop and Quit uses the same guarded release path as Stop and exits only after release verification. A failed or uncertain release keeps the app open, updates status and diagnostics, and allows retry. If the state is definitely stopped with no pending ownership, Quit exits without a warning. The diagnostic window shows a bounded, local in-memory session log.
+automatic activation. Start remains yellow through query, request, and verification, and turns green only after a verified request. Quit logs its request, active-state decision, dialog result, cleanup result, and exit permission. If timing is running, starting, stopping, pending, degraded, unverified, or ownership is uncertain, the warning offers exactly `Cancel` and `Stop and Quit`. Cancel leaves timing, the application, and the popup command loop unchanged. Stop and Quit uses the same guarded release path as Stop and exits only after release verification. A failed or uncertain release keeps the app open, updates status and diagnostics, and allows retry. If the state is definitely stopped with no pending ownership, Quit exits without a warning. The diagnostic window shows a bounded, local in-memory session log.
 
-TaskDialogIndirect is the preferred quit warning because the tray manifest enables
-Common Controls v6. It uses the built-in warning icon and standard Windows visual
-style with custom button IDs `2001` for `Cancel` and `2002` for `Stop and Quit`.
-The HRESULT is captured and logged in decimal and hexadecimal. Any failed Task
-Dialog call is treated as not shown and invokes a built-in `MessageBoxW` fallback
-with warning styling and `Yes = Stop and Quit` plus `No = Cancel`. Only `IDYES`
-can select Stop and Quit. Close, Cancel, unknown results, zero results, and any
-MessageBox failure keep the application open. If no warning is shown, the menu is
-closed rather than silently reopened.
+The quit warning now uses the built-in warning-style `MessageBoxW` as its primary
+path because the captured `TaskDialogIndirect` HRESULT was `0x80070057`. `Yes`
+means Stop and Quit and `No`, close, zero, unknown, or MessageBox failure means
+Cancel. The exact MessageBox result and final fail-closed decision are logged. The
+retained Task Dialog implementation is explicitly secondary and is not invoked before
+the reliable MessageBox path. If no warning is shown, the menu is closed rather than
+silently reopened.
 It excludes raw pointers, private tokens, credentials, arbitrary secrets, and
-unbounded sensitive paths. The tooltip and status menu use short runtime timing values such as `Running
-(0.500 ms)`, `Running (0.497 ms, finer)`, `Stopped (current: 0.497 ms)`,
-`Starting (0.500 ms)`, `Stopping (current: 0.497 ms)`, or `Error (invalid
-interval)`. Values use the selected request and the latest verified effective
+unbounded sensitive paths. The branded tooltip and status menu use short runtime timing values such as
+`True™ Tick: Running (0.500 ms)`, `True™ Tick: Running (0.497 ms, finer)`,
+`True™ Tick: Stopped (current: 0.497 ms)`, `True™ Tick: Starting (0.500 ms)`,
+`True™ Tick: Stopping (waiting for handoff)`, or `True™ Tick: Error (invalid interval)`. Values use the selected request and the latest verified effective
 observation as distinct fields, and another platform boundary is allowed. After a
 successful request, the returned effective observation replaces the preflight
 current value in controller and app state. After release, the returned current
 observation is retained as effective external state when another client remains
-finer or otherwise active, without implying Tick ownership. The captured
-`current_hns=9966` value was about `0.997 ms` because the old config requested
-`10000 HNS`. That config is migrated to automatic selection. At startup, the controller always queries the current effective timing, even when True Tick is stopped and Auto-time is off. A successful query is displayed as stopped current timing without claiming Tick ownership. A failed query is displayed as `Stopped (timing unknown)` and recorded as a diagnostic failure. The selected or requested boundary remains separate from the current effective observation.
+finer or otherwise active, without implying Tick ownership. After True™ Tick releases
+its request, a finer effective value enters yellow `Stopping (waiting for handoff)`.
+The app queries the effective value only while that handoff is pending, using a
+250 ms Windows timer for at most 12 observations. A non-finer observation completes
+the handoff and shows red `Stopped (current: X ms)`. If the bound expires while a
+finer value remains, the app shows red `Stopped (external: X ms)` and logs that True
+Tick ownership is released while another or unknown client keeps finer timing. This
+classification also applies to battery-policy and other owned-request releases.
+The captured `current_hns=9966` value was about `0.997 ms` because the old config requested
+`10000 HNS`. That config is migrated to automatic selection. At startup, the controller always queries the current effective timing, even when True™ Tick is stopped and Auto-time is off. A successful query is displayed as stopped current timing without claiming Tick ownership. A failed query is displayed as `Stopped (timing unknown)` and recorded as a diagnostic failure. The selected or requested boundary remains separate from the current effective observation.
 
 Power broadcasts refresh timing and recalculate the visible state for both Auto-time settings. With Auto-time off, AC and no owned request show stopped current timing and wait for manual Start. Battery, Battery Saver, and unknown power remain conservative and release owned timing when policy requires it. Returning to AC with Auto-time on attempts acquisition. Returning to AC with Auto-time off shows stopped current timing rather than leaving a stale blocked state.
 

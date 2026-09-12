@@ -15,5 +15,5 @@ fn main() {
 
 #[cfg(not(windows))]
 fn main() {
-    println!("True Tick is a Windows tray application");
+    println!("True™ Tick is a Windows tray application");
 }

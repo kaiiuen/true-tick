@@ -40,7 +40,7 @@ open after a toggle. The original popup anchor POINT is captured once and reused
 when the menu reopens. Returned command IDs are dispatched once, and toggle
 requests record command, save, and resulting-value events. The diagnostic window is
 a normal taskbar window titled
-`True Tick Status and Diagnostics`. It uses `WS_OVERLAPPEDWINDOW` and
+`True™ Tick Status and Diagnostics`. It uses `WS_OVERLAPPEDWINDOW` and
 `WS_EX_APPWINDOW` without `WS_EX_TOOLWINDOW`, so it has standard minimize,
 maximize, restore, close, taskbar, and resize behavior. It shows current status,
 power observation, startup result, and the bounded read-only session snapshot.
@@ -49,7 +49,7 @@ same window, and refreshes its snapshot. The style contract is source-tested, bu
 actual taskbar appearance and runtime control behavior remain unverified because
 validation does not launch the app. Closing it destroys only the window and
 does not affect timer ownership. Full system reports, config paths, raw HNS values,
-power explanations, and full errors remain excluded from the compact menu and tooltip. The local diagnostic session records automatic selection, raw native boundaries, selected HNS, requested HNS, effective HNS, raw status, and an `equal`, `finer`, or `unverified` effective relation. After a successful request, the controller replaces the preflight current observation with the returned verified effective observation. Release also retains its returned current observation so the UI can show a remaining external effective state without claiming Tick ownership. A released finer effective value is labeled external, while a later query can show the value returning to baseline.
+power explanations, and full errors remain excluded from the compact menu and tooltip. While a menu command is highlighted, `WM_MENUSELECT` drives a standard Windows tooltip with concise descriptions. The six descriptions are `Request the best supported timing`, `Release True Tick timing`, `Launch True Tick when you sign in`, `Request timing automatically on AC power`, `Open status and session logs`, and `Stop safely and quit`. The tooltip is destroyed when the popup closes and does not change timer state. The local diagnostic session records automatic selection, raw native boundaries, selected HNS, requested HNS, effective HNS, raw status, and an `equal`, `finer`, or `unverified` effective relation. After a successful request, the controller replaces the preflight current observation with the returned verified effective observation. Release also retains its returned current observation so the UI can show a remaining external effective state without claiming Tick ownership. A released finer effective value enters yellow `Stopping (waiting for handoff)`. The active-only watcher queries every 250 ms for at most 12 observations. Completion shows red `Stopped (current: X ms)`. Timeout shows red `Stopped (external: X ms)` and logs released ownership with another or unknown finer client. Battery-policy and other owned-request releases use the same classification.
 
 Startup always performs a current timing query after the tray surface is ready, even when the runtime is stopped and Auto-time is off. A successful query produces stopped current timing. A failed query produces stopped timing unknown and a diagnostic error. Selected or requested boundaries remain separate from the current effective observation.
 
@@ -72,7 +72,7 @@ stopped or failed states. The tray shell may apply its own rendering scale.
 An inconclusive adapter postcondition enters an explicit uncertain ownership state
 and suppresses repeat acquisition. The adapter retains enough request identity for
 a controlled matching release or recovery attempt. Normal message-loop shutdown
-uses one centralized cleanup guard. The `TPM_RETURNCMD` return ID is dispatched once by the tray command handler and Quit is not swallowed by the persistent-menu loop. Tray Quit records the active-state decision and shows a native warning when timing is running, starting, stopping, pending, degraded, unverified, or ownership is uncertain. The warning has exactly `Cancel` and `Stop and Quit`. `Cancel` leaves timing and the menu command loop unchanged. `Stop and Quit` uses the same guarded release path as Stop and exits only after verification. A failed release leaves the app alive, updates the icon and diagnostic log, and allows retry. Normal cleanup preserves an unverified warning when cleanup cannot be confirmed. The runtime does not use a busy loop,
+uses one centralized cleanup guard. The `TPM_RETURNCMD` return ID is dispatched once by the tray command handler and Quit is not swallowed by the persistent-menu loop. Tray Quit records the active-state decision and shows a native warning when timing is running, starting, stopping, pending, degraded, unverified, or ownership is uncertain. The primary warning is the built-in warning-style `MessageBoxW` because the captured Task Dialog HRESULT was `0x80070057`. `Yes` maps to Stop and Quit. `No`, close, zero, unknown, and MessageBox failure map to Cancel. The exact result is logged, and the retained Task Dialog path is explicitly secondary and is not invoked before MessageBox. `Cancel` leaves timing and the menu command loop unchanged. `Stop and Quit` uses the same guarded release path as Stop and exits only after ownership release and any pending handoff are verified. A failed release leaves the app alive, updates the icon and diagnostic log, and allows retry. Normal cleanup preserves an unverified warning when cleanup cannot be confirmed. The runtime does not use a busy loop,
 
 high priority, affinity, QoS, execution-state requests, power-plan changes,
 registry tuning beyond the explicit current-user startup boundary, driver,
@@ -103,15 +103,13 @@ Native class, window, menu, tray, icon, bitmap, diagnostic edit, text, and layou
 results are checked. Partial native resources are released in reverse order, and
 startup stops before timing acquisition if the tray surface is unavailable.
 
-`TaskDialogIndirect` is preferred because the tray embeds the Common Controls v6
-manifest. Its built-in warning icon and standard Windows visual style are combined
-with custom IDs `2001` for `Cancel` and `2002` for `Stop and Quit`. The HRESULT is
-captured and recorded in decimal and hexadecimal. A failed Task Dialog call is a
-not-shown result, never an implicit Cancel that reopens the menu. The failure then
-uses a warning-style `MessageBoxW` fallback whose text maps `Yes` to Stop and Quit
-and `No` to Cancel. Only `IDYES` selects Stop and Quit. Close, `IDCANCEL`, unknown
-or zero results, and MessageBox failure are fail-closed Cancel decisions. A failed
-warning path closes the menu without silently reopening it.
+The quit warning uses the built-in warning-style `MessageBoxW` as its primary path
+because the captured `TaskDialogIndirect` HRESULT was `0x80070057`. Its text maps
+`Yes` to Stop and Quit and `No` to Cancel. Close, unknown or zero results, and
+MessageBox failure are fail-closed Cancel decisions. The exact MessageBox result is
+logged. The retained Task Dialog implementation is explicitly secondary and is not
+invoked before MessageBox. A failed warning path closes the menu without silently
+reopening it.
 Boot startup registration is a per-user Run-key operation controlled by
 `startup_enabled` in the local config. Portable A/B mode registers the buildable
 `Launcher.exe` entry point, not `true-tick.exe` from either slot. Normal debug
@@ -139,9 +137,10 @@ yellow or red rather than being reported as green. The tray maps running and ver
 pending, degraded, or unverified behavior to yellow, and stopped, blocked,
 unsupported, or error behavior to red. Each public tray status is reachable from
 an explicit runtime path or is covered by a deterministic boundary test.
-The tooltip and status menu use concise observed or requested values such as
-`Running (0.500 ms)`, `Running (0.497 ms, finer)`, `Stopped (current: 0.497 ms)`,
-`Starting (0.500 ms)`, `Stopping (current: 0.497 ms)`, and
+The branded tooltip and status menu use concise observed or requested values such as
+`True™ Tick: Running (0.500 ms)`, `True™ Tick: Running (0.497 ms, finer)`,
+`True™ Tick: Stopped (current: 0.497 ms)`, `True™ Tick: Starting (0.500 ms)`,
+`True™ Tick: Stopping (waiting for handoff)`, and
 `Error (invalid interval)`. They use `unknown` when no observation is
 available. Raw HNS and full event details remain in the diagnostic window.
 Controller and app state carry observations through query, request, release,
