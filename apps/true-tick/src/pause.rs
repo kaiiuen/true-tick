@@ -2,24 +2,26 @@ use std::time::{Duration, Instant};
 use tick_core::Status;
 use tick_policy::{decide, PolicyInput, PowerState};
 
-pub const MAX_PAUSE_DURATION: Duration = Duration::from_secs(60 * 60);
+pub const MAX_DURATION: Duration = Duration::from_secs(60 * 60);
 pub const MAX_TIMER_INTERVAL_MS: u32 = 60 * 60 * 1_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PauseDuration {
-    Five,
-    Fifteen,
-    Thirty,
-    Sixty,
+pub(crate) enum DurationChoice {
+    OneMinute,
+    FiveMinutes,
+    FifteenMinutes,
+    ThirtyMinutes,
+    OneHour,
 }
 
-impl PauseDuration {
+impl DurationChoice {
     pub(crate) const fn minutes(self) -> u32 {
         match self {
-            Self::Five => 5,
-            Self::Fifteen => 15,
-            Self::Thirty => 30,
-            Self::Sixty => 60,
+            Self::OneMinute => 1,
+            Self::FiveMinutes => 5,
+            Self::FifteenMinutes => 15,
+            Self::ThirtyMinutes => 30,
+            Self::OneHour => 60,
         }
     }
 
@@ -29,26 +31,79 @@ impl PauseDuration {
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::Five => "5 min",
-            Self::Fifteen => "15 min",
-            Self::Thirty => "30 min",
-            Self::Sixty => "60 min",
+            Self::OneMinute => "1 minute",
+            Self::FiveMinutes => "5 minutes",
+            Self::FifteenMinutes => "15 minutes",
+            Self::ThirtyMinutes => "30 minutes",
+            Self::OneHour => "1 hour",
+        }
+    }
+
+    pub(crate) const fn all() -> [Self; 5] {
+        [
+            Self::OneMinute,
+            Self::FiveMinutes,
+            Self::FifteenMinutes,
+            Self::ThirtyMinutes,
+            Self::OneHour,
+        ]
+    }
+
+    pub(crate) const fn pause_choices() -> [Self; 4] {
+        [
+            Self::FiveMinutes,
+            Self::FifteenMinutes,
+            Self::ThirtyMinutes,
+            Self::OneHour,
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DurationAction {
+    Start,
+    Stop,
+    Pause,
+}
+
+impl DurationAction {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Stop => "stop",
+            Self::Pause => "pause",
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PauseRequest {
-    Started { generation: u64, deadline: Instant },
-    Repeated { generation: u64, deadline: Instant },
+pub(crate) struct ScheduledAction {
+    pub(crate) action: DurationAction,
+    pub(crate) duration: DurationChoice,
+    pub(crate) deadline: Instant,
+    pub(crate) generation: u64,
+}
+
+impl ScheduledAction {
+    pub(crate) fn remaining(self, now: Instant) -> Duration {
+        self.deadline.saturating_duration_since(now)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PauseTimerEvent {
-    Expired {
-        generation: u64,
+pub(crate) enum ScheduleRequest {
+    Started(ScheduledAction),
+    Replaced {
+        previous: ScheduledAction,
+        current: ScheduledAction,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CoordinatorTimerEvent {
+    Expired(ScheduledAction),
     Early {
+        action: DurationAction,
         generation: u64,
         remaining: Duration,
     },
@@ -56,75 +111,90 @@ pub(crate) enum PauseTimerEvent {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct PauseController {
-    deadline: Option<Instant>,
+pub(crate) struct DurationCoordinator {
+    scheduled: Option<ScheduledAction>,
     generation: u64,
 }
 
-impl PauseController {
+impl DurationCoordinator {
     pub(crate) const fn new() -> Self {
         Self {
-            deadline: None,
+            scheduled: None,
             generation: 0,
         }
     }
 
     pub(crate) const fn active(self) -> bool {
-        self.deadline.is_some()
+        self.scheduled.is_some()
+    }
+
+    pub(crate) const fn pause_active(self) -> bool {
+        matches!(self.scheduled, Some(action) if matches!(action.action, DurationAction::Pause))
     }
 
     pub(crate) const fn generation(self) -> u64 {
         self.generation
     }
 
+    pub(crate) const fn current(self) -> Option<ScheduledAction> {
+        self.scheduled
+    }
+
     pub(crate) const fn deadline(self) -> Option<Instant> {
-        self.deadline
+        match self.scheduled {
+            Some(action) => Some(action.deadline),
+            None => None,
+        }
     }
 
-    pub(crate) fn request(&mut self, duration: PauseDuration, now: Instant) -> PauseRequest {
-        if let Some(deadline) = self.deadline {
-            return PauseRequest::Repeated {
-                generation: self.generation,
-                deadline,
-            };
-        }
+    pub(crate) fn schedule(
+        &mut self,
+        action: DurationAction,
+        duration: DurationChoice,
+        now: Instant,
+    ) -> ScheduleRequest {
         self.generation = self.generation.saturating_add(1);
-        let deadline = now + duration.duration().min(MAX_PAUSE_DURATION);
-        self.deadline = Some(deadline);
-        PauseRequest::Started {
+        let current = ScheduledAction {
+            action,
+            duration,
+            deadline: now + duration.duration().min(MAX_DURATION),
             generation: self.generation,
-            deadline,
-        }
-    }
-
-    pub(crate) fn resume(&mut self) -> bool {
-        if self.deadline.take().is_some() {
-            self.generation = self.generation.saturating_add(1);
-            true
-        } else {
-            false
-        }
-    }
-
-    pub(crate) fn timer_event(&self, generation: u64, now: Instant) -> PauseTimerEvent {
-        let Some(deadline) = self.deadline else {
-            return PauseTimerEvent::Stale;
         };
-        if generation != self.generation {
-            return PauseTimerEvent::Stale;
+        match self.scheduled.replace(current) {
+            Some(previous) => ScheduleRequest::Replaced { previous, current },
+            None => ScheduleRequest::Started(current),
         }
-        if now >= deadline {
-            PauseTimerEvent::Expired { generation }
+    }
+
+    pub(crate) fn cancel(&mut self) -> Option<ScheduledAction> {
+        let previous = self.scheduled.take();
+        if previous.is_some() {
+            self.generation = self.generation.saturating_add(1);
+        }
+        previous
+    }
+
+    pub(crate) fn timer_event(&self, generation: u64, now: Instant) -> CoordinatorTimerEvent {
+        let Some(action) = self.scheduled else {
+            return CoordinatorTimerEvent::Stale;
+        };
+        if generation != self.generation || generation != action.generation {
+            return CoordinatorTimerEvent::Stale;
+        }
+        let remaining = action.remaining(now);
+        if remaining.is_zero() {
+            CoordinatorTimerEvent::Expired(action)
         } else {
-            PauseTimerEvent::Early {
+            CoordinatorTimerEvent::Early {
+                action: action.action,
                 generation,
-                remaining: deadline.duration_since(now),
+                remaining,
             }
         }
     }
 }
 
-impl Default for PauseController {
+impl Default for DurationCoordinator {
     fn default() -> Self {
         Self::new()
     }
@@ -159,101 +229,127 @@ mod tests {
     }
 
     #[test]
-    fn fixed_choices_have_exact_bounded_durations() {
+    fn fixed_choices_cover_all_start_stop_and_pause_durations() {
         assert_eq!(
-            [
-                PauseDuration::Five,
-                PauseDuration::Fifteen,
-                PauseDuration::Thirty,
-                PauseDuration::Sixty,
-            ]
-            .map(PauseDuration::minutes),
+            DurationChoice::all().map(DurationChoice::minutes),
+            [1, 5, 15, 30, 60]
+        );
+        assert_eq!(
+            DurationChoice::pause_choices().map(DurationChoice::minutes),
             [5, 15, 30, 60]
         );
-        assert_eq!(PauseDuration::Sixty.duration(), MAX_PAUSE_DURATION);
-        assert_eq!(PauseDuration::Five.label(), "5 min");
+        assert_eq!(DurationChoice::OneHour.duration(), MAX_DURATION);
+        assert_eq!(DurationChoice::OneMinute.label(), "1 minute");
     }
 
     #[test]
-    fn first_pause_sets_a_monotonic_deadline_and_generation() {
+    fn each_action_sets_an_exact_monotonic_deadline_and_generation() {
         let now = start();
-        let mut pause = PauseController::new();
-        let PauseRequest::Started {
-            generation,
-            deadline,
-        } = pause.request(PauseDuration::Fifteen, now)
-        else {
-            panic!("first pause must start");
-        };
-        assert_eq!(generation, 1);
-        assert_eq!(deadline.duration_since(now), Duration::from_secs(15 * 60));
-        assert!(pause.active());
+        for action in [
+            DurationAction::Start,
+            DurationAction::Stop,
+            DurationAction::Pause,
+        ] {
+            let mut coordinator = DurationCoordinator::new();
+            let ScheduleRequest::Started(scheduled) =
+                coordinator.schedule(action, DurationChoice::FifteenMinutes, now)
+            else {
+                panic!("first schedule must start");
+            };
+            assert_eq!(scheduled.action, action);
+            assert_eq!(scheduled.generation, 1);
+            assert_eq!(scheduled.remaining(now), Duration::from_secs(15 * 60));
+        }
     }
 
     #[test]
-    fn repeated_pause_does_not_extend_the_deadline() {
+    fn all_fixed_duration_choices_have_exact_deadlines_for_start_and_stop() {
         let now = start();
-        let mut pause = PauseController::new();
-        let first = pause.request(PauseDuration::Five, now);
-        let repeated = pause.request(PauseDuration::Sixty, now + Duration::from_secs(1));
-        assert_eq!(
-            repeated,
-            match first {
-                PauseRequest::Started {
-                    generation,
-                    deadline,
-                } => PauseRequest::Repeated {
-                    generation,
-                    deadline,
-                },
-                PauseRequest::Repeated { .. } => unreachable!(),
+        for action in [DurationAction::Start, DurationAction::Stop] {
+            for duration in DurationChoice::all() {
+                let mut coordinator = DurationCoordinator::new();
+                let ScheduleRequest::Started(scheduled) =
+                    coordinator.schedule(action, duration, now)
+                else {
+                    panic!("first schedule must start");
+                };
+                assert_eq!(scheduled.action, action);
+                assert_eq!(scheduled.remaining(now), duration.duration());
             }
-        );
+        }
     }
 
     #[test]
-    fn resume_clears_pause_and_invalidates_the_old_generation() {
+    fn replacement_is_latest_wins_and_only_one_action_remains() {
         let now = start();
-        let mut pause = PauseController::new();
-        pause.request(PauseDuration::Five, now);
-        assert!(pause.resume());
-        assert!(!pause.active());
+        let mut coordinator = DurationCoordinator::new();
+        let ScheduleRequest::Started(first) =
+            coordinator.schedule(DurationAction::Start, DurationChoice::FiveMinutes, now)
+        else {
+            panic!("first schedule must start");
+        };
+        let ScheduleRequest::Replaced { previous, current } = coordinator.schedule(
+            DurationAction::Stop,
+            DurationChoice::OneHour,
+            now + Duration::from_secs(1),
+        ) else {
+            panic!("second schedule must replace");
+        };
+        assert_eq!(previous, first);
+        assert_eq!(current.action, DurationAction::Stop);
+        assert_eq!(coordinator.current(), Some(current));
+        assert!(!coordinator.pause_active());
+    }
+
+    #[test]
+    fn pause_is_active_immediately_and_pause_choice_is_bounded() {
+        let now = start();
+        let mut coordinator = DurationCoordinator::new();
+        coordinator.schedule(DurationAction::Pause, DurationChoice::FiveMinutes, now);
+        assert!(coordinator.active());
+        assert!(coordinator.pause_active());
         assert_eq!(
-            pause.timer_event(1, now + Duration::from_secs(600)),
-            PauseTimerEvent::Stale
+            coordinator.timer_event(1, now + Duration::from_secs(300)),
+            CoordinatorTimerEvent::Expired(coordinator.current().unwrap())
         );
-        assert!(!pause.resume());
     }
 
     #[test]
-    fn timer_expiration_is_exact_and_early_events_are_bounded() {
+    fn cancellation_invalidates_the_old_generation() {
         let now = start();
-        let mut pause = PauseController::new();
-        pause.request(PauseDuration::Five, now);
+        let mut coordinator = DurationCoordinator::new();
+        coordinator.schedule(DurationAction::Start, DurationChoice::FiveMinutes, now);
+        let old_generation = coordinator.generation();
+        assert!(coordinator.cancel().is_some());
+        assert!(!coordinator.active());
+        assert_eq!(
+            coordinator.timer_event(old_generation, now + Duration::from_secs(600)),
+            CoordinatorTimerEvent::Stale
+        );
+        assert!(coordinator.cancel().is_none());
+    }
+
+    #[test]
+    fn stale_replacement_generation_cannot_fire_the_new_action() {
+        let now = start();
+        let mut coordinator = DurationCoordinator::new();
+        coordinator.schedule(DurationAction::Pause, DurationChoice::FiveMinutes, now);
+        coordinator.schedule(
+            DurationAction::Start,
+            DurationChoice::ThirtyMinutes,
+            now + Duration::from_secs(1),
+        );
+        assert_eq!(
+            coordinator.timer_event(1, now + Duration::from_secs(600)),
+            CoordinatorTimerEvent::Stale
+        );
         assert!(matches!(
-            pause.timer_event(1, now + Duration::from_secs(1)),
-            PauseTimerEvent::Early { remaining, .. } if remaining == Duration::from_secs(299)
-        ));
-        assert_eq!(
-            pause.timer_event(1, now + Duration::from_secs(300)),
-            PauseTimerEvent::Expired { generation: 1 }
-        );
-    }
-
-    #[test]
-    fn stale_timer_generation_is_ignored() {
-        let now = start();
-        let mut pause = PauseController::new();
-        pause.request(PauseDuration::Five, now);
-        pause.resume();
-        pause.request(PauseDuration::Thirty, now);
-        assert_eq!(
-            pause.timer_event(1, now + Duration::from_secs(600)),
-            PauseTimerEvent::Stale
-        );
-        assert!(matches!(
-            pause.timer_event(3, now + Duration::from_secs(1)),
-            PauseTimerEvent::Early { generation: 3, .. }
+            coordinator.timer_event(2, now + Duration::from_secs(2)),
+            CoordinatorTimerEvent::Early {
+                action: DurationAction::Start,
+                generation: 2,
+                ..
+            }
         ));
     }
 
@@ -273,18 +369,9 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_clears_a_session_pause_without_persisting_it() {
-        let now = start();
-        let mut pause = PauseController::new();
-        pause.request(PauseDuration::Five, now);
-        assert!(pause.resume());
-        assert!(!pause.active());
-    }
-
-    #[test]
     fn timer_interval_is_at_least_one_and_hard_bounded() {
         assert_eq!(timer_interval_ms(Duration::ZERO), 1);
-        assert_eq!(timer_interval_ms(MAX_PAUSE_DURATION), MAX_TIMER_INTERVAL_MS);
+        assert_eq!(timer_interval_ms(MAX_DURATION), MAX_TIMER_INTERVAL_MS);
         assert_eq!(
             timer_interval_ms(Duration::from_secs(60 * 60 + 1)),
             MAX_TIMER_INTERVAL_MS
