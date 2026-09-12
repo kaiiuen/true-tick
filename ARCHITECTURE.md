@@ -163,3 +163,11 @@ satisfies the postcondition. A lower current value is explicitly finer than
 requested. A higher current value is unverified. Current observation verifies
 only the available system power query and one power broadcast path. Full Battery
 Saver, session, lock, suspend, and resume notification support is not claimed.
+
+## Audited v1 tray and diagnostic surface
+
+The current native menu is ordered as `True™ Tick v<version>`, `Start`, `Pause >`, `Stop`, `Schedule >`, `Auto-start`, `Auto-time`, `Status >`, `Logs`, and `Quit`. Pause has fixed 5 minute, 15 minute, 30 minute, and 1 hour choices. Schedule has Start in, Stop in, and Cancel scheduled action. There is no custom duration, persistence, stacking, or indefinite pause. Start is disabled while paused and the read-only Status rows explain the paused state. Logs is not duplicated inside Status.
+
+The active popup retains its root, Pause, Schedule, and Status handles. A popup-only 500 ms UI timer refreshes countdown text, Status rows, ownership, Next action, Start and Stop enabled states, and cancellation state. It is active only during `TrackPopupMenu`, is killed before menu destruction, and does not touch the authoritative deadline or handoff timers. Positive fractional remaining seconds are rounded upward, while elapsed durations remain floored.
+
+The diagnostic window has an explicit summary control and a native `SysListView32` report control. Its columns are `Sequence`, `Elapsed`, `Operation`, `Parent`, `Correlation`, `Phase`, `Source`, `Outcome`, `Event`, and `Details`. Typed `DiagnosticEvent` fields populate the rows directly. The bounded Details cell preserves raw HNS, typed NTSTATUS and Win32 last-error values, timing observations, schedule generations, and operation lineage. Refreshes are posted and coalesced on the UI message loop. The report is read-only, session-local, newest-retained, capped at 512 events, and marked when truncation occurs. A failed timing observation is `Unknown` rather than stale current data. Closing Logs does not change timer state.

@@ -170,3 +170,11 @@ reported as degraded and blocks acquisition. A/B selection is a safe local
 scaffold. Missing or invalid active-slot metadata requires repair. It does not
 verify a signed package or perform rollback. No package, installer, signed
 artifact, tag, GitHub Release, or public publication is created here.
+
+## Audited v1 UX and diagnostics update
+
+The current menu hierarchy is `True™ Tick v<version>`, `Start`, `Pause >`, `Stop`, `Schedule >`, `Auto-start`, `Auto-time`, `Status >`, `Logs`, and `Quit`. Pause has fixed 5 minute, 15 minute, 30 minute, and 1 hour choices. Schedule has Start in, Stop in, and Cancel scheduled action. Start is disabled while paused. Status contains only read-only State, Timing, Running for, Next action, and Ownership rows. Logs is a separate clickable action.
+
+An open popup retains its native menu handles and runs a popup-only 500 ms refresh timer. It updates positive-ceiling countdowns, live Status values, ownership, Next action, Start and Stop enabled state, and cancellation state. The timer ends before menu destruction. It never changes policy, acquires timing, releases timing, or replaces the authoritative deadline or handoff timer. A five-minute pause initially displays `5m 0s`. Elapsed durations remain floored.
+
+Logs now shows a concise summary and a read-only native `SysListView32` grid. The columns are `Sequence`, `Elapsed`, `Operation`, `Parent`, `Correlation`, `Phase`, `Source`, `Outcome`, `Event`, and `Details`. Rows come from typed diagnostic fields. Details preserve raw HNS, operation lineage, pause and schedule generations, timing observations, NTSTATUS, and Win32 error values. Refresh is coalesced through the UI message loop. The local session retains at most 512 newest events and one truncation marker. It is not disk telemetry. Unknown or stale timing evidence is displayed as `Unknown`.
