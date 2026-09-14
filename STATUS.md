@@ -27,14 +27,21 @@ from automatic timer activation after the application has launched. Secure
 signatures and rollback are not implemented.
 
 The tray starts with a clickable `True™ Tick v<version>` header sourced from Cargo
-package metadata. It has compact `Start`, `Stop`, a primary `Pause for >` submenu, a
-`Schedule >` submenu, `Auto-start: On/Off`, `Auto-time: On/Off`, a read-only
-`Status >` submenu, `Logs`, and Quit. The declared menu vector in `tray_surface.rs` and the rendered menu both use `Pause for >`. Pause has 5 minute, 15 minute, 30 minute, and 1 hour
-choices. Schedule has Start in, Stop in, Cancel scheduled action, and `Resume now`
-when a pause is active. There is no duplicate Pause action, custom duration,
-persistence, stacking, or indefinite pause. Start is explicitly disabled while a pause is active. Auto-start launches the app at Windows
-login. Auto-time controls automatic timing acquisition and defaults to off. Both
-tray release notifications open the same compact menu. Button-down and double-click
+package metadata. Root menu order is `True™ Tick v<version>`, a separator,
+`Start`, `Stop`, `Schedule >`, a separator, `Auto-start: On/Off`,
+`Auto-time: On/Off`, a separator, a read-only `Status >` submenu, `Logs`, a
+separator, and `Quit`. Start and stop are primary and stay at the top. Scheduling
+and pausing are secondary and now share one submenu instead of two, so there is
+a single duration surface. `Schedule >` contents, in order, are `Start in >`,
+`Stop in >`, `Pause for >`, a separator, `Cancel scheduled action`, and `Resume
+now`. The declared menu vector in `tray_surface.rs` and the rendered menu both use
+`Pause for >`. Pause has fixed 5 minute, 15 minute, 30 minute, and 1 hour
+choices. Schedule has Start in, Stop in, Pause for, Cancel scheduled action, and
+`Resume now` when a pause is active. There are no two scheduling surfaces, custom
+duration, persistence, stacking, or indefinite pause. Start is explicitly disabled
+while a pause is active. Auto-start launches the app at Windows login. Auto-time
+controls automatic timing acquisition and defaults to off. Both tray release
+notifications open the same compact menu. Button-down and double-click
 notifications are ignored to avoid duplicate menus.
 
 Status contains disabled State, Timing, Running for, Next action, and Ownership rows.
@@ -197,7 +204,7 @@ The tooltip and icon consume the same derived lifecycle state. Verified Running 
 
 ## Audited v1 UX and diagnostics update
 
-The current menu hierarchy is `True™ Tick v<version>`, `Start`, `Stop`, `Pause for >`, `Schedule >`, `Auto-start`, `Auto-time`, `Status >`, `Logs`, and `Quit`. The declared label vector in `tray_surface.rs` and the rendered menu both use `Pause for >`. Pause is one primary submenu with fixed 5 minute, 15 minute, 30 minute, and 1 hour choices. Schedule has Start in, Stop in, Cancel scheduled action, and `Resume now` when a pause is active. There is no duplicate Pause action. Start is disabled while paused. Status contains only read-only State, Timing, Running for, Next action, and Ownership rows. Logs is a separate clickable action below `Status >`, not an entry inside Status.
+The current menu hierarchy is `True™ Tick v<version>`, a separator, `Start`, `Stop`, `Schedule >`, a separator, `Auto-start`, `Auto-time`, a separator, `Status >`, `Logs`, a separator, and `Quit`. Start and stop are primary and stay at the top. Scheduling and pausing are secondary and now share one submenu instead of two, so there is a single duration surface. Inside `Schedule >`, contents are, in order, `Start in >`, `Stop in >`, `Pause for >`, a separator, `Cancel scheduled action`, and `Resume now`. The declared label vector in `tray_surface.rs` and the rendered menu both use `Pause for >`. Pause contains fixed 5 minute, 15 minute, 30 minute, and 1 hour choices. Schedule has Start in, Stop in, Pause for, Cancel scheduled action, and `Resume now` when a pause is active. There are no two scheduling surfaces, custom duration, persistence, stacking, or indefinite pause. Start is disabled while paused. Status contains only read-only State, Timing, Running for, Next action, and Ownership rows. Logs is a separate clickable action below `Status >`, not an entry inside Status.
 
 An open popup retains its native menu handles and runs a popup-only 500 ms refresh timer for live Status values, ownership, Next action, Start and Stop enabled state, and cancellation state. A separate one-second UI timer runs only while a schedule or pause is active. Its publication key includes the schedule generation and rounded remaining-second bucket, so the shell tooltip receives `Shell_NotifyIconW(NIM_MODIFY)` for each displayed countdown change. These timers never change policy, acquire timing, release timing, or replace the authoritative deadline or handoff timer. A five-minute pause initially displays `5m 0s`. Elapsed durations remain floored.
 
