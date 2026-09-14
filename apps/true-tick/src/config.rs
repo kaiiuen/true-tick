@@ -1,6 +1,8 @@
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tick_core::Hns;
 
 pub const MAX_CONFIG_FILE_BYTES: usize = 64 * 1024;
@@ -84,8 +86,24 @@ pub fn load_with_migration(path: &Path) -> Result<(Config, bool), ConfigError> {
     Ok((config, migrated))
 }
 
+/// Per process sequence that keeps concurrent saves from sharing a temporary file.
+static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Builds a temporary name beside the target so the replacement stays on one volume.
+/// The name keeps the `*.toml.tmp` ignore pattern and adds the process id plus a
+/// monotonic counter for uniqueness.
+fn temporary_path_for(path: &Path) -> PathBuf {
+    let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mut name = path
+        .file_stem()
+        .unwrap_or_else(|| OsStr::new("true-tick"))
+        .to_os_string();
+    name.push(format!(".{}.{}.toml.tmp", std::process::id(), sequence));
+    path.parent().unwrap_or_else(|| Path::new(".")).join(name)
+}
+
 pub fn save_atomic(path: &Path, config: &Config) -> Result<(), ConfigError> {
-    let temporary = path.with_extension("toml.tmp");
+    let temporary = temporary_path_for(path);
     let text = format!(
         "automatic = {}\nstartup_enabled = {}\nrequest_interval_hns = {}\n",
         config.automatic,
@@ -315,6 +333,71 @@ mod tests {
         fs::write(&path, *b"a\xff").unwrap();
         assert!(load(&path).is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn consecutive_saves_leave_the_second_content() {
+        let root = std::env::temp_dir().join(format!(
+            "true-tick-config-consecutive-{}",
+            std::process::id()
+        ));
+        let path = root.join("true-tick.toml");
+        fs::create_dir_all(&root).unwrap();
+        let first = Config {
+            automatic: false,
+            startup_enabled: true,
+            request_interval: AUTOMATIC_REQUEST_INTERVAL,
+        };
+        let second = Config {
+            automatic: true,
+            startup_enabled: false,
+            request_interval: Hns::new(2_000_000),
+        };
+        save_atomic(&path, &first).unwrap();
+        save_atomic(&path, &second).unwrap();
+        assert_eq!(load(&path).unwrap(), second);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn successful_save_leaves_no_temporary_file() {
+        let root =
+            std::env::temp_dir().join(format!("true-tick-config-cleanup-{}", std::process::id()));
+        let path = root.join("true-tick.toml");
+        fs::create_dir_all(&root).unwrap();
+        save_atomic(&path, &Config::default()).unwrap();
+        let leftovers: Vec<PathBuf> = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().ends_with(".toml.tmp"))
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temporary files remained: {leftovers:?}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn temporary_names_differ_for_consecutive_saves() {
+        let path = Path::new("true-tick.toml");
+        let first = temporary_path_for(path);
+        let second = temporary_path_for(path);
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), path.parent());
+        assert_eq!(second.parent(), path.parent());
+        for name in [&first, &second] {
+            let file_name = name.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(
+                file_name.ends_with(".toml.tmp"),
+                "unexpected name {file_name}"
+            );
+            assert!(file_name.contains(&std::process::id().to_string()));
+        }
     }
 
     #[test]

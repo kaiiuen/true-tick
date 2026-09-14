@@ -642,7 +642,7 @@ pub fn run() {
     unsafe {
         let diagnostics = Arc::new(DiagnosticStore::new(DEFAULT_MAX_EVENTS));
         diagnostics.record("lifecycle.start", "application_start");
-        let executable = get_module_file_name_w_path();
+        let executable = get_module_file_name_w_path_with_diagnostics(Some(&diagnostics));
         diagnostics.record("lifecycle.executable_observed", "path=redacted");
         if let Ok(root) = crate::portable::portable_root_from_slot_executable(&executable) {
             let selection = crate::portable::select(&root);
@@ -6444,6 +6444,26 @@ fn set_automatic(app: &mut App, enabled: bool) {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartupRollback {
+    /// Leaving the written value in place is the only non-destructive inverse after an enable.
+    SkipDestructiveInverse,
+    /// Re-registering restores the state that the persisted configuration still describes.
+    RestoreRegistration,
+}
+
+/// A rollback must never delete a current-user Run value that this process did not create. The
+/// inverse of a successful enable is therefore deliberately not a removal. The persisted
+/// configuration still records the previous state, so the next launch reconciles the registry
+/// through the ordinary startup decision path.
+const fn startup_rollback(enabled: bool) -> StartupRollback {
+    if enabled {
+        StartupRollback::SkipDestructiveInverse
+    } else {
+        StartupRollback::RestoreRegistration
+    }
+}
+
 fn set_startup(app: &mut App, enabled: bool) {
     app.record("tray.command", format!("command=startup enabled={enabled}"));
     app.record(
@@ -6530,14 +6550,18 @@ fn set_startup(app: &mut App, enabled: bool) {
             "config.save.result",
             format!("result=error setting=startup_enabled error={error}"),
         );
-        let rollback = if enabled {
-            let mut startup = WindowsUserStartup;
-            startup.remove()
-        } else {
-            match startup_target(&app.executable) {
+        let rollback = match startup_rollback(enabled) {
+            StartupRollback::SkipDestructiveInverse => {
+                app.record(
+                    "startup.registration.rollback_skipped",
+                    "reason=non_destructive_policy value=TrueTick",
+                );
+                Ok(())
+            }
+            StartupRollback::RestoreRegistration => match startup_target(&app.executable) {
                 Ok(target) => register_startup_target(&target),
                 Err(_error) => Err(tick_startup_windows::StartupError::InvalidExecutablePath),
-            }
+            },
         };
         app.record(
             "startup.registration.rollback",
@@ -6550,7 +6574,9 @@ fn set_startup(app: &mut App, enabled: bool) {
                 app.config.startup_enabled
             ),
         );
-        app.startup_status = bounded_startup_status(if rollback.is_ok() {
+        app.startup_status = bounded_startup_status(if enabled {
+            "startup config persistence failed, registry left enabled and repair is required"
+        } else if rollback.is_ok() {
             "startup config persistence failed, registry change rolled back"
         } else {
             "startup config persistence failed, repair required"
@@ -6922,14 +6948,80 @@ struct IconInfo {
     h_bm_color: *mut c_void,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ModulePathGrowthDecision {
+    Accept(usize),
+    Grow(usize),
+    GiveUp,
+}
+
+const MODULE_PATH_INITIAL_CAPACITY: usize = 260;
+const MODULE_PATH_MAX_ATTEMPTS: usize = 8;
+const MODULE_PATH_MAX_CAPACITY: usize = 32_768;
+
+fn module_path_growth_decision(
+    length: u32,
+    buffer_capacity: usize,
+    attempts: usize,
+) -> ModulePathGrowthDecision {
+    if length == 0 {
+        return ModulePathGrowthDecision::GiveUp;
+    }
+    let length_usize = length as usize;
+    if length_usize < buffer_capacity {
+        ModulePathGrowthDecision::Accept(length_usize)
+    } else if attempts >= MODULE_PATH_MAX_ATTEMPTS || buffer_capacity >= MODULE_PATH_MAX_CAPACITY {
+        ModulePathGrowthDecision::GiveUp
+    } else {
+        let next_capacity = buffer_capacity
+            .saturating_mul(2)
+            .min(MODULE_PATH_MAX_CAPACITY);
+        if next_capacity > buffer_capacity {
+            ModulePathGrowthDecision::Grow(next_capacity)
+        } else {
+            ModulePathGrowthDecision::GiveUp
+        }
+    }
+}
+
+unsafe fn get_module_file_name_w_path_with_diagnostics(
+    diagnostics: Option<&DiagnosticStore>,
+) -> PathBuf {
+    let mut capacity = MODULE_PATH_INITIAL_CAPACITY;
+    let mut attempts = 0usize;
+
+    loop {
+        let mut buffer = vec![0u16; capacity];
+        let length = GetModuleFileNameW(
+            std::ptr::null_mut(),
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+        );
+        match module_path_growth_decision(length, capacity, attempts) {
+            ModulePathGrowthDecision::Accept(valid_length) => {
+                return String::from_utf16_lossy(&buffer[..valid_length]).into();
+            }
+            ModulePathGrowthDecision::Grow(next_capacity) => {
+                capacity = next_capacity;
+                attempts = attempts.saturating_add(1);
+            }
+            ModulePathGrowthDecision::GiveUp => {
+                let raw_status = GetLastError();
+                if let Some(store) = diagnostics {
+                    store.record(
+                        "native.GetModuleFileNameW.error",
+                        format!("raw_status={raw_status}"),
+                    );
+                }
+                return PathBuf::new();
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
 unsafe fn get_module_file_name_w_path() -> PathBuf {
-    let mut buffer = [0u16; 260];
-    let length = GetModuleFileNameW(
-        std::ptr::null_mut(),
-        buffer.as_mut_ptr(),
-        buffer.len() as u32,
-    );
-    String::from_utf16_lossy(&buffer[..length as usize]).into()
+    get_module_file_name_w_path_with_diagnostics(None)
 }
 
 #[link(name = "kernel32")]
@@ -7320,6 +7412,18 @@ mod tests {
     }
 
     #[test]
+    fn startup_rollback_never_deletes_a_value_after_an_enable() {
+        assert_eq!(
+            startup_rollback(true),
+            StartupRollback::SkipDestructiveInverse
+        );
+        assert_eq!(
+            startup_rollback(false),
+            StartupRollback::RestoreRegistration
+        );
+    }
+
+    #[test]
     fn common_controls_initialization_uses_list_view_and_tooltip_classes() {
         let init = common_controls_initialization_contract();
         assert_eq!(init.size as usize, size_of::<InitCommonControlsEx>());
@@ -7694,5 +7798,37 @@ mod tests {
         };
         assert_eq!(app_create_params(&create), create.create_params);
         assert!(app_create_params(std::ptr::null()).is_null());
+    }
+
+    #[test]
+    fn module_path_growth_decision_handles_adequate_insufficient_and_give_up() {
+        assert_eq!(
+            module_path_growth_decision(100, 260, 0),
+            ModulePathGrowthDecision::Accept(100)
+        );
+        assert_eq!(
+            module_path_growth_decision(259, 260, 0),
+            ModulePathGrowthDecision::Accept(259)
+        );
+        assert_eq!(
+            module_path_growth_decision(260, 260, 0),
+            ModulePathGrowthDecision::Grow(520)
+        );
+        assert_eq!(
+            module_path_growth_decision(300, 260, 0),
+            ModulePathGrowthDecision::Grow(520)
+        );
+        assert_eq!(
+            module_path_growth_decision(0, 260, 0),
+            ModulePathGrowthDecision::GiveUp
+        );
+        assert_eq!(
+            module_path_growth_decision(260, 260, MODULE_PATH_MAX_ATTEMPTS),
+            ModulePathGrowthDecision::GiveUp
+        );
+        assert_eq!(
+            module_path_growth_decision(32_768, 32_768, 0),
+            ModulePathGrowthDecision::GiveUp
+        );
     }
 }
