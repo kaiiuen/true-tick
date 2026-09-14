@@ -4,9 +4,9 @@
 
 ## Current lifecycle contract
 
-The timer lifecycle controls the user-visible state. An active release handoff is always yellow `Stopping, handoff` with concise text such as `True™ Tick: Stopping, handoff · 0.497 ms`. Startup registration, configuration persistence, logging, and other diagnostics are separate evidence and cannot publish red lifecycle failure over a live handoff. The icon color is derived from the same lifecycle state as the text. Handoff completion clears the tracker and publishes red `Stopped` with actual current effective timing. A bounded timeout clears the tracker and publishes red `Stopped` with actual current effective timing while ownership remains released.
+The timer lifecycle controls the user-visible state. An active release handoff is always yellow `Stopping, handoff` with concise text such as `True™ Tick: Stopping, handoff · 0.497 ms`. Startup registration, configuration persistence, logging, and other diagnostics are separate evidence and cannot publish red lifecycle failure over a live handoff. The icon color is derived from the same lifecycle state as the text. Handoff completion clears the tracker and publishes red `Stopped` with actual current effective timing in the standard `True™ Tick: Stopped · <timing>` tooltip format. A bounded timeout clears the tracker and publishes red `Stopped` with actual current effective timing while ownership remains released. The tooltip always uses `True™ Tick: <state> · <timing>`, and parenthetical forms such as `Stopped (current: X ms)` or `Stopped (external: X ms)` do not exist anywhere in the application.
 
-Desired intent is latest-wins `Acquire` or `Release`. Start, Stop, Auto-time, and power changes use this queue and the same serialized ownership path. A request during `Starting` or `Stopping` is retained until the transition completes or times out. Repeated requests do not issue duplicate native calls. Quit uses ownership, handoff, and uncertain state together, so it cannot exit while cleanup remains unresolved.
+Desired intent is latest-wins `Acquire` or `Release`. Start, Stop, Auto-time, and power changes use this queue and the same serialized ownership path. A request during `Starting` or `Stopping` is retained until the transition completes or times out. Repeated requests do not issue duplicate native calls. A panic path must attempt an explicit release, and startup must presume zero prior ownership without writing a guessed default. Quit uses ownership, handoff, and uncertain state together, so it cannot exit while cleanup remains unresolved.
 
 One synchronized timing snapshot supplies the tray tooltip, menu status, diagnostic header, handoff classification, and logs. Requested, selected, effective, bounds, raw status, and validity are distinct fields. A failed current query clears effective timing to unknown. Handoff polling observes the stored release boundary without selecting a new interval. Live interval selection remains query-driven. Zero is the automatic sentinel. The named legacy migration value is not a live request default. Resolution examples and fixtures are restricted to tests and migration material. Handoff interval and poll budget are separate handoff policy values.
 
@@ -27,12 +27,12 @@ from automatic timer activation after the application has launched. Secure
 signatures and rollback are not implemented.
 
 The tray starts with a clickable `True™ Tick v<version>` header sourced from Cargo
-package metadata. It has compact `Start`, `Stop`, a primary `Pause >` submenu, a
+package metadata. It has compact `Start`, `Stop`, a primary `Pause for >` submenu, a
 `Schedule >` submenu, `Auto-start: On/Off`, `Auto-time: On/Off`, a read-only
-`Status` submenu, and Quit. Pause has 5 minute, 15 minute, 30 minute, and 1 hour
+`Status >` submenu, `Logs`, and Quit. The declared menu vector in `tray_surface.rs` and the rendered menu both use `Pause for >`. Pause has 5 minute, 15 minute, 30 minute, and 1 hour
 choices. Schedule has Start in, Stop in, Cancel scheduled action, and `Resume now`
 when a pause is active. There is no duplicate Pause action, custom duration,
-persistence, stacking, or indefinite pause. Auto-start launches the app at Windows
+persistence, stacking, or indefinite pause. Start is explicitly disabled while a pause is active. Auto-start launches the app at Windows
 login. Auto-time controls automatic timing acquisition and defaults to off. Both
 tray release notifications open the same compact menu. Button-down and double-click
 notifications are ignored to avoid duplicate menus.
@@ -43,8 +43,8 @@ hover description without enabling the row. The descriptions are `Current True T
 lifecycle state`, `Latest verified effective timing observation`, `Elapsed time since
 verified running`, `Scheduled action and remaining time`, and `True Tick ownership
 versus external timing`. Disabled rows cannot dispatch actions or open Logs.
-Logs is the only clickable Status row. Status and Logs do not change timer state.
-The Timing row uses the current authoritative effective snapshot and shows `Unknown`
+`Logs` is a separate top-level item below `Status >`, not a row inside Status. Status and Logs do not change timer state.
+The Status Timing row uses the current authoritative effective snapshot and shows `Timing unknown`
 when evidence is invalid or stale. Running for uses monotonic time from the last
 verified Running transition. The `Logs` command opens a normal taskbar diagnostic
 window titled `True™ Tick Status and Diagnostics` without changing timer state. It
@@ -65,8 +65,8 @@ turns green only after a verified request. The tray tooltip uses actual concise
 values such as `True™ Tick: Running · 0.497 ms`, `True™ Tick: Stopped · 0.997 ms`,
 `True™ Tick: Starting · 0.997 ms`, `True™ Tick: Stopping · 0.497 ms`,
 `True™ Tick: Warning`, and `True™ Tick: Error`. Scheduled and paused states use
-`Starting in 5m · 0.997 ms`, `Stopping in 5m · 0.497 ms`, and
-`Paused for 5m · 0.997 ms`. Invalid evidence uses `Timing unknown`. After a successful request, the returned verified effective
+`True™ Tick: Starting in 5m 0s · 0.997 ms`, `True™ Tick: Stopping in 5m 0s · 0.497 ms`, and
+`True™ Tick: Paused for 5m 0s · 0.997 ms`. Countdowns explicitly include seconds. Invalid evidence uses `Timing unknown`. The diagnostic HUD state row shows a plain state word without a parenthetical timing value. After a successful request, the returned verified effective
 observation replaces the preflight current value in the controller and app snapshot.
 Release observations update that same snapshot. A remaining finer or different value
 is displayed as external effective state and does not claim Tick ownership. Query,
@@ -77,31 +77,40 @@ boundaries, selected HNS, requested HNS, effective HNS, and an `equal`, `finer`,
 or `unverified` effective relation. The window shows a local in-memory session log
 from process start through the current moment. It uses monotonic sequence numbers
 and elapsed process time, has a default 512 event bound, retains newest events with
-a truncation marker, and defers disk persistence. The diagnostic header uses the
+a truncation marker, and defers disk persistence. The grid shows a one-based retained
+row index separately from the monotonic sequence identity, resolving selection confusion
+after truncation. The diagnostic header uses the
 latest verified effective observation and keeps requested HNS, selected HNS,
 effective HNS, raw boundaries, raw status, and relation distinct. The report rows
 use typed `DiagnosticEvent` values across eleven columns through the native
-`SysListView32` control. Fields are
-sanitized and bounded so raw pointers, credentials, private tokens, arbitrary
+`SysListView32` control. A fourteen-variant phase enum replaces arbitrary lifecycle strings,
+an eleven-variant source enum identifies exact event ingress origins, and an outcome enum
+separates normal policy suppression and no-op states from failures. Total event count and distinct
+operation context count are tracked separately and must not be conflated in the interface.
+A status change event is recorded only when derived status or displayed timing actually changes,
+preventing event churn and premature buffer eviction.
+Fields are sanitized and bounded so raw pointers, credentials, private tokens, arbitrary
 secrets, and unbounded sensitive paths are not recorded. Ownership state is
 logged separately from effective system state. After release, a remaining finer
 value is labeled external without claiming Tick ownership, and a later query
 may show the effective value returning to baseline. A successful owned release that leaves a remaining external effective value enters yellow `Stopping, handoff`.
 The active-only watcher queries every 250 ms for at most 12 observations. It turns
-red with `Stopped (current: X ms)` when the value is no longer finer. On timeout it
-turns red with `Stopped (external: X ms)` and logs released ownership with another
+red with `Stopped` and current effective timing when the value is no longer finer. On timeout it
+turns red with `Stopped` and external timing, logging released ownership with another
 or unknown finer client. Battery-policy and other owned-request releases use the same
 handoff classification.
 
 Startup always queries current timing after the tray surface is ready, even when
 Tick is stopped and Auto-time is off. A successful query displays stopped current
 timing without claiming ownership. A failed query displays `Stopped · Timing unknown` and records the failure. The selected or requested boundary remains
-separate from the current effective observation.
+separate from the current effective observation. A missing configuration file falls
+back to defaults with a red status, explaining the red startup state on a fresh extraction.
 
 Power broadcasts refresh timing and recalculate the visible state whether
 Auto-time is on or off. With Auto-time off, AC and no owned request show stopped
-current timing and wait for manual Start. Battery, Battery Saver, and unknown
-power release owned timing conservatively and retain the policy reason. AC with
+current timing and wait for manual Start. Returning to AC with auto-time off transitions
+to stopped with current timing and waits for a manual start rather than staying blocked.
+Battery, Battery Saver, and unknown power release owned timing conservatively and retain the policy reason. AC with
 Auto-time on attempts acquisition. Battery-to-AC with Auto-time off shows
 stopped current timing rather than remaining blocked.
 Configuration writes use a flushed temporary file replacement. Parse and write
@@ -128,7 +137,11 @@ command validation, exactly-once returned-command dispatch, and deterministic
 burst and repeated-command tests. Normal message-loop exit and `GetMessageW`
 failure are modeled separately. The cleanup gate attempts owned-request release
 once per successful path, keeps a usable loop open when cleanup is unresolved,
-and destroys tray, diagnostic, and callback resources before dropping `App`.
+and destroys tray, diagnostic, and callback resources before dropping `App`. Separator
+handles created during window creation must be stored, otherwise required-child validation
+destroys the window. Summary and state text updates check and log native errors,
+trapping silently failed control updates. Repeated identical layout failures coalesce
+with a bounded count and never report completed.
 Power query failure clears stale AC or battery state to `Unknown`, records the
 structured error, blocks acquisition, and follows conservative release policy.
 Configuration files, parser fields, diagnostic fields, startup status, and native
@@ -180,15 +193,15 @@ hand testing, and it is not published.
 
 ## Tray tooltip and ownership contract
 
-The tooltip and icon consume the same derived lifecycle state. Verified Running is green. Stopped is red. Scheduled, paused, transitioning, handoff, and unverified states are yellow. Warning, Error, and policy-blocked states retain the existing safety mapping. Timing comes from the authoritative current effective snapshot. Requested and selected values never appear in the compact tooltip. Positive remaining schedule and pause durations round upward from the monotonic deadline. A plain Paused state has no countdown. Popup Status rows use the same state and timing source, with more detail in the running duration, next action, and ownership rows. The context-menu status row does not repeat the brand.
+The tooltip and icon consume the same derived lifecycle state. Verified Running is green. Stopped is red. Scheduled, paused, transitioning, handoff, and unverified states are yellow. Warning, Error, and policy-blocked states retain the existing safety mapping. Timing comes from the authoritative current effective snapshot. Requested and selected values never appear in the compact tooltip. Positive remaining schedule and pause durations round upward from the monotonic deadline, and countdowns always include seconds (`5m 0s`). A plain Paused state has no countdown. The tooltip always uses `True™ Tick: <state> · <timing>`, and parenthetical stopped forms are never rendered. Popup Status rows use the same state and timing source, with more detail in the running duration, next action, and ownership rows. The context-menu status row does not repeat the brand.
 
 ## Audited v1 UX and diagnostics update
 
-The current menu hierarchy is `True™ Tick v<version>`, `Start`, `Stop`, `Pause >`, `Schedule >`, `Auto-start`, `Auto-time`, `Status >`, `Logs`, and `Quit`. Pause is one primary submenu with fixed 5 minute, 15 minute, 30 minute, and 1 hour choices. Schedule has Start in, Stop in, Cancel scheduled action, and `Resume now` when a pause is active. There is no duplicate Pause action. Start is disabled while paused. Status contains only read-only State, Timing, Running for, Next action, and Ownership rows. Logs is a separate clickable action.
+The current menu hierarchy is `True™ Tick v<version>`, `Start`, `Stop`, `Pause for >`, `Schedule >`, `Auto-start`, `Auto-time`, `Status >`, `Logs`, and `Quit`. The declared label vector in `tray_surface.rs` and the rendered menu both use `Pause for >`. Pause is one primary submenu with fixed 5 minute, 15 minute, 30 minute, and 1 hour choices. Schedule has Start in, Stop in, Cancel scheduled action, and `Resume now` when a pause is active. There is no duplicate Pause action. Start is disabled while paused. Status contains only read-only State, Timing, Running for, Next action, and Ownership rows. Logs is a separate clickable action below `Status >`, not an entry inside Status.
 
 An open popup retains its native menu handles and runs a popup-only 500 ms refresh timer for live Status values, ownership, Next action, Start and Stop enabled state, and cancellation state. A separate one-second UI timer runs only while a schedule or pause is active. Its publication key includes the schedule generation and rounded remaining-second bucket, so the shell tooltip receives `Shell_NotifyIconW(NIM_MODIFY)` for each displayed countdown change. These timers never change policy, acquire timing, release timing, or replace the authoritative deadline or handoff timer. A five-minute pause initially displays `5m 0s`. Elapsed durations remain floored.
 
-Logs now shows a concise summary and a read-only native `SysListView32` grid. The list and tooltip classes are initialized once with `InitCommonControlsEx` before controls are created, and the embedded v6 manifest remains required. The columns are `Row`, `Sequence`, `Elapsed`, `Operation`, `Parent`, `Correlation`, `Phase`, `Source`, `Outcome`, `Event`, and `Details`. `Row` is the current 1-based retained-session row position. `Sequence` remains the event sequence number. Rows come from the existing `DiagnosticStore` snapshot through typed `DiagnosticEvent` conversion. The Display group accepts a positive `Show rows:` count from 1 through 512 and has a `Show all` override. It shows the newest retained rows in chronological order and reports `Showing X of Y retained rows`. The separate Transfer group accepts empty or `all`, a single retained row, or an inclusive `start-end` retained-row range. Hidden retained rows can be copied or exported intentionally. Invalid input keeps the previous valid display, disables Copy and Export for invalid transfer input, and shows a short bounded validation state. List creation failure, negative `LVM_INSERTITEMW`, failed `LVM_SETITEMTEXTW`, and the optional row or item count after refresh are recorded with bounded details, native return values, and raw Win32 status values. Details preserve raw HNS, operation lineage, pause and schedule generations, timing observations, NTSTATUS, and Win32 error values. Refresh is coalesced through the UI message loop without background polling. The local session retains at most 512 newest events and one truncation marker. It is not disk telemetry. Unknown or stale timing evidence is displayed as `Unknown`.
+Logs now shows a concise summary and a read-only native `SysListView32` grid. The list and tooltip classes are initialized once with `InitCommonControlsEx` before controls are created, and the embedded v6 manifest remains required. The columns are `Row`, `Sequence`, `Elapsed`, `Operation`, `Parent`, `Correlation`, `Phase`, `Source`, `Outcome`, `Event`, and `Details`. `Row` is the current 1-based retained-session row position. `Sequence` remains the event sequence number. Rows come from the existing `DiagnosticStore` snapshot through typed `DiagnosticEvent` conversion. The Display group accepts a positive `Show rows:` count from 1 through 512 and has a `Show all` override. It shows the newest retained rows in chronological order and reports `Showing X of Y retained rows`. The separate Transfer group accepts empty or `all`, a single retained row, or an inclusive `start-end` retained-row range. Hidden retained rows can be copied or exported intentionally. Invalid input keeps the previous valid display, disables Copy and Export for invalid transfer input, and shows a short bounded validation state. List creation failure, negative `LVM_INSERTITEMW`, failed `LVM_SETITEMTEXTW`, and the optional row or item count after refresh are recorded with bounded details, native return values, and raw Win32 status values. Details preserve raw HNS, operation lineage, pause and schedule generations, timing observations, NTSTATUS, and Win32 error values. Refresh is coalesced through the UI message loop without background polling. The local session retains at most 512 newest events and one truncation marker. It is not disk telemetry. Unknown or stale timing evidence is displayed as `Timing unknown`.
 
 The Logs window has one fixed toolbar row between the summary and grid. It keeps `Show rows:` input, `Show all`, `Rows to copy/export:` input, `Selected: N rows`, `Copy`, and `Export` on one horizontal row with compact fixed widths. `WM_SIZE` recalculates positions without wrapping or stacking. `Show rows:` accepts a positive count from 1 through 512. The transfer input accepts empty or `all` for all retained rows, one retained 1-based row, or an inclusive `start-end` range such as `12-24`. Input is always a retained row position, never an event sequence ID. For example, retained rows `353-354` can display event sequences `753-754`. Whitespace is trimmed. Invalid display input preserves the last valid view. Invalid, reversed, zero, negative, and out-of-range transfer values show a short message, create a bounded diagnostic validation event, and keep Copy and Export disabled when no grid selection is available. Retention truncation retains the newest rows and a truncation marker, so earlier row positions may no longer exist. Hidden retained rows remain transferable by intentional range selection. Refresh preserves selected events when possible and visibly resets and logs the transfer selection when it cannot.
 
