@@ -373,6 +373,11 @@ pub(crate) fn duration_menu_items(scheduled: Option<ScheduledAction>) -> Vec<Men
             command_id: None,
         },
         MenuItem {
+            label: "Pause for >".to_owned(),
+            enabled: true,
+            command_id: None,
+        },
+        MenuItem {
             label: "Cancel scheduled action".to_owned(),
             enabled: scheduled.is_some_and(|action| action.action != DurationAction::Pause),
             command_id: Some(CANCEL_SCHEDULED_COMMAND_ID),
@@ -737,11 +742,6 @@ pub(crate) fn menu_items_with_duration(
             command_id: None,
         },
         MenuItem {
-            label: "Pause for >".to_owned(),
-            enabled: true,
-            command_id: None,
-        },
-        MenuItem {
             label: "Schedule >".to_owned(),
             enabled: true,
             command_id: None,
@@ -790,12 +790,13 @@ mod tests {
             [
                 "Start in >",
                 "Stop in >",
+                "Pause for >",
                 "Cancel scheduled action",
                 "Resume now"
             ]
         );
-        assert!(!duration[2].enabled);
         assert!(!duration[3].enabled);
+        assert!(!duration[4].enabled);
         assert_eq!(
             duration_choices(DurationAction::Start)
                 .iter()
@@ -837,12 +838,12 @@ mod tests {
             generation: 1,
         };
         let paused_items = duration_menu_items(Some(paused));
-        assert!(!paused_items[2].enabled);
-        assert!(paused_items[3].enabled);
+        assert!(!paused_items[3].enabled);
+        assert!(paused_items[4].enabled);
     }
 
     #[test]
-    fn primary_menu_has_one_pause_submenu_and_start_is_disabled_while_paused() {
+    fn primary_menu_has_schedule_submenu_and_start_is_disabled_while_paused() {
         let items = menu_items_with_duration(
             TrayStatus::Paused,
             false,
@@ -854,14 +855,7 @@ mod tests {
             .iter()
             .map(|item| item.label.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(labels[1..5], ["Start", "Stop", "Pause for >", "Schedule >"]);
-        assert_eq!(
-            labels
-                .iter()
-                .filter(|label| **label == "Pause for >")
-                .count(),
-            1
-        );
+        assert_eq!(labels[1..4], ["Start", "Stop", "Schedule >"]);
         assert!(!items[1].enabled);
         assert!(!menu_command_is_enabled_with_pause(
             1001,
@@ -870,6 +864,62 @@ mod tests {
             false,
             true
         ));
+    }
+
+    #[test]
+    fn root_menu_orders_nine_entries_with_schedule_after_stop() {
+        let items = menu_items_with_duration(
+            TrayStatus::Stopped,
+            false,
+            false,
+            TimingValues::default(),
+            false,
+        );
+        assert_eq!(items.len(), 9);
+        let labels = items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                version_header().as_str(),
+                "Start",
+                "Stop",
+                "Schedule >",
+                "Auto-start: Off",
+                "Auto-time: Off",
+                "Status >",
+                "Logs",
+                "Quit"
+            ]
+        );
+        assert!(items[3].enabled);
+    }
+
+    #[test]
+    fn schedule_menu_orders_five_entries_with_pause_before_cancel() {
+        let items = duration_menu_items(None);
+        assert_eq!(items.len(), 5);
+        let labels = items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                "Start in >",
+                "Stop in >",
+                "Pause for >",
+                "Cancel scheduled action",
+                "Resume now"
+            ]
+        );
+        assert!(items[0].enabled);
+        assert!(items[1].enabled);
+        assert!(items[2].enabled);
+        assert!(!items[3].enabled);
+        assert!(!items[4].enabled);
     }
 
     #[test]
@@ -1037,7 +1087,7 @@ mod tests {
         assert!(!paused_menu[1].enabled);
         assert!(!paused_menu[2].enabled);
         assert!(paused_menu[3].enabled);
-        assert!(paused_menu[8].enabled);
+        assert!(paused_menu[7].enabled);
     }
 
     #[test]
@@ -1475,7 +1525,6 @@ mod tests {
                 version_header().as_str(),
                 "Start",
                 "Stop",
-                "Pause for >",
                 "Schedule >",
                 "Auto-start: On",
                 "Auto-time: Off",
@@ -1485,11 +1534,10 @@ mod tests {
             ]
         );
         assert!(items[0].enabled);
-        assert!(items[4].enabled);
-        assert!(!items[1].enabled);
         assert!(items[3].enabled);
-        assert!(items[7].enabled);
-        assert!(items[9].enabled);
+        assert!(!items[1].enabled);
+        assert!(items[6].enabled);
+        assert!(items[8].enabled);
     }
 
     #[test]

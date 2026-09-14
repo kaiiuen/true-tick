@@ -253,6 +253,12 @@ const MF_SEPARATOR: u32 = 0x0800;
 const MF_GRAYED: u32 = 0x0001;
 const MF_POPUP: u32 = 0x0010;
 const MF_BYPOSITION: u32 = 0x0400;
+const ROOT_MENU_START_POSITION: usize = 2;
+const ROOT_MENU_STOP_POSITION: usize = 3;
+const ROOT_MENU_AUTO_START_POSITION: usize = 6;
+const ROOT_MENU_AUTO_TIME_POSITION: usize = 7;
+const SCHEDULE_MENU_CANCEL_POSITION: usize = 4;
+const SCHEDULE_MENU_RESUME_POSITION: usize = 5;
 
 const NIF_MESSAGE: u32 = 0x0001;
 const NIF_ICON: u32 = 0x0002;
@@ -552,7 +558,7 @@ fn register_startup_target(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PopupMenuHandles {
     root: *mut c_void,
-    duration: Option<*mut c_void>,
+    schedule: Option<*mut c_void>,
     status: Option<*mut c_void>,
 }
 
@@ -2859,7 +2865,7 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
         }
         app.popup_menus = Some(PopupMenuHandles {
             root: menu,
-            duration: None,
+            schedule: None,
             status: None,
         });
         let items = menu_items_with_duration(
@@ -2915,22 +2921,21 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
                 ID_STOP,
                 wide(&items[2].label).as_ptr(),
             )
-            && append_duration_choice_submenu(app, menu, DurationAction::Pause)
-            && append_duration_submenu(app, menu)
+            && append_schedule_submenu(app, menu, &items[3].label)
             && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
             && append_menu_checked(
                 app,
                 menu,
                 MF_STRING,
                 startup_id,
-                wide(&items[5].label).as_ptr(),
+                wide(&items[4].label).as_ptr(),
             )
             && append_menu_checked(
                 app,
                 menu,
                 MF_STRING,
                 automatic_id,
-                wide(&items[6].label).as_ptr(),
+                wide(&items[5].label).as_ptr(),
             )
             && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
             && append_status_submenu(app, menu)
@@ -2939,7 +2944,7 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
                 menu,
                 MF_STRING,
                 LOGS_COMMAND_ID,
-                wide(&items[8].label).as_ptr(),
+                wide(&items[7].label).as_ptr(),
             )
             && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
             && append_menu_checked(
@@ -2947,7 +2952,7 @@ unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
                 menu,
                 MF_STRING,
                 ID_QUIT,
-                wide(&items[9].label).as_ptr(),
+                wide(&items[8].label).as_ptr(),
             );
         if !menu_ok {
             app.popup_menus = None;
@@ -3068,14 +3073,14 @@ unsafe fn refresh_popup_menu(app: &mut App) {
     );
     let _ = ModifyMenuW(
         handles.root,
-        2,
+        ROOT_MENU_START_POSITION,
         MF_BYPOSITION | MF_STRING | if start_enabled { 0 } else { MF_GRAYED },
         ID_START,
         wide("Start").as_ptr(),
     );
     let _ = ModifyMenuW(
         handles.root,
-        3,
+        ROOT_MENU_STOP_POSITION,
         MF_BYPOSITION | MF_STRING | if stop_enabled { 0 } else { MF_GRAYED },
         ID_STOP,
         wide("Stop").as_ptr(),
@@ -3092,7 +3097,7 @@ unsafe fn refresh_popup_menu(app: &mut App) {
     };
     let _ = ModifyMenuW(
         handles.root,
-        7,
+        ROOT_MENU_AUTO_START_POSITION,
         MF_BYPOSITION | MF_STRING,
         startup_id,
         wide(crate::tray_surface::auto_start_label(
@@ -3102,27 +3107,27 @@ unsafe fn refresh_popup_menu(app: &mut App) {
     );
     let _ = ModifyMenuW(
         handles.root,
-        8,
+        ROOT_MENU_AUTO_TIME_POSITION,
         MF_BYPOSITION | MF_STRING,
         automatic_id,
         wide(crate::tray_surface::automatic_label(app.config.automatic)).as_ptr(),
     );
-    if let Some(duration) = handles.duration {
+    if let Some(schedule) = handles.schedule {
         let cancel_enabled = app
             .pause
             .current()
             .is_some_and(|action| action.action != DurationAction::Pause);
         let _ = ModifyMenuW(
-            duration,
-            2,
+            schedule,
+            SCHEDULE_MENU_CANCEL_POSITION,
             MF_BYPOSITION | MF_STRING | if cancel_enabled { 0 } else { MF_GRAYED },
             CANCEL_SCHEDULED_COMMAND_ID,
             wide("Cancel scheduled action").as_ptr(),
         );
         let pause_active = app.pause.pause_active();
         let _ = ModifyMenuW(
-            duration,
-            3,
+            schedule,
+            SCHEDULE_MENU_RESUME_POSITION,
             MF_BYPOSITION | MF_STRING | if pause_active { 0 } else { MF_GRAYED },
             CANCEL_PAUSE_COMMAND_ID,
             wide("Resume now").as_ptr(),
@@ -3153,6 +3158,7 @@ unsafe fn append_duration_choice_submenu(
     app: &mut App,
     parent: *mut c_void,
     action: DurationAction,
+    label: &str,
 ) -> bool {
     let submenu = CreatePopupMenu();
     if submenu.is_null() {
@@ -3202,11 +3208,6 @@ unsafe fn append_duration_choice_submenu(
         DestroyMenu(submenu);
         return false;
     }
-    let label = match action {
-        DurationAction::Start => "Start in >",
-        DurationAction::Stop => "Stop in >",
-        DurationAction::Pause => "Pause for >",
-    };
     if !append_menu_checked(
         app,
         parent,
@@ -3220,19 +3221,22 @@ unsafe fn append_duration_choice_submenu(
     true
 }
 
-unsafe fn append_duration_submenu(app: &mut App, menu: *mut c_void) -> bool {
+unsafe fn append_schedule_submenu(app: &mut App, menu: *mut c_void, parent_caption: &str) -> bool {
     let submenu = CreatePopupMenu();
     if submenu.is_null() {
         app.record(
-            "native.CreatePopupMenu.duration.error",
+            "native.CreatePopupMenu.schedule.error",
             format!("raw_status={}", GetLastError()),
         );
         return false;
     }
-    let mut ok = append_duration_choice_submenu(app, submenu, DurationAction::Start);
-    ok &= append_duration_choice_submenu(app, submenu, DurationAction::Stop);
     let items = duration_menu_items(app.pause.current());
-    let cancel = items[2].clone();
+    let mut ok =
+        append_duration_choice_submenu(app, submenu, DurationAction::Start, &items[0].label);
+    ok &= append_duration_choice_submenu(app, submenu, DurationAction::Stop, &items[1].label);
+    ok &= append_duration_choice_submenu(app, submenu, DurationAction::Pause, &items[2].label);
+    ok &= append_menu_checked(app, submenu, MF_SEPARATOR, 0, std::ptr::null());
+    let cancel = items[3].clone();
     let cancel_flags = if cancel.enabled {
         MF_STRING
     } else {
@@ -3245,7 +3249,7 @@ unsafe fn append_duration_submenu(app: &mut App, menu: *mut c_void) -> bool {
         CANCEL_SCHEDULED_COMMAND_ID,
         wide(&cancel.label).as_ptr(),
     );
-    let resume = items[3].clone();
+    let resume = items[4].clone();
     let resume_flags = if resume.enabled {
         MF_STRING
     } else {
@@ -3267,13 +3271,13 @@ unsafe fn append_duration_submenu(app: &mut App, menu: *mut c_void) -> bool {
         menu,
         MF_STRING | MF_POPUP,
         submenu as usize,
-        wide("Schedule >").as_ptr(),
+        wide(parent_caption).as_ptr(),
     ) {
         DestroyMenu(submenu);
         return false;
     }
     if let Some(handles) = app.popup_menus.as_mut() {
-        handles.duration = Some(submenu);
+        handles.schedule = Some(submenu);
     }
     true
 }
@@ -7293,6 +7297,25 @@ mod tests {
         assert!(
             size_of::<ListViewKeyDownNotification>()
                 >= size_of::<NotifyHeader>() + size_of::<u16>() + size_of::<u32>()
+        );
+    }
+
+    #[test]
+    fn schedule_menu_positions_match_the_single_label_source() {
+        let items = crate::tray_surface::duration_menu_items(None);
+        assert_eq!(items.len(), 5);
+        for item in &items[..3] {
+            assert_eq!(item.command_id, None);
+        }
+        assert_eq!(SCHEDULE_MENU_CANCEL_POSITION, 4);
+        assert_eq!(SCHEDULE_MENU_RESUME_POSITION, 5);
+        assert_eq!(
+            items[SCHEDULE_MENU_CANCEL_POSITION - 1].command_id,
+            Some(crate::tray_surface::CANCEL_SCHEDULED_COMMAND_ID)
+        );
+        assert_eq!(
+            items[SCHEDULE_MENU_RESUME_POSITION - 1].command_id,
+            Some(crate::tray_surface::CANCEL_PAUSE_COMMAND_ID)
         );
     }
 
