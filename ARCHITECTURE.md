@@ -146,8 +146,11 @@ path resolver derives the launcher path from a `Slots\A` or `Slots\B` executable
 shape without claiming runtime filesystem validation. Registration is non-elevated,
 idempotent, removable, and not performed by tests. It is not machine-wide
 installation and it is not the same as `automatic`, which controls timer
-activation after launch. Both settings are persisted through a flushed temporary
-file replacement. Parse and write failures are surfaced in the tray status.
+activation after launch. Configuration is written through a unique temporary name
+in the same directory before replacement, so two instances cannot collide, and the
+module path query grows its buffer within a bounded retry limit so a long path is
+never silently truncated. A failed configuration save after a startup registry
+change follows a non-destructive rollback rule. Parse and write failures are surfaced in the tray status.
 Missing or invalid A/B metadata requires repair and never defaults to slot A.
 Portable startup registration validates launcher existence and executable identity before
 writing. The debug fallback validates the current executable shape and existence.

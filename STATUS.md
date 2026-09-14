@@ -120,11 +120,15 @@ to stopped with current timing and waits for a manual start rather than staying 
 Battery, Battery Saver, and unknown power release owned timing conservatively and retain the policy reason. AC with
 Auto-time on attempts acquisition. Battery-to-AC with Auto-time off shows
 stopped current timing rather than remaining blocked.
-Configuration writes use a flushed temporary file replacement. Parse and write
+Configuration writes use a flushed temporary file replacement under a unique
+temporary name in the target directory, so two instances cannot collide. Parse and write
 errors remain visible. Portable startup registration validates the existing
 `Launcher.exe` file before registry writes. The debug fallback validates the
-current executable shape and existence. Real registry changes attempt rollback if
-config persistence fails. An unavailable nonportable target leaves the preference
+current executable shape and existence. A failed configuration save after a
+registry change never deletes a value this process did not create. After an enable
+it leaves the written value and reports repair required. After a disable it
+restores the registration that the persisted configuration still describes. An
+unavailable nonportable target leaves the preference
 persistent with a visible warning.
 Initial power observation records success or the native failure reason, and failed
 observation remains unknown and blocks acquisition. Manual and automatic activation share the same policy.

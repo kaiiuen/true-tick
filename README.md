@@ -238,8 +238,11 @@ Portable startup registration validates that the target exists and is exactly
 `Launcher.exe` before writing the current-user value. The debug fallback validates
 the current executable shape and existence before writing. Registration is
 non-elevated, idempotent, removable, and not performed by tests. Config
-persistence and a real registry operation are kept transactionally consistent
-with a rollback attempt or an explicit repair-needed status. Initial power
+persistence and a real registry operation are kept transactionally consistent. A
+failed configuration save after an enable deliberately leaves the written registry
+value in place and reports repair required instead of deleting a value this process
+did not create, and a failed save after a disable restores the registration that
+the persisted configuration still describes. Initial power
 observation records success or the failure reason in the diagnostic log. A failed
 A failed observation remains unknown and blocks acquisition. A later power
 query failure explicitly clears any previous AC or battery state, records the
