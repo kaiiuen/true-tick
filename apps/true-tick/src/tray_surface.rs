@@ -737,7 +737,7 @@ pub(crate) fn menu_items_with_duration(
             command_id: None,
         },
         MenuItem {
-            label: "Pause >".to_owned(),
+            label: "Pause for >".to_owned(),
             enabled: true,
             command_id: None,
         },
@@ -854,9 +854,12 @@ mod tests {
             .iter()
             .map(|item| item.label.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(labels[1..5], ["Start", "Stop", "Pause >", "Schedule >"]);
+        assert_eq!(labels[1..5], ["Start", "Stop", "Pause for >", "Schedule >"]);
         assert_eq!(
-            labels.iter().filter(|label| **label == "Pause >").count(),
+            labels
+                .iter()
+                .filter(|label| **label == "Pause for >")
+                .count(),
             1
         );
         assert!(!items[1].enabled);
@@ -1472,7 +1475,7 @@ mod tests {
                 version_header().as_str(),
                 "Start",
                 "Stop",
-                "Pause >",
+                "Pause for >",
                 "Schedule >",
                 "Auto-start: On",
                 "Auto-time: Off",
