@@ -173,8 +173,10 @@ The Windows support matrix, exact native API behavior, and runtime confirmation 
 session, lock, suspend, or resume notification coverage. Unknown observation is
 reported as degraded and blocks acquisition. A/B selection is a safe local
 scaffold. Missing or invalid active-slot metadata requires repair. It does not
-verify a signed package or perform rollback. No package, installer, signed
-artifact, tag, GitHub Release, or public publication is created here.
+verify a signed package or perform rollback. No installer, signed artifact,
+tag, GitHub Release, or public publication is created here. An internal test
+package is assembled locally under the untracked `artifacts/` directory for
+hand testing, and it is not published.
 
 ## Tray tooltip and ownership contract
 

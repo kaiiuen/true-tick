@@ -249,6 +249,49 @@ root against the active documentation files. The checker rejects em dash and
 semicolon characters and skips historical archive material. The tool is outside
 the GitHub project payload.
 
+## Internal test package
+
+The internal test package is assembled from a release build of both application
+binaries. Packaging writes only to `artifacts/`, which is not tracked by Git. It
+creates no tag, GitHub Release, or public artifact.
+
+```text
+cargo build --release -p true-tick -p true-tick-launcher --target-dir target/internal-package
+```
+
+The assembled portable layout matches the paths that the launcher and the tray
+resolve at runtime (`apps/launcher/src/main.rs` and `apps/true-tick/src/portable.rs`):
+
+```text
+True-Tick-internal-v0.1.0/
+  Launcher.exe
+  active-slot.txt
+  INTERNAL_TEST_README.txt
+  SHA256SUMS.txt
+  Slots/A/true-tick.exe
+  Slots/A/true-tick.toml
+  Slots/B/true-tick.exe
+  Slots/B/true-tick.toml
+```
+
+`active-slot.txt` sits at the package root because the launcher resolves it from
+its own directory, and each slot payload is resolved from the
+`Slots/<slot>/true-tick.exe` shape. The tray derives the same portable root, so
+the launcher and the portable path resolver agree on one layout.
+
+Each slot ships a seed `true-tick.toml`. The seed uses `automatic = false`,
+`startup_enabled = false`, and `request_interval_hns = 0`. The compiled default
+for `startup_enabled` is `true`, and the seed differs deliberately. A test
+package can be extracted to a temporary folder, so a disabled value removes an
+existing TrueTick boot entry instead of writing an entry that points at a
+temporary path. `request_interval_hns = 0` is the automatic-selection sentinel,
+so the packaged configuration never pins a timer value. Every displayed timing
+value still comes from a live native observation.
+
+`SHA256SUMS.txt` records the hash of every other packaged file and excludes
+itself. The archive round trip is verified by extracting the package again and
+running `sha256sum -c SHA256SUMS.txt` in the extracted folder.
+
 ## Tray tooltip and ownership contract
 
 The tray tooltip is branded and concise. It uses the current effective timing from the authoritative snapshot, never the requested interval. Valid timing is shown with a middle dot, for example `True™ Tick: Running · 0.497 ms`. Invalid timing is shown as `Timing unknown`. The states are `Stopped`, `Running`, `Starting`, `Stopping`, `Stopping, handoff`, `Starting in 5m`, and `Paused for 5m`. A plain paused state has no countdown. Positive schedule and pause time rounds upward from the monotonic deadline.

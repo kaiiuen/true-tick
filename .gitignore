@@ -1,4 +1,5 @@
 target/
+artifacts/
 
 *.toml.tmp
 *.log
