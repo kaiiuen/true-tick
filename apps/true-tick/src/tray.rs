@@ -212,7 +212,7 @@ const DIAGNOSTIC_WINDOW_TITLE: &str = "True™ Tick Status and Diagnostics";
 const DIAGNOSTIC_LOADING_SUMMARY: &str = "Loading True™ Tick diagnostics...";
 const MAX_STARTUP_STATUS_BYTES: usize = 512;
 const DIAGNOSTIC_WINDOW_PARENT: *mut c_void = std::ptr::null_mut();
-const DIAGNOSTIC_SUMMARY_HEIGHT: i32 = 188;
+const DIAGNOSTIC_SUMMARY_HEIGHT: i32 = 104;
 const DIAGNOSTIC_HUD_STATE_HEIGHT: i32 = 32;
 const DIAGNOSTIC_SEPARATOR_HEIGHT: i32 = 2;
 const DIAGNOSTIC_TOOLBAR_HEIGHT: i32 = 36;
@@ -4390,7 +4390,7 @@ fn diagnostic_hud_field_text(fields: DiagnosticHudFields<'_>) -> String {
         retained,
     } = fields;
     format!(
-        "Effective timing: {effective}\r\nOwnership: {ownership}\r\nPower: {power}\r\nStartup: {startup}\r\nRunning duration: {running_duration}\r\nNext action: {next_action}\r\nHistory: {history}\r\nShowing {visible} of {retained} retained rows\r\n"
+        "Effective: {effective}  |  Ownership: {ownership}  |  Power: {power}\r\nStartup: {startup}  |  Running: {running_duration}  |  Next: {next_action}\r\nHistory: {history}  |  Showing {visible} of {retained} retained rows\r\n"
     )
 }
 
@@ -5339,12 +5339,36 @@ unsafe fn initialize_diagnostic_list(list: *mut c_void) -> Result<(), u32> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DiagnosticChildRedrawTarget {
+    HudState,
     Summary,
+    HudSeparator,
+    ToolbarSeparator,
+    DisplayLabel,
+    DisplayInput,
+    ShowAllButton,
+    ToolbarLabel,
+    SelectionSummary,
+    RangeInput,
+    CopyButton,
+    ExportButton,
+    Message,
     List,
 }
 
-const DIAGNOSTIC_POST_REDRAW_CHILD_TARGETS: [DiagnosticChildRedrawTarget; 2] = [
+const DIAGNOSTIC_POST_REDRAW_CHILD_TARGETS: [DiagnosticChildRedrawTarget; 14] = [
+    DiagnosticChildRedrawTarget::HudState,
     DiagnosticChildRedrawTarget::Summary,
+    DiagnosticChildRedrawTarget::HudSeparator,
+    DiagnosticChildRedrawTarget::ToolbarSeparator,
+    DiagnosticChildRedrawTarget::DisplayLabel,
+    DiagnosticChildRedrawTarget::DisplayInput,
+    DiagnosticChildRedrawTarget::ShowAllButton,
+    DiagnosticChildRedrawTarget::ToolbarLabel,
+    DiagnosticChildRedrawTarget::SelectionSummary,
+    DiagnosticChildRedrawTarget::RangeInput,
+    DiagnosticChildRedrawTarget::CopyButton,
+    DiagnosticChildRedrawTarget::ExportButton,
+    DiagnosticChildRedrawTarget::Message,
     DiagnosticChildRedrawTarget::List,
 ];
 
@@ -5380,7 +5404,19 @@ unsafe fn finish_diagnostic_redraw(window: *mut c_void, app: &App) {
     set_diagnostic_redraw(app, true);
     for target in DIAGNOSTIC_POST_REDRAW_CHILD_TARGETS {
         let control = match target {
+            DiagnosticChildRedrawTarget::HudState => app.diagnostic_hud_state,
             DiagnosticChildRedrawTarget::Summary => app.diagnostic_summary,
+            DiagnosticChildRedrawTarget::HudSeparator => app.diagnostic_hud_separator,
+            DiagnosticChildRedrawTarget::ToolbarSeparator => app.diagnostic_toolbar_separator,
+            DiagnosticChildRedrawTarget::DisplayLabel => app.diagnostic_display_label,
+            DiagnosticChildRedrawTarget::DisplayInput => app.diagnostic_display_input,
+            DiagnosticChildRedrawTarget::ShowAllButton => app.diagnostic_show_all_button,
+            DiagnosticChildRedrawTarget::ToolbarLabel => app.diagnostic_toolbar_label,
+            DiagnosticChildRedrawTarget::SelectionSummary => app.diagnostic_selection_summary,
+            DiagnosticChildRedrawTarget::RangeInput => app.diagnostic_range_input,
+            DiagnosticChildRedrawTarget::CopyButton => app.diagnostic_copy_button,
+            DiagnosticChildRedrawTarget::ExportButton => app.diagnostic_export_button,
+            DiagnosticChildRedrawTarget::Message => app.diagnostic_message,
             DiagnosticChildRedrawTarget::List => app.diagnostic_list,
         };
         if let Some(control) = control {
@@ -8041,7 +8077,7 @@ mod tests {
         assert_ne!(style & WS_VISIBLE, 0);
         assert_ne!(style & SS_NOPREFIX, 0);
         assert_eq!(style & (0x0020_0000 | 0x0040 | 0x0004), 0);
-        assert_eq!(DIAGNOSTIC_SUMMARY_HEIGHT, 188);
+        assert_eq!(DIAGNOSTIC_SUMMARY_HEIGHT, 104);
     }
 
     #[test]
@@ -8117,10 +8153,10 @@ mod tests {
             left: -8,
             top: -31,
             right: 838,
-            bottom: 333,
+            bottom: 249,
         };
-        let minimum = outer_size_from_client(830, 324, frame);
-        assert_eq!(minimum, Point { x: 846, y: 364 });
+        let minimum = outer_size_from_client(830, 240, frame);
+        assert_eq!(minimum, Point { x: 846, y: 280 });
         assert!(DIAGNOSTIC_DEFAULT_WIDTH >= minimum.x);
         assert!(DIAGNOSTIC_DEFAULT_HEIGHT >= minimum.y);
         let layout = diagnostic_layout(944, 480, 96);
@@ -8131,10 +8167,10 @@ mod tests {
 
     #[test]
     fn diagnostic_minimum_size_and_dpi_scaling_keep_summary_and_grid_visible() {
-        assert_eq!(diagnostic_min_client_height(96), 324);
+        assert_eq!(diagnostic_min_client_height(96), 240);
         assert_eq!(diagnostic_toolbar_min_width(144), 1_245);
-        assert_eq!(diagnostic_min_client_height(144), 486);
-        let layout = diagnostic_layout(1_374, 486, 144);
+        assert_eq!(diagnostic_min_client_height(144), 360);
+        let layout = diagnostic_layout(1_374, 360, 144);
         assert_eq!(
             layout.hud_state.height,
             scale_logical(DIAGNOSTIC_HUD_STATE_HEIGHT, 144)
@@ -8165,11 +8201,11 @@ mod tests {
             left: -8,
             top: -31,
             right: 838,
-            bottom: 333,
+            bottom: 249,
         };
         assert_eq!(
-            outer_size_from_client(830, 324, frame),
-            Point { x: 846, y: 364 }
+            outer_size_from_client(830, 240, frame),
+            Point { x: 846, y: 280 }
         );
     }
 
@@ -8187,17 +8223,18 @@ mod tests {
             retained: 12,
         });
         for field in [
-            "Effective timing: 0.500 ms",
+            "Effective: 0.500 ms",
             "Ownership: True™ Tick",
             "Power: AC",
             "Startup: On",
-            "Running duration: 4m 12s",
-            "Next action: None",
+            "Running: 4m 12s",
+            "Next: None",
             "History: retained_events=12 retention_cap=512 truncated=true",
             "Showing 4 of 12 retained rows",
         ] {
             assert!(text.contains(field), "missing HUD field: {field}");
         }
+        assert_eq!(text.lines().count(), 3);
     }
 
     #[test]
@@ -8406,7 +8443,7 @@ mod tests {
         assert_ne!(diagnostic_window_extended_style() & WS_EX_APPWINDOW, 0);
         assert_eq!(diagnostic_window_extended_style() & WS_EX_TOOLWINDOW, 0);
         assert_eq!(diagnostic_toolbar_min_width(96), 830);
-        assert_eq!(diagnostic_min_client_height(96), 324);
+        assert_eq!(diagnostic_min_client_height(96), 240);
         assert_eq!(DIAGNOSTIC_TOOLBAR_HEIGHT, 36);
     }
 
@@ -8566,7 +8603,7 @@ mod tests {
             DIAGNOSTIC_LOADING_SUMMARY
         ));
         assert!(diagnostic_summary_is_non_loading(
-            "Stopped\r\nEffective timing: Unknown\r\nHistory: retained_events=4"
+            "Effective: Unknown  |  History: retained_events=4"
         ));
         assert_eq!(diagnostic_window_style() & WS_VISIBLE, 0);
         assert_eq!(WM_DIAGNOSTIC_REFRESH, WM_APP + 2);
@@ -8716,11 +8753,23 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_post_redraw_invalidation_includes_summary_and_list() {
+    fn diagnostic_post_redraw_invalidation_covers_every_child() {
         assert_eq!(
             DIAGNOSTIC_POST_REDRAW_CHILD_TARGETS,
             [
+                DiagnosticChildRedrawTarget::HudState,
                 DiagnosticChildRedrawTarget::Summary,
+                DiagnosticChildRedrawTarget::HudSeparator,
+                DiagnosticChildRedrawTarget::ToolbarSeparator,
+                DiagnosticChildRedrawTarget::DisplayLabel,
+                DiagnosticChildRedrawTarget::DisplayInput,
+                DiagnosticChildRedrawTarget::ShowAllButton,
+                DiagnosticChildRedrawTarget::ToolbarLabel,
+                DiagnosticChildRedrawTarget::SelectionSummary,
+                DiagnosticChildRedrawTarget::RangeInput,
+                DiagnosticChildRedrawTarget::CopyButton,
+                DiagnosticChildRedrawTarget::ExportButton,
+                DiagnosticChildRedrawTarget::Message,
                 DiagnosticChildRedrawTarget::List,
             ]
         );
