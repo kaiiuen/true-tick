@@ -10,13 +10,13 @@ use std::sync::Arc;
 
 use tick_core::{DesiredIntent, DesiredIntentQueue};
 use tick_diagnostics::{
-    diagnostic_grid_rows, diagnostic_grid_rows_for_sequences, format_csv, format_tsv,
-    latest_row_selection, parse_display_limit, parse_row_selection, retention_summary,
+    diagnostic_grid_row, diagnostic_grid_rows, diagnostic_grid_rows_for_sequences, format_csv,
+    format_tsv, latest_row_selection, parse_display_limit, parse_row_selection, retention_summary,
     row_selection_for_sequences, selected_event_sequences, selected_event_sequences_for_sequences,
     snapshot_is_truncated, truncate_utf8, verify_event_chain, DiagnosticEvent, DiagnosticGridRow,
     DiagnosticOutcome, DiagnosticPhase, DiagnosticRecord, DiagnosticSource, DiagnosticStore,
     EventCategory, NativeOutcome, OperationContext, RowSelection, DEFAULT_MAX_EVENTS,
-    REPORT_COLUMNS,
+    MAX_FIELD_LENGTH, REPORT_COLUMNS,
 };
 use tick_observation_windows::{ObservationSource, WindowsObservation};
 use tick_ownership::{OwnershipState, TimerController, TimingSnapshot, Verification};
@@ -742,6 +742,132 @@ struct App {
     operation_source: DiagnosticSource,
     handoff_operation: Option<OperationContext>,
     last_publication: Option<PublicationKey>,
+    log_directory: PathBuf,
+    last_persisted_event_sequence: u64,
+}
+
+fn resolve_log_directory(executable: &Path) -> PathBuf {
+    match crate::portable::portable_root_from_slot_executable(executable) {
+        Ok(root) => root.join("Data").join("logs"),
+        Err(_) => executable.parent().unwrap_or(Path::new(".")).join("logs"),
+    }
+}
+
+fn daily_log_filename(year: u16, month: u16, day: u16) -> String {
+    format!("true-tick-{year:04}-{month:02}-{day:02}.csv")
+}
+
+fn hex_hash_string(bytes: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(64);
+    for byte in bytes.iter() {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn utc_date_now() -> (u16, u16, u16) {
+    #[repr(C)]
+    struct SystemTimeParts {
+        year: u16,
+        month: u16,
+        day_of_week: u16,
+        day: u16,
+        hour: u16,
+        minute: u16,
+        second: u16,
+        milliseconds: u16,
+    }
+    unsafe {
+        let mut parts = SystemTimeParts {
+            year: 0,
+            month: 0,
+            day_of_week: 0,
+            day: 0,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            milliseconds: 0,
+        };
+        unsafe extern "system" {
+            fn GetSystemTime(time: *mut SystemTimeParts);
+        }
+        GetSystemTime(&mut parts);
+        (parts.year, parts.month, parts.day)
+    }
+}
+
+fn log_csv_escape(cell: &str) -> String {
+    let field = truncate_utf8(cell, MAX_FIELD_LENGTH);
+    if !field.contains([',', '"', '\n', '\r']) {
+        return field;
+    }
+    let mut quoted = String::with_capacity(field.len() + 2);
+    quoted.push('"');
+    for character in field.chars() {
+        if character == '"' {
+            quoted.push('"');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    quoted
+}
+
+fn append_log_lines(directory: PathBuf, filename: String, lines: Vec<String>) {
+    std::thread::spawn(move || {
+        if let Err(create_error) = std::fs::create_dir_all(&directory) {
+            eprintln!("true-tick log directory create failed: {create_error}");
+            return;
+        }
+        let path = directory.join(filename);
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                for line in lines {
+                    if let Err(write_error) = writeln!(file, "{line}") {
+                        eprintln!("true-tick log write failed: {write_error}");
+                        return;
+                    }
+                }
+            }
+            Err(open_error) => {
+                eprintln!("true-tick log open failed: {open_error}");
+            }
+        }
+    });
+}
+
+fn flush_diagnostic_events_to_disk(app: &mut App) {
+    let events = app.diagnostics.snapshot();
+    let mut lines = Vec::new();
+    let mut last_sequence = app.last_persisted_event_sequence;
+    for (index, event) in events.iter().enumerate() {
+        if event.sequence <= app.last_persisted_event_sequence {
+            continue;
+        }
+        let row = diagnostic_grid_row(index.saturating_add(1), event);
+        let mut cells: Vec<String> = row.cells.iter().map(|cell| log_csv_escape(cell)).collect();
+        cells.push(log_csv_escape(&hex_hash_string(&event.prev_hash)));
+        cells.push(log_csv_escape(&hex_hash_string(&event.entry_hash)));
+        lines.push(cells.join(","));
+        last_sequence = event.sequence;
+    }
+    if lines.is_empty() {
+        return;
+    }
+    app.last_persisted_event_sequence = last_sequence;
+    let (year, month, day) = utc_date_now();
+    append_log_lines(
+        app.log_directory.clone(),
+        daily_log_filename(year, month, day),
+        lines,
+    );
 }
 
 pub fn run() {
@@ -781,6 +907,7 @@ pub fn run() {
             }
         };
         let executable = get_module_file_name_w_path_with_diagnostics(Some(&diagnostics));
+        let log_directory = resolve_log_directory(&executable);
         diagnostics.record("lifecycle.executable_observed", "path=redacted");
         let (is_slot_layout, portable_root_str, active_slot_selection, slot_executable_target) =
             match crate::portable::portable_root_from_slot_executable(&executable) {
@@ -1042,6 +1169,8 @@ pub fn run() {
             operation_source: DiagnosticSource::Internal,
             handoff_operation: None,
             last_publication: None,
+            log_directory,
+            last_persisted_event_sequence: 0,
         });
         let app_ptr = Box::into_raw(app);
         let app = &mut *app_ptr;
@@ -1366,6 +1495,7 @@ pub fn run() {
             "lifecycle.shutdown.resources",
             "result=destroyed_before_app_drop",
         );
+        flush_diagnostic_events_to_disk(app);
         drop(Box::from_raw(app_ptr));
     }
 }
@@ -6488,6 +6618,7 @@ fn request_diagnostic_refresh(app: &mut App) {
 
 fn finish_diagnostic_refresh(app: &mut App, follow_up_needed: bool) {
     app.diagnostic_refreshing = false;
+    flush_diagnostic_events_to_disk(app);
     if follow_up_needed {
         app.diagnostic_refresh_follow_up_scheduled = true;
     }
@@ -9374,5 +9505,28 @@ mod tests {
         let last_event = events.last().expect("event recorded");
         assert_eq!(last_event.parent_operation_id, Some(root.operation_id));
         assert_eq!(last_event.operation_id, child.operation_id);
+    }
+
+    #[test]
+    fn daily_log_filename_formats_utc_date() {
+        assert_eq!(daily_log_filename(2026, 9, 16), "true-tick-2026-09-16.csv");
+        assert_eq!(daily_log_filename(2031, 1, 5), "true-tick-2031-01-05.csv");
+    }
+
+    #[test]
+    fn hex_hash_string_formats_bytes() {
+        let bytes: [u8; 32] = [
+            0x00, 0x01, 0x0a, 0x0f, 0x10, 0x1f, 0xa0, 0xff, 0xde, 0xad, 0xbe, 0xef, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        let rendered = hex_hash_string(&bytes);
+        assert_eq!(rendered.len(), 64);
+        assert!(rendered.starts_with("00010a0f101fa0ffdeadbeef"));
+        assert!(rendered
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()));
+        let zeros = hex_hash_string(&[0u8; 32]);
+        assert_eq!(zeros, "0".repeat(64));
     }
 }
