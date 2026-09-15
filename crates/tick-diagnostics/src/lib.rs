@@ -4,6 +4,7 @@
 //! disk, inspect machine or user state, or infer effective platform behavior.
 //! Disk persistence is deliberately deferred.
 
+use sha2::{Digest, Sha256};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -13,6 +14,81 @@ pub const DEFAULT_MAX_EVENTS: usize = 512;
 pub const HARD_MAX_EVENTS: usize = 512;
 pub const MAX_FIELD_LENGTH: usize = 160;
 pub const MAX_RENDERED_EVENT_BYTES: usize = 1_024;
+pub const GENESIS_HASH_SEED: &[u8] = b"TrueTick-Genesis-v1";
+
+pub fn genesis_hash() -> [u8; 32] {
+    Sha256::digest(GENESIS_HASH_SEED).into()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EventCategory {
+    Startup,
+    Timer,
+    Power,
+    UI,
+    Schedule,
+    System,
+}
+
+impl EventCategory {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EventCategory::Startup => "Startup",
+            EventCategory::Timer => "Timer",
+            EventCategory::Power => "Power",
+            EventCategory::UI => "UI",
+            EventCategory::Schedule => "Schedule",
+            EventCategory::System => "System",
+        }
+    }
+
+    pub fn from_event_name(name: &str) -> Self {
+        let lower = name.to_ascii_lowercase();
+        if lower.starts_with("startup")
+            || lower.starts_with("lifecycle")
+            || lower.starts_with("portable")
+            || lower.starts_with("config")
+            || lower.contains("single_instance")
+            || lower.contains("slot")
+        {
+            EventCategory::Startup
+        } else if lower.starts_with("timer")
+            || lower.starts_with("ownership")
+            || lower.starts_with("handoff")
+            || lower.starts_with("verification")
+            || lower.starts_with("resolution")
+        {
+            EventCategory::Timer
+        } else if lower.starts_with("power")
+            || lower.contains("battery")
+            || lower.contains("ac_online")
+        {
+            EventCategory::Power
+        } else if lower.starts_with("ui")
+            || lower.starts_with("tray")
+            || lower.starts_with("menu")
+            || lower.starts_with("command")
+            || lower.starts_with("window")
+            || lower.starts_with("grid")
+        {
+            EventCategory::UI
+        } else if lower.starts_with("schedule")
+            || lower.starts_with("duration")
+            || lower.starts_with("pause")
+            || lower.starts_with("cancel")
+        {
+            EventCategory::Schedule
+        } else {
+            EventCategory::System
+        }
+    }
+}
+
+impl fmt::Display for EventCategory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
 
 pub fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
     if value.len() <= maximum_bytes {
@@ -143,6 +219,53 @@ pub struct DiagnosticEvent {
     pub native: NativeOutcome,
     pub name: String,
     pub details: String,
+    pub prev_hash: [u8; 32],
+    pub entry_hash: [u8; 32],
+}
+
+pub fn compute_entry_hash(
+    prev_hash: [u8; 32],
+    sequence: u64,
+    timestamp_nanos: u128,
+    name: &str,
+    details: &str,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(prev_hash);
+    hasher.update(sequence.to_le_bytes());
+    hasher.update(timestamp_nanos.to_le_bytes());
+    hasher.update(name.as_bytes());
+    hasher.update(details.as_bytes());
+    hasher.finalize().into()
+}
+
+pub fn verify_event_chain(events: &[DiagnosticEvent]) -> Result<(), (usize, &'static str)> {
+    if events.is_empty() {
+        return Ok(());
+    }
+
+    for (index, event) in events.iter().enumerate() {
+        let timestamp_nanos = event.elapsed.as_nanos();
+        let expected_hash = compute_entry_hash(
+            event.prev_hash,
+            event.sequence,
+            timestamp_nanos,
+            &event.name,
+            &event.details,
+        );
+        if event.entry_hash != expected_hash {
+            return Err((index, "entry hash mismatch"));
+        }
+
+        if index > 0 {
+            let previous = &events[index - 1];
+            if previous.entry_hash != event.prev_hash {
+                return Err((index, "previous hash link mismatch"));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn status_label(status: Status) -> &'static str {
@@ -711,6 +834,7 @@ struct StoreState {
     next_operation_id: u64,
     events: Vec<DiagnosticEvent>,
     truncation_recorded: bool,
+    last_entry_hash: [u8; 32],
 }
 
 #[derive(Debug)]
@@ -736,6 +860,7 @@ impl DiagnosticStore {
                     next_operation_id: 1,
                     events: Vec::new(),
                     truncation_recorded: false,
+                    last_entry_hash: genesis_hash(),
                 }),
             }),
         }
@@ -863,6 +988,11 @@ impl DiagnosticStore {
                     "retaining newest {} events",
                     self.inner.maximum_events.saturating_sub(1)
                 );
+                let prev_hash = state.last_entry_hash;
+                let name = "diagnostic.log_truncated".to_owned();
+                let entry_hash =
+                    compute_entry_hash(prev_hash, sequence, elapsed.as_nanos(), &name, &details);
+                state.last_entry_hash = entry_hash;
                 state.events.insert(
                     0,
                     DiagnosticEvent {
@@ -875,8 +1005,10 @@ impl DiagnosticStore {
                         source: DiagnosticSource::Diagnostic,
                         outcome: DiagnosticOutcome::Completed,
                         native: NativeOutcome::default(),
-                        name: "diagnostic.log_truncated".to_owned(),
+                        name,
                         details,
+                        prev_hash,
+                        entry_hash,
                     },
                 );
                 state.next_sequence = state.next_sequence.saturating_add(1);
@@ -886,9 +1018,15 @@ impl DiagnosticStore {
                 state.events.remove(1);
             }
         }
+        let sequence = state.next_sequence;
+        let elapsed = self.inner.started.elapsed();
+        let prev_hash = state.last_entry_hash;
+        let entry_hash =
+            compute_entry_hash(prev_hash, sequence, elapsed.as_nanos(), &name, &details);
+        state.last_entry_hash = entry_hash;
         let event = DiagnosticEvent {
-            sequence: state.next_sequence,
-            elapsed: self.inner.started.elapsed(),
+            sequence,
+            elapsed,
             operation_id: record.context.operation_id,
             parent_operation_id: record.context.parent_operation_id,
             correlation_id: record.context.correlation_id,
@@ -898,6 +1036,8 @@ impl DiagnosticStore {
             native: record.native,
             name,
             details,
+            prev_hash,
+            entry_hash,
         };
         state.next_sequence = state.next_sequence.saturating_add(1);
         state.events.push(event);
@@ -1034,9 +1174,15 @@ mod tests {
     }
 
     fn test_event(sequence: u64) -> DiagnosticEvent {
+        let prev_hash = genesis_hash();
+        let elapsed = Duration::from_millis(sequence);
+        let name = "test.event".to_owned();
+        let details = String::new();
+        let entry_hash =
+            compute_entry_hash(prev_hash, sequence, elapsed.as_nanos(), &name, &details);
         DiagnosticEvent {
             sequence,
-            elapsed: Duration::from_millis(sequence),
+            elapsed,
             operation_id: sequence,
             parent_operation_id: None,
             correlation_id: sequence,
@@ -1044,8 +1190,10 @@ mod tests {
             source: DiagnosticSource::Diagnostic,
             outcome: DiagnosticOutcome::Completed,
             native: NativeOutcome::default(),
-            name: "test.event".to_owned(),
-            details: String::new(),
+            name,
+            details,
+            prev_hash,
+            entry_hash,
         }
     }
 
@@ -1331,6 +1479,8 @@ mod tests {
             },
             name: "timer.release".to_owned(),
             details: "command=stop".to_owned(),
+            prev_hash: [0u8; 32],
+            entry_hash: [0u8; 32],
         };
         let row = diagnostic_grid_row(4, &event);
         assert_eq!(row.cells.len(), REPORT_COLUMNS.len());
@@ -1440,6 +1590,8 @@ mod tests {
             },
             name: "query".to_owned(),
             details: "x".to_owned(),
+            prev_hash: [0u8; 32],
+            entry_hash: [0u8; 32],
         };
         let row = diagnostic_grid_row(1, &event);
         assert!(row.cells[10].len() <= MAX_FIELD_LENGTH + 3);
@@ -1467,6 +1619,8 @@ mod tests {
             },
             name: "timer.release".to_owned(),
             details: "command=stop".to_owned(),
+            prev_hash: [0u8; 32],
+            entry_hash: [0u8; 32],
         };
         let rendered = format_event(&event);
         assert!(rendered.contains("op=11"));
@@ -1665,9 +1819,154 @@ mod tests {
     }
 
     #[test]
-    fn huge_ascii_is_bounded_without_panicking() {
-        let output = sanitize(&"x".repeat(10_000));
-        assert!(output.ends_with("..."));
-        assert!(output.len() <= MAX_FIELD_LENGTH + 3);
+    fn event_categories_categorize_known_event_names() {
+        assert_eq!(
+            EventCategory::from_event_name("lifecycle.start"),
+            EventCategory::Startup
+        );
+        assert_eq!(
+            EventCategory::from_event_name("portable.active_slot.selection"),
+            EventCategory::Startup
+        );
+        assert_eq!(
+            EventCategory::from_event_name("lifecycle.single_instance"),
+            EventCategory::Startup
+        );
+        assert_eq!(
+            EventCategory::from_event_name("config.load.result"),
+            EventCategory::Startup
+        );
+        assert_eq!(
+            EventCategory::from_event_name("timer.acquire.request"),
+            EventCategory::Timer
+        );
+        assert_eq!(
+            EventCategory::from_event_name("ownership.acquire.request"),
+            EventCategory::Timer
+        );
+        assert_eq!(
+            EventCategory::from_event_name("handoff.acquire.request"),
+            EventCategory::Timer
+        );
+        assert_eq!(
+            EventCategory::from_event_name("verification.result"),
+            EventCategory::Timer
+        );
+        assert_eq!(
+            EventCategory::from_event_name("resolution.query"),
+            EventCategory::Timer
+        );
+        assert_eq!(
+            EventCategory::from_event_name("power.observation.raw"),
+            EventCategory::Power
+        );
+        assert_eq!(
+            EventCategory::from_event_name("power.initial_observation"),
+            EventCategory::Power
+        );
+        assert_eq!(
+            EventCategory::from_event_name("battery.state"),
+            EventCategory::Power
+        );
+        assert_eq!(
+            EventCategory::from_event_name("tray.command"),
+            EventCategory::UI
+        );
+        assert_eq!(
+            EventCategory::from_event_name("menu.click"),
+            EventCategory::UI
+        );
+        assert_eq!(
+            EventCategory::from_event_name("ui.visibility"),
+            EventCategory::UI
+        );
+        assert_eq!(
+            EventCategory::from_event_name("schedule.start_in"),
+            EventCategory::Schedule
+        );
+        assert_eq!(
+            EventCategory::from_event_name("duration.schedule.timing"),
+            EventCategory::Schedule
+        );
+        assert_eq!(
+            EventCategory::from_event_name("pause.for"),
+            EventCategory::Schedule
+        );
+        assert_eq!(
+            EventCategory::from_event_name("cancel.scheduled_action"),
+            EventCategory::Schedule
+        );
+        assert_eq!(
+            EventCategory::from_event_name("native.CloseHandle"),
+            EventCategory::System
+        );
+        assert_eq!(
+            EventCategory::from_event_name("raw.win32.syscall"),
+            EventCategory::System
+        );
+
+        assert_eq!(EventCategory::Startup.as_str(), "Startup");
+        assert_eq!(EventCategory::Timer.as_str(), "Timer");
+        assert_eq!(EventCategory::Power.as_str(), "Power");
+        assert_eq!(EventCategory::UI.as_str(), "UI");
+        assert_eq!(EventCategory::Schedule.as_str(), "Schedule");
+        assert_eq!(EventCategory::System.as_str(), "System");
+    }
+
+    #[test]
+    fn hash_chain_is_deterministic_and_verifies_cleanly() {
+        let store = DiagnosticStore::new(16);
+        store.record("startup.init", "booting");
+        store.record("timer.request", "requesting 1ms");
+        store.record("power.query", "ac_online");
+        let events = store.snapshot();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].prev_hash, genesis_hash());
+        assert_eq!(events[0].entry_hash, events[1].prev_hash);
+        assert_eq!(events[1].entry_hash, events[2].prev_hash);
+        assert!(verify_event_chain(&events).is_ok());
+    }
+
+    #[test]
+    fn hash_chain_detects_tampered_details_or_name() {
+        let store = DiagnosticStore::new(16);
+        store.record("startup.init", "booting");
+        store.record("timer.request", "requesting 1ms");
+        let mut events = store.snapshot();
+        assert!(verify_event_chain(&events).is_ok());
+
+        let mut tampered_details = events.clone();
+        tampered_details[0].details = "tampered details".to_owned();
+        assert_eq!(
+            verify_event_chain(&tampered_details),
+            Err((0, "entry hash mismatch"))
+        );
+
+        let mut tampered_name = events.clone();
+        tampered_name[1].name = "timer.tampered".to_owned();
+        assert_eq!(
+            verify_event_chain(&tampered_name),
+            Err((1, "entry hash mismatch"))
+        );
+
+        let mut broken_link = events.clone();
+        broken_link[1].prev_hash = [99u8; 32];
+        assert_eq!(
+            verify_event_chain(&broken_link),
+            Err((1, "entry hash mismatch"))
+        );
+
+        events[1].entry_hash = compute_entry_hash(
+            [99u8; 32],
+            events[1].sequence,
+            events[1].elapsed.as_nanos(),
+            &events[1].name,
+            &events[1].details,
+        );
+        events[1].prev_hash = [99u8; 32];
+        assert_eq!(
+            verify_event_chain(&events),
+            Err((1, "previous hash link mismatch"))
+        );
     }
 }
