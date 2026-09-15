@@ -65,6 +65,12 @@ mod list_view_native {
     pub const LVN_KEYDOWN: i32 = -155;
     pub const VK_SHIFT: i32 = 0x10;
     pub const VK_CONTROL: i32 = 0x11;
+    pub const VK_LBUTTON: i32 = 0x01;
+    pub const VK_ESCAPE: i32 = 0x1B;
+    pub const MK_LBUTTON: usize = 0x0001;
+    pub const WM_RBUTTONDOWN: u32 = 0x0204;
+    pub const WM_MBUTTONDOWN: u32 = 0x0207;
+    pub const WM_KEYDOWN: u32 = 0x0100;
 
     #[repr(C)]
     pub struct ListViewColumn {
@@ -6354,6 +6360,10 @@ fn should_use_native_click_selection(shift_held: bool, ctrl_held: bool) -> bool 
     shift_held || ctrl_held
 }
 
+fn marquee_requires_left_mouse_button_pressed_flag(w_param: usize) -> bool {
+    w_param & MK_LBUTTON != 0
+}
+
 fn marquee_drag_exceeded(anchor: Point, current: Point, cx_drag: i32, cy_drag: i32) -> bool {
     (current.x - anchor.x).abs() >= cx_drag || (current.y - anchor.y).abs() >= cy_drag
 }
@@ -6434,6 +6444,9 @@ unsafe fn update_marquee_selection(app: &mut App, list: *mut c_void, band: &Rect
 unsafe fn handle_marquee_lbuttondown(hwnd: *mut c_void, l_param: isize) {
     let parent = app_from_list(hwnd);
     if parent.is_null() {
+        return;
+    }
+    if GetKeyState(VK_LBUTTON) >= 0 {
         return;
     }
     let app = &mut *parent;
@@ -6517,6 +6530,18 @@ unsafe fn handle_marquee_lbuttonup(hwnd: *mut c_void) {
     update_diagnostic_grid_selection(app);
 }
 
+unsafe fn handle_marquee_cancel(hwnd: *mut c_void) {
+    let parent = app_from_list(hwnd);
+    if parent.is_null() {
+        return;
+    }
+    let app = &mut *parent;
+    app.diagnostic_marquee_pending = false;
+    if app.diagnostic_marquee_active {
+        handle_marquee_lbuttonup(hwnd);
+    }
+}
+
 unsafe fn handle_marquee_capturechanged(hwnd: *mut c_void) {
     let parent = app_from_list(hwnd);
     if parent.is_null() {
@@ -6573,11 +6598,51 @@ unsafe extern "system" fn diagnostic_list_proc(
             result
         }
         WM_MOUSEMOVE => {
-            if !parent.is_null() && (*parent).diagnostic_marquee_pending {
-                handle_marquee_pending_mousemove(hwnd, l_param);
+            let left_button_held = marquee_requires_left_mouse_button_pressed_flag(w_param)
+                && GetKeyState(VK_LBUTTON) < 0;
+            if !left_button_held {
+                if !parent.is_null()
+                    && ((*parent).diagnostic_marquee_pending || (*parent).diagnostic_marquee_active)
+                {
+                    handle_marquee_cancel(hwnd);
+                }
+                if let Some(prev) = prev_proc {
+                    CallWindowProcW(prev, hwnd, message, w_param, l_param)
+                } else {
+                    DefWindowProcW(hwnd, message, w_param, l_param)
+                }
+            } else {
+                if !parent.is_null() && (*parent).diagnostic_marquee_pending {
+                    handle_marquee_pending_mousemove(hwnd, l_param);
+                }
+                if !parent.is_null() && (*parent).diagnostic_marquee_active {
+                    handle_marquee_mousemove(hwnd, l_param);
+                    0
+                } else if let Some(prev) = prev_proc {
+                    CallWindowProcW(prev, hwnd, message, w_param, l_param)
+                } else {
+                    DefWindowProcW(hwnd, message, w_param, l_param)
+                }
             }
-            if !parent.is_null() && (*parent).diagnostic_marquee_active {
-                handle_marquee_mousemove(hwnd, l_param);
+        }
+        WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
+            if !parent.is_null()
+                && ((*parent).diagnostic_marquee_pending || (*parent).diagnostic_marquee_active)
+            {
+                handle_marquee_cancel(hwnd);
+            }
+            if let Some(prev) = prev_proc {
+                CallWindowProcW(prev, hwnd, message, w_param, l_param)
+            } else {
+                DefWindowProcW(hwnd, message, w_param, l_param)
+            }
+        }
+        WM_KEYDOWN => {
+            if w_param == VK_ESCAPE as usize
+                && !parent.is_null()
+                && ((*parent).diagnostic_marquee_pending || (*parent).diagnostic_marquee_active)
+            {
+                handle_marquee_cancel(hwnd);
                 0
             } else if let Some(prev) = prev_proc {
                 CallWindowProcW(prev, hwnd, message, w_param, l_param)
@@ -8665,6 +8730,19 @@ mod tests {
         assert!(!marquee_drag_exceeded(anchor, still_inside, 4, 4));
         assert!(marquee_drag_exceeded(anchor, crossed_x, 4, 4));
         assert!(marquee_drag_exceeded(anchor, crossed_y, 4, 4));
+    }
+
+    #[test]
+    fn marquee_requires_left_mouse_button_pressed() {
+        assert!(marquee_requires_left_mouse_button_pressed_flag(MK_LBUTTON));
+        assert!(marquee_requires_left_mouse_button_pressed_flag(
+            MK_LBUTTON | 0x0008 | 0x0010
+        ));
+        assert!(!marquee_requires_left_mouse_button_pressed_flag(0));
+        assert!(!marquee_requires_left_mouse_button_pressed_flag(0x0002));
+        assert!(!marquee_requires_left_mouse_button_pressed_flag(
+            0x0008 | 0x0010
+        ));
     }
 
     #[test]
