@@ -814,6 +814,27 @@ impl DiagnosticStore {
         );
     }
 
+    pub fn record_verification(
+        &self,
+        context: OperationContext,
+        source: DiagnosticSource,
+        outcome: DiagnosticOutcome,
+        name: &str,
+        details: impl AsRef<str>,
+    ) {
+        self.record_with_context(
+            DiagnosticRecord {
+                context,
+                phase: DiagnosticPhase::Verify,
+                source,
+                outcome,
+                native: NativeOutcome::default(),
+            },
+            name,
+            details,
+        );
+    }
+
     pub fn record_with_context(
         &self,
         record: DiagnosticRecord,
@@ -1568,6 +1589,79 @@ mod tests {
         let input = String::from_utf8_lossy(b"ok\xff\xfe");
         let output = sanitize(&input);
         assert_eq!(output, "ok��");
+    }
+
+    #[test]
+    fn verification_pair_carries_verify_phase_and_shared_operation_context() {
+        let store = DiagnosticStore::new(16);
+        let operation = store.begin_operation(DiagnosticSource::TrayCommand);
+        store.record_with_context(
+            DiagnosticRecord {
+                context: operation,
+                phase: DiagnosticPhase::Begin,
+                source: DiagnosticSource::TrayCommand,
+                outcome: DiagnosticOutcome::InProgress,
+                native: NativeOutcome::default(),
+            },
+            "timer.acquire.begin",
+            "requested_hns=156250",
+        );
+        store.record_verification(
+            operation,
+            DiagnosticSource::Native,
+            DiagnosticOutcome::Completed,
+            "timer.acquire.verify",
+            "observed_effective_hns=156250 result=verified",
+        );
+        store.record_with_context(
+            DiagnosticRecord {
+                context: operation,
+                phase: DiagnosticPhase::Complete,
+                source: DiagnosticSource::TrayCommand,
+                outcome: DiagnosticOutcome::Completed,
+                native: NativeOutcome::default(),
+            },
+            "timer.acquire.complete",
+            "result=verified",
+        );
+        let events = store.snapshot();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].phase, DiagnosticPhase::Begin);
+        assert_eq!(events[0].outcome, DiagnosticOutcome::InProgress);
+        assert_eq!(events[1].phase, DiagnosticPhase::Verify);
+        assert_eq!(events[1].outcome, DiagnosticOutcome::Completed);
+        assert_eq!(events[1].name, "timer.acquire.verify");
+        assert!(events[1].details.contains("result=verified"));
+        assert_eq!(events[2].phase, DiagnosticPhase::Complete);
+        assert_eq!(events[2].outcome, DiagnosticOutcome::Completed);
+        for event in &events {
+            assert_eq!(event.operation_id, operation.operation_id);
+            assert_eq!(event.parent_operation_id, None);
+            assert_eq!(event.correlation_id, operation.correlation_id);
+        }
+    }
+
+    #[test]
+    fn verification_event_renders_into_report_row_cells() {
+        let store = DiagnosticStore::new(8);
+        let operation = store.begin_operation(DiagnosticSource::TrayCommand);
+        store.record_verification(
+            operation,
+            DiagnosticSource::Native,
+            DiagnosticOutcome::Unverified,
+            "timer.release.verify",
+            "result=unverified",
+        );
+        let events = store.snapshot();
+        let rows = diagnostic_grid_rows(&events, RowSelection::all(events.len()));
+        assert_eq!(rows.len(), 1);
+        let cells = &rows[0].cells;
+        assert_eq!(cells.len(), REPORT_COLUMNS.len());
+        assert_eq!(cells[6], "Verify");
+        assert_eq!(cells[7], "Native");
+        assert_eq!(cells[8], "Unverified");
+        assert_eq!(cells[9], "timer.release.verify");
+        assert!(cells[10].contains("result=unverified"));
     }
 
     #[test]
