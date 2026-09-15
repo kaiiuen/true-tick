@@ -665,9 +665,136 @@ mod tests {
     }
 
     #[test]
-    fn nt_status_values_are_signed_and_preserved() {
-        let failure: NtStatus = -1;
-        assert_ne!(failure, STATUS_SUCCESS);
-        assert_eq!(failure, -1);
+    fn ntstatus_error_mapping_preserves_negative_and_specific_codes() {
+        // Simulated NTSTATUS values
+        const STATUS_TIMER_RESOLUTION_NOT_SET: NtStatus = 0xC0000245u32 as i32;
+        const STATUS_INVALID_PARAMETER: NtStatus = 0xC000000Du32 as i32;
+        const STATUS_UNSUCCESSFUL: NtStatus = 0xC0000001u32 as i32;
+
+        let query_err = TimerError::QueryFailed {
+            raw_status: STATUS_TIMER_RESOLUTION_NOT_SET,
+        };
+        assert_eq!(
+            query_err,
+            TimerError::QueryFailed {
+                raw_status: -1073741243,
+            }
+        );
+
+        let request_err = TimerError::RequestFailed {
+            raw_status: STATUS_INVALID_PARAMETER,
+        };
+        assert_eq!(
+            request_err,
+            TimerError::RequestFailed {
+                raw_status: -1073741811,
+            }
+        );
+
+        let release_err = TimerError::ReleaseFailed {
+            raw_status: STATUS_UNSUCCESSFUL,
+        };
+        assert_eq!(
+            release_err,
+            TimerError::ReleaseFailed {
+                raw_status: -1073741823,
+            }
+        );
+
+        let unverified_err = TimerError::PostconditionUnverified {
+            raw_status: STATUS_TIMER_RESOLUTION_NOT_SET,
+            reported_current: Hns::new(156_250),
+        };
+        if let TimerError::PostconditionUnverified {
+            raw_status,
+            reported_current,
+        } = unverified_err
+        {
+            assert_eq!(raw_status, STATUS_TIMER_RESOLUTION_NOT_SET);
+            assert_eq!(reported_current, Hns::new(156_250));
+        } else {
+            panic!("unexpected variant");
+        }
+    }
+
+    #[test]
+    fn invalid_boundary_handling_and_inverted_values() {
+        // Reversed boundaries: minimum_interval (coarse) > maximum_interval (fine)
+        let inverted_bounds = TimerBounds {
+            minimum_interval: Hns::new(156_250),
+            maximum_interval: Hns::new(5_000),
+        };
+        assert_eq!(
+            inverted_bounds.numeric_interval(),
+            (Hns::new(5_000), Hns::new(156_250))
+        );
+        assert_eq!(
+            inverted_bounds.smallest_supported_boundary(),
+            Ok(Hns::new(5_000))
+        );
+
+        // Boundary with zero lower bound is rejected
+        let zero_lower_bounds = TimerBounds {
+            minimum_interval: Hns::ZERO,
+            maximum_interval: Hns::new(156_250),
+        };
+        assert_eq!(
+            zero_lower_bounds.smallest_supported_boundary(),
+            Err(TimerError::InvalidInterval)
+        );
+
+        // Boundary exceeding u32::MAX is rejected
+        let excessive_bounds = TimerBounds {
+            minimum_interval: Hns::new(u32::MAX as u64 + 1),
+            maximum_interval: Hns::new(u32::MAX as u64 + 2),
+        };
+        assert_eq!(
+            excessive_bounds.smallest_supported_boundary(),
+            Err(TimerError::InvalidInterval)
+        );
+        assert_eq!(
+            validate_interval(excessive_bounds, Hns::new(u32::MAX as u64 + 1)),
+            Err(TimerError::InvalidInterval)
+        );
+
+        // Value strictly outside bounds
+        let normal_bounds = TimerBounds {
+            minimum_interval: Hns::new(5_000),
+            maximum_interval: Hns::new(156_250),
+        };
+        assert_eq!(
+            validate_interval(normal_bounds, Hns::new(4_999)),
+            Err(TimerError::InvalidInterval)
+        );
+        assert_eq!(
+            validate_interval(normal_bounds, Hns::new(156_251)),
+            Err(TimerError::InvalidInterval)
+        );
+        assert_eq!(
+            validate_interval(normal_bounds, Hns::new(u64::MAX)),
+            Err(TimerError::InvalidInterval)
+        );
+    }
+
+    #[test]
+    fn simulated_query_failures_in_diagnostics_formatting() {
+        const STATUS_TIMER_RESOLUTION_NOT_SET: NtStatus = 0xC0000245u32 as i32;
+        let details = format!("raw_status={STATUS_TIMER_RESOLUTION_NOT_SET} requested_hns=5000");
+        let outcome = native_outcome("timer.query", &details);
+        assert_eq!(outcome.ntstatus, Some(STATUS_TIMER_RESOLUTION_NOT_SET));
+        assert_eq!(outcome.win32_last_error, None);
+        assert_eq!(outcome.requested_hns, Some(5000));
+    }
+
+    #[test]
+    fn simulated_request_postcondition_unverified() {
+        let observation = TimerObservation {
+            requested: Hns::new(5_000),
+            reported_current: Hns::new(10_000),
+            raw_status: STATUS_SUCCESS,
+        };
+        assert!(!observation.is_satisfied());
+        assert!(!observation.is_finer_than_requested());
+        assert_eq!(observation.effective_relation(), "unverified");
     }
 }

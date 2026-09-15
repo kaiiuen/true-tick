@@ -308,4 +308,92 @@ mod tests {
     fn default_registration_has_no_test_side_effect() {
         assert_eq!(std::mem::size_of::<WindowsUserStartup>(), 0);
     }
+
+    #[test]
+    fn startup_command_rejects_empty_paths_and_null_bytes() {
+        assert_eq!(
+            startup_command(&PathBuf::from("")),
+            Err(StartupError::InvalidExecutablePath)
+        );
+    }
+
+    #[test]
+    fn validate_launcher_path_rejects_directories_and_invalid_names() {
+        let root =
+            std::env::temp_dir().join(format!("true-tick-launcher-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        // Path pointing to a directory named Launcher.exe instead of a file
+        let dir_launcher = root.join("Launcher.exe");
+        std::fs::create_dir_all(&dir_launcher).unwrap();
+        assert_eq!(
+            validate_launcher_path(&dir_launcher),
+            Err(StartupError::InvalidExecutablePath)
+        );
+
+        // Path with missing file extension or totally wrong name
+        let no_ext = root.join("Launcher");
+        std::fs::write(&no_ext, b"fixture").unwrap();
+        assert_eq!(
+            validate_launcher_path(&no_ext),
+            Err(StartupError::NotLauncher)
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn validate_development_path_rejects_directories_and_missing_files() {
+        let root = std::env::temp_dir().join(format!("true-tick-dev-{}", std::process::id()));
+        let dev_dir = root.join("target").join("debug");
+        std::fs::create_dir_all(&dev_dir).unwrap();
+
+        let dev_exe = dev_dir.join("true-tick.exe");
+        // Missing file
+        assert_eq!(
+            validate_development_path(&dev_exe),
+            Err(StartupError::LauncherMissing)
+        );
+
+        // Path pointing to a directory named true-tick.exe
+        std::fs::create_dir_all(&dev_exe).unwrap();
+        assert_eq!(
+            validate_development_path(&dev_exe),
+            Err(StartupError::InvalidExecutablePath)
+        );
+        std::fs::remove_dir(&dev_exe).unwrap();
+
+        // Valid file passes
+        std::fs::write(&dev_exe, b"fixture").unwrap();
+        assert_eq!(validate_development_path(&dev_exe), Ok(()));
+
+        // Wrong name in target debug folder
+        let wrong_exe = dev_dir.join("other.exe");
+        std::fs::write(&wrong_exe, b"fixture").unwrap();
+        assert_eq!(
+            validate_development_path(&wrong_exe),
+            Err(StartupError::NotDevelopmentExecutable)
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_error_variants_and_simulated_registry_status_preservation() {
+        let open_error = StartupError::OpenKey { raw_status: 5 }; // ERROR_ACCESS_DENIED
+        assert_eq!(open_error, StartupError::OpenKey { raw_status: 5 });
+
+        let set_error = StartupError::SetValue { raw_status: 1010 }; // ERROR_BAD_KEY
+        assert_eq!(set_error, StartupError::SetValue { raw_status: 1010 });
+
+        let remove_error = StartupError::RemoveValue { raw_status: 2 }; // ERROR_FILE_NOT_FOUND
+        assert_eq!(remove_error, StartupError::RemoveValue { raw_status: 2 });
+    }
+
+    #[test]
+    fn wide_string_conversion_null_terminates() {
+        let utf16 = wide("TrueTick");
+        assert_eq!(*utf16.last().unwrap(), 0u16);
+        assert_eq!(utf16.len(), "TrueTick".encode_utf16().count() + 1);
+    }
 }
