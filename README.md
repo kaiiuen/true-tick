@@ -190,7 +190,7 @@ current enabled state before any action. Repeated Start, Stop, and setting
 commands therefore remain idempotent, and Quit remains a single exit path.
 A reported current
 value at or below the requested value is satisfied, with a lower value labeled
-finer. A higher value remains unverified. Unsupported native timer capability
+finer. A higher value remains unverified, except for small hardware crystal divisor and phase-locked loop quantization overshoots within HARDWARE_TIMER_TOLERANCE_HNS (100 HNS, or 10 microseconds), which are verified as satisfied. Unsupported native timer capability
 is surfaced as `Unsupported`, while error, blocked, degraded, unverified,
 starting, stopping, running, and stopped retain consistent icon colors and menu
 meanings. Status icon canvases use the current

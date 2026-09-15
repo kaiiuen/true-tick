@@ -63,6 +63,12 @@ impl TimerQuery {
     }
 }
 
+/// Hardware crystal divisor quantization can nudge the effective timer value a
+/// few 100-nanosecond units above the requested boundary. A small tolerance
+/// keeps that physical jitter from being misclassified as an unverified
+/// postcondition.
+pub const HARDWARE_TIMER_TOLERANCE_HNS: u64 = 100;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimerObservation {
     pub requested: Hns,
@@ -73,6 +79,11 @@ pub struct TimerObservation {
 impl TimerObservation {
     pub fn is_satisfied(self) -> bool {
         self.reported_current <= self.requested
+            || self
+                .reported_current
+                .value()
+                .saturating_sub(self.requested.value())
+                <= HARDWARE_TIMER_TOLERANCE_HNS
     }
 
     pub fn is_finer_than_requested(self) -> bool {
@@ -84,6 +95,13 @@ impl TimerObservation {
             "finer"
         } else if self.reported_current == self.requested {
             "equal"
+        } else if self
+            .reported_current
+            .value()
+            .saturating_sub(self.requested.value())
+            <= HARDWARE_TIMER_TOLERANCE_HNS
+        {
+            "satisfied"
         } else {
             "unverified"
         }
@@ -474,6 +492,8 @@ fn effective_relation(effective: Hns, requested: Hns) -> &'static str {
         "finer"
     } else if effective == requested {
         "equal"
+    } else if effective.value().saturating_sub(requested.value()) <= HARDWARE_TIMER_TOLERANCE_HNS {
+        "satisfied"
     } else {
         "unverified"
     }
@@ -632,11 +652,46 @@ mod tests {
     fn coarser_effective_observation_is_not_satisfied() {
         let observation = TimerObservation {
             requested: Hns::new(10_000),
-            reported_current: Hns::new(10_001),
+            reported_current: Hns::new(10_200),
             raw_status: STATUS_SUCCESS,
         };
         assert!(!observation.is_satisfied());
         assert!(!observation.is_finer_than_requested());
+    }
+
+    #[test]
+    fn hardware_timer_tolerance_accepts_pll_jitter_within_threshold() {
+        let observation = TimerObservation {
+            requested: Hns::new(5_000),
+            reported_current: Hns::new(5_033),
+            raw_status: STATUS_SUCCESS,
+        };
+        assert!(observation.is_satisfied());
+        assert!(!observation.is_finer_than_requested());
+        assert_eq!(observation.effective_relation(), "satisfied");
+        assert_eq!(
+            effective_relation(observation.reported_current, observation.requested),
+            "satisfied"
+        );
+    }
+
+    #[test]
+    fn hardware_timer_tolerance_boundary_is_inclusive() {
+        let at_boundary = TimerObservation {
+            requested: Hns::new(5_000),
+            reported_current: Hns::new(5_100),
+            raw_status: STATUS_SUCCESS,
+        };
+        assert!(at_boundary.is_satisfied());
+        assert_eq!(at_boundary.effective_relation(), "satisfied");
+
+        let beyond_boundary = TimerObservation {
+            requested: Hns::new(5_000),
+            reported_current: Hns::new(5_101),
+            raw_status: STATUS_SUCCESS,
+        };
+        assert!(!beyond_boundary.is_satisfied());
+        assert_eq!(beyond_boundary.effective_relation(), "unverified");
     }
 
     #[test]

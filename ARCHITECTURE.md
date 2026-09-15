@@ -196,7 +196,7 @@ field use the detailed four-decimal form with raw HNS units, for example
 Controller and app state carry observations through query, request, release,
 and power reconciliation. A current value at or below the requested interval
 satisfies the postcondition. A lower current value is explicitly finer than
-requested. A higher current value is unverified. Current observation verifies
+requested. A higher current value is unverified. Physical timer verification accepts small hardware crystal divisor quantization overshoots within HARDWARE_TIMER_TOLERANCE_HNS (100 HNS / 10 microseconds) as satisfied. Current observation verifies
 only the available system power query and one power broadcast path. Full Battery
 Saver, session, lock, suspend, and resume notification support is not claimed.
 

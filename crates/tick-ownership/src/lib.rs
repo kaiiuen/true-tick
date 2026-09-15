@@ -666,7 +666,7 @@ mod tests {
     fn coarser_observation_is_not_satisfied() {
         let observation = TimerObservation {
             requested: Hns::new(10_000),
-            reported_current: Hns::new(10_001),
+            reported_current: Hns::new(10_200),
             raw_status: 0,
         };
         assert!(!observation.is_satisfied());

@@ -5288,6 +5288,32 @@ unsafe fn fallback_diagnostic_layout(
             success = false;
             continue;
         };
+        if IsWindow(control) == 0 {
+            record_diagnostic_event_with_context(
+                app,
+                "diagnostic.layout.fallback_skipped",
+                format!(
+                    "control_index={index} reason=not_a_window raw_status={}",
+                    GetLastError()
+                ),
+                DiagnosticPhase::Render,
+                DiagnosticOutcome::Suppressed,
+            );
+            continue;
+        }
+        if rect.width <= 0 || rect.height <= 0 {
+            record_diagnostic_event_with_context(
+                app,
+                "diagnostic.layout.fallback_skipped",
+                format!(
+                    "control_index={index} reason=empty_rect width={} height={}",
+                    rect.width, rect.height
+                ),
+                DiagnosticPhase::Render,
+                DiagnosticOutcome::Suppressed,
+            );
+            continue;
+        }
         if SetWindowPos(
             control,
             std::ptr::null_mut(),
@@ -5324,6 +5350,32 @@ unsafe fn apply_diagnostic_layout(
             continue;
         };
         if deferred_failure {
+            continue;
+        }
+        if IsWindow(control) == 0 {
+            record_diagnostic_event_with_context(
+                app,
+                "diagnostic.layout.defer_skipped",
+                format!(
+                    "control_index={index} reason=not_a_window raw_status={}",
+                    GetLastError()
+                ),
+                DiagnosticPhase::Render,
+                DiagnosticOutcome::Suppressed,
+            );
+            continue;
+        }
+        if rect.width <= 0 || rect.height <= 0 {
+            record_diagnostic_event_with_context(
+                app,
+                "diagnostic.layout.defer_skipped",
+                format!(
+                    "control_index={index} reason=empty_rect width={} height={}",
+                    rect.width, rect.height
+                ),
+                DiagnosticPhase::Render,
+                DiagnosticOutcome::Suppressed,
+            );
             continue;
         }
         let next = DeferWindowPos(
