@@ -285,6 +285,9 @@ const OFN_EXPLORER: u32 = 0x00080000;
 const MAX_EXPORT_PATH_UTF16: usize = 32_768;
 
 const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
+const ERROR_ALREADY_EXISTS: u32 = 183;
+const SINGLE_INSTANCE_MUTEX_NAME: &str = "Local\\TrueTickSingleInstance";
+const TASKBAR_CREATED_MESSAGE_NAME: &str = "TaskbarCreated";
 const WS_POPUP: u32 = 0x8000_0000;
 const WS_EX_TOPMOST: u32 = 0x0000_0008;
 const TTS_ALWAYSTIP: u32 = 0x0001;
@@ -315,6 +318,69 @@ enum DiagnosticNativeAction {
 struct NativeFailure {
     stage: &'static str,
     raw_error: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SingleInstanceDecision {
+    Proceed { handle: *mut c_void },
+    ExistingInstance,
+    Failure { raw_error: u32 },
+}
+
+fn single_instance_decision(handle: *mut c_void, raw_error: u32) -> SingleInstanceDecision {
+    if handle.is_null() {
+        SingleInstanceDecision::Failure { raw_error }
+    } else if raw_error == ERROR_ALREADY_EXISTS {
+        SingleInstanceDecision::ExistingInstance
+    } else {
+        SingleInstanceDecision::Proceed { handle }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TaskbarCreatedDecision {
+    RestoreTrayIcon,
+    Ignore,
+}
+
+fn taskbar_created_decision(message: u32, registered_message: u32) -> TaskbarCreatedDecision {
+    if registered_message != 0 && message == registered_message {
+        TaskbarCreatedDecision::RestoreTrayIcon
+    } else {
+        TaskbarCreatedDecision::Ignore
+    }
+}
+
+struct SingleInstanceGuard {
+    handle: *mut c_void,
+    diagnostics: Arc<DiagnosticStore>,
+}
+
+impl SingleInstanceGuard {
+    fn new(handle: *mut c_void, diagnostics: Arc<DiagnosticStore>) -> Self {
+        Self {
+            handle,
+            diagnostics,
+        }
+    }
+}
+
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            let result = unsafe { CloseHandle(self.handle) };
+            let raw_status = if result == 0 {
+                unsafe { GetLastError() }
+            } else {
+                0
+            };
+            self.diagnostics.record(
+                "native.CloseHandle",
+                format!("result={} raw_status={}", result != 0, raw_status),
+            );
+            self.handle = std::ptr::null_mut();
+        }
+    }
 }
 
 fn map_native_action(success: bool, raw_error: u32) -> DiagnosticNativeAction {
@@ -580,6 +646,7 @@ struct App {
     config_path: PathBuf,
     executable: PathBuf,
     startup_status: String,
+    taskbar_created_message: u32,
     tray_icon: Option<NotifyIconData>,
     timing_snapshot: TimingSnapshot,
     timing_snapshot_valid: bool,
@@ -642,6 +709,38 @@ pub fn run() {
     unsafe {
         let diagnostics = Arc::new(DiagnosticStore::new(DEFAULT_MAX_EVENTS));
         diagnostics.record("lifecycle.start", "application_start");
+        let mutex_name = wide(SINGLE_INSTANCE_MUTEX_NAME);
+        let instance_handle = CreateMutexW(std::ptr::null_mut(), 0, mutex_name.as_ptr());
+        let instance_last_error = GetLastError();
+        let _instance_guard = match single_instance_decision(instance_handle, instance_last_error) {
+            SingleInstanceDecision::Proceed { handle } => {
+                diagnostics.record("lifecycle.single_instance", "result=acquired");
+                Some(SingleInstanceGuard::new(handle, diagnostics.clone()))
+            }
+            SingleInstanceDecision::ExistingInstance => {
+                diagnostics.record(
+                    "lifecycle.single_instance",
+                    format!(
+                        "result=existing_instance raw_status={}",
+                        instance_last_error
+                    ),
+                );
+                let result = CloseHandle(instance_handle);
+                let raw_status = if result == 0 { GetLastError() } else { 0 };
+                diagnostics.record(
+                    "native.CloseHandle",
+                    format!("result={} raw_status={}", result != 0, raw_status),
+                );
+                std::process::exit(0);
+            }
+            SingleInstanceDecision::Failure { raw_error } => {
+                diagnostics.record(
+                    "lifecycle.single_instance",
+                    format!("result=guard_failed raw_status={raw_error}"),
+                );
+                std::process::exit(1);
+            }
+        };
         let executable = get_module_file_name_w_path_with_diagnostics(Some(&diagnostics));
         diagnostics.record("lifecycle.executable_observed", "path=redacted");
         if let Ok(root) = crate::portable::portable_root_from_slot_executable(&executable) {
@@ -762,6 +861,17 @@ pub fn run() {
             }
         };
         let startup_status = bounded_startup_status(startup_status);
+        let taskbar_created_name = wide(TASKBAR_CREATED_MESSAGE_NAME);
+        let taskbar_created_message = RegisterWindowMessageW(taskbar_created_name.as_ptr());
+        let taskbar_created_error = if taskbar_created_message == 0 {
+            GetLastError()
+        } else {
+            0
+        };
+        diagnostics.record(
+            "native.RegisterWindowMessageW.TaskbarCreated",
+            format!("message_id={taskbar_created_message} raw_status={taskbar_created_error}"),
+        );
         let app = Box::new(App {
             controller: TimerController::new(
                 WindowsTimerPlatform::with_diagnostics(diagnostics.clone()),
@@ -777,6 +887,7 @@ pub fn run() {
             config_path,
             executable,
             startup_status,
+            taskbar_created_message,
             tray_icon: None,
             timing_snapshot: TimingSnapshot::default(),
             timing_snapshot_valid: false,
@@ -1140,6 +1251,40 @@ unsafe fn remove_tray_icon(app: &mut App) {
             ),
         );
     }
+}
+
+unsafe fn restore_tray_icon(hwnd: *mut c_void, app: &mut App) {
+    app.record("tray.taskbar_created", "action=restore");
+    let mut icon = match NotifyIconData::new(
+        hwnd,
+        app.lifecycle_status(),
+        app.timing_values(),
+        app.pause.current(),
+    ) {
+        Ok(icon) => icon,
+        Err(raw_error) => {
+            app.record(
+                "native.tray_icon.create.error",
+                format!("raw_status={raw_error}"),
+            );
+            return;
+        }
+    };
+    let add_result = Shell_NotifyIconW(NIM_ADD, &mut icon);
+    let add_error = if add_result == 0 { GetLastError() } else { 0 };
+    if matches!(
+        native_bool_result(add_result, add_error),
+        NativeResult::Failed { .. }
+    ) {
+        app.record(
+            "native.Shell_NotifyIconW.add.error",
+            format!("raw_status={add_error}"),
+        );
+        return;
+    }
+    app.tray_icon = Some(icon);
+    app.last_publication = None;
+    app.publish();
 }
 
 fn clear_diagnostic_state(app: &mut App) {
@@ -2791,6 +2936,13 @@ unsafe extern "system" fn window_proc(
     if !app.is_null() {
         let app = &mut *app;
         match message {
+            msg if matches!(
+                taskbar_created_decision(msg, app.taskbar_created_message),
+                TaskbarCreatedDecision::RestoreTrayIcon
+            ) =>
+            {
+                restore_tray_icon(hwnd, app);
+            }
             WM_TRAY if tray_notification_opens_menu(l_param as usize, app.menu_active) => {
                 show_menu(hwnd, app)
             }
@@ -6783,6 +6935,7 @@ struct MinMaxInfo {
 
 #[link(name = "user32")]
 extern "system" {
+    fn RegisterWindowMessageW(string: *const u16) -> u32;
     fn RegisterClassW(class: *const WndClass) -> u16;
     fn CreateWindowExW(
         ex: u32,
@@ -7028,6 +7181,12 @@ unsafe fn get_module_file_name_w_path() -> PathBuf {
 extern "system" {
     fn GetModuleFileNameW(module: *mut c_void, filename: *mut u16, size: u32) -> u32;
     fn GetLastError() -> u32;
+    fn CreateMutexW(
+        security_attributes: *mut c_void,
+        initial_owner: i32,
+        name: *const u16,
+    ) -> *mut c_void;
+    fn CloseHandle(handle: *mut c_void) -> i32;
     fn GlobalAlloc(flags: u32, bytes: usize) -> *mut c_void;
     fn GlobalLock(memory: *mut c_void) -> *mut c_void;
     fn GlobalUnlock(memory: *mut c_void) -> i32;
@@ -7829,6 +7988,64 @@ mod tests {
         assert_eq!(
             module_path_growth_decision(32_768, 32_768, 0),
             ModulePathGrowthDecision::GiveUp
+        );
+    }
+
+    #[test]
+    fn single_instance_decision_maps_create_result_and_last_error() {
+        assert_eq!(
+            single_instance_decision(std::ptr::null_mut(), 5),
+            SingleInstanceDecision::Failure { raw_error: 5 }
+        );
+        let existing_handle = std::ptr::dangling_mut::<c_void>();
+        assert_eq!(
+            single_instance_decision(existing_handle, 183),
+            SingleInstanceDecision::ExistingInstance
+        );
+        assert_eq!(
+            single_instance_decision(existing_handle, 0),
+            SingleInstanceDecision::Proceed {
+                handle: existing_handle
+            }
+        );
+    }
+
+    #[test]
+    fn taskbar_created_decision_matches_registered_message_only_when_valid() {
+        assert_eq!(
+            taskbar_created_decision(0xC000, 0xC000),
+            TaskbarCreatedDecision::RestoreTrayIcon
+        );
+        assert_eq!(
+            taskbar_created_decision(0xC000, 0xC001),
+            TaskbarCreatedDecision::Ignore
+        );
+        assert_eq!(
+            taskbar_created_decision(0, 0),
+            TaskbarCreatedDecision::Ignore
+        );
+        assert_eq!(
+            taskbar_created_decision(0x0001, 0),
+            TaskbarCreatedDecision::Ignore
+        );
+    }
+
+    #[test]
+    fn taskbar_created_registered_message_name_is_exact() {
+        assert_eq!(TASKBAR_CREATED_MESSAGE_NAME, "TaskbarCreated");
+        let wide_name = wide(TASKBAR_CREATED_MESSAGE_NAME);
+        assert_eq!(wide_name.last(), Some(&0));
+        assert_eq!(wide_name.len(), "TaskbarCreated".len() + 1);
+    }
+
+    #[test]
+    fn register_window_message_taskbar_created_returns_non_zero_id() {
+        let name = wide(TASKBAR_CREATED_MESSAGE_NAME);
+        let id = unsafe { RegisterWindowMessageW(name.as_ptr()) };
+        assert_ne!(id, 0);
+        assert_eq!(
+            taskbar_created_decision(id, id),
+            TaskbarCreatedDecision::RestoreTrayIcon
         );
     }
 }

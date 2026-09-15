@@ -153,8 +153,23 @@ handles created during window creation must be stored, otherwise required-child 
 destroys the window. Summary and state text updates check and log native errors,
 trapping silently failed control updates. Repeated identical layout failures coalesce
 with a bounded count and never report completed.
-Power query failure clears stale AC or battery state to `Unknown`, records the
-structured error, blocks acquisition, and follows conservative release policy.
+
+Process launch is guarded by a named `Local\TrueTickSingleInstance` mutex created
+before window, registry, or timer work. A second instance in the same session
+records `result=existing_instance` and exits with code 0 after the shared handle
+is closed, while a failed guard records `result=guard_failed` with the raw status
+and exits with code 1. The acquired handle is held by a `SingleInstanceGuard`
+whose `Drop` records the `native.CloseHandle` result. The tray registers the
+shell `TaskbarCreated` window message once at startup and re-adds the
+notification icon through `Shell_NotifyIconW(NIM_ADD)` when the registered ID
+arrives, so the tray icon is restored after an Explorer restart. Both guards have
+deterministic unit coverage.
+
+Power query failure is fail closed and verified in code and unit tests. A failed
+`GetSystemPowerStatus` clears stale AC or battery state to `Unknown`, clears the
+battery-saver flag, records the structured `ObservationFailed` raw status, blocks
+acquisition, and follows conservative release policy until a successful query
+restores a definitive state.
 Configuration files, parser fields, diagnostic fields, startup status, and native
 edit text are bounded. Duplicate keys, invalid UTF-8, malformed values, and
 oversized inputs are rejected. Native class, window, menu, tray, icon, bitmap,
@@ -178,6 +193,7 @@ Intentionally absent:
 - interactive runtime validation of launcher handoff and slot execution
 - interactive runtime validation of the Windows diagnostic window appearance,
   taskbar presence, title-bar controls, restore, and close behavior
+- cross-session or multi-user instance coordination beyond the same-session mutex
 
 Duration scheduling is session-only and uses monotonic deadlines. Only one scheduled
 action or pause exists. A new selection logs the replacement before changing the

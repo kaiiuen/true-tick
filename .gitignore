@@ -1,6 +1,18 @@
 target/
 artifacts/
 
+# Internal tools, scripts, and private working notes
+tools/
+scripts/
+*.py
+*.sh
+*.bat
+*.ps1
+thread_extracts/
+*.tmp
+*.tsv
+*.csv
+
 *.toml.tmp
 *.log
 *.bak
