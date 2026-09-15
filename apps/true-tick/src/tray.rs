@@ -1075,6 +1075,25 @@ pub fn run() {
         } else {
             0
         };
+        let class_context = app.operation.map_or_else(
+            || app.diagnostics.begin_operation(DiagnosticSource::Startup),
+            |root| {
+                app.diagnostics
+                    .child_operation(root, DiagnosticSource::Startup)
+            },
+        );
+        let class_outcome = if tray_class_atom != 0 {
+            DiagnosticOutcome::Completed
+        } else {
+            DiagnosticOutcome::Failed
+        };
+        app.diagnostics.record_verification(
+            class_context,
+            DiagnosticSource::Startup,
+            class_outcome,
+            "window.class.verify",
+            format!("atom={tray_class_atom} raw_status={tray_class_error}"),
+        );
         if !matches!(
             class_registration_result(tray_class_atom, tray_class_error),
             NativeResult::Succeeded
@@ -1148,6 +1167,34 @@ pub fn run() {
             app_ptr as *mut c_void,
         );
         let hwnd_error = if hwnd.is_null() { GetLastError() } else { 0 };
+        let host_hwnd_valid = !hwnd.is_null();
+        let host_is_window = IsWindow(hwnd);
+        let host_outcome = if !host_hwnd_valid {
+            DiagnosticOutcome::Failed
+        } else if host_is_window == 0 {
+            DiagnosticOutcome::Unverified
+        } else {
+            DiagnosticOutcome::Completed
+        };
+        // The diagnostics crate has no Lifecycle source variant. Store level checks
+        // land on Internal while neighboring records in this startup path carry the
+        // active root source, so the verification reuses Startup for parity.
+        let host_context = app.operation.map_or_else(
+            || app.diagnostics.begin_operation(DiagnosticSource::Startup),
+            |root| {
+                app.diagnostics
+                    .child_operation(root, DiagnosticSource::Startup)
+            },
+        );
+        app.diagnostics.record_verification(
+            host_context,
+            DiagnosticSource::Startup,
+            host_outcome,
+            "window.host.verify",
+            format!(
+                "hwnd_valid={host_hwnd_valid} raw_status={hwnd_error} is_window={host_is_window}"
+            ),
+        );
         if !matches!(
             native_handle_result(hwnd.is_null(), hwnd_error),
             NativeResult::Succeeded
@@ -1177,6 +1224,25 @@ pub fn run() {
         };
         let add_result = Shell_NotifyIconW(NIM_ADD, &mut icon);
         let add_error = if add_result == 0 { GetLastError() } else { 0 };
+        let icon_context = app.operation.map_or_else(
+            || app.diagnostics.begin_operation(DiagnosticSource::Startup),
+            |root| {
+                app.diagnostics
+                    .child_operation(root, DiagnosticSource::Startup)
+            },
+        );
+        let icon_outcome = if add_result != 0 {
+            DiagnosticOutcome::Completed
+        } else {
+            DiagnosticOutcome::Failed
+        };
+        app.diagnostics.record_verification(
+            icon_context,
+            DiagnosticSource::Startup,
+            icon_outcome,
+            "tray.icon.verify",
+            format!("result={} raw_status={add_error}", add_result != 0),
+        );
         if matches!(
             native_bool_result(add_result, add_error),
             NativeResult::Failed { .. }
@@ -2123,6 +2189,44 @@ fn execute_scheduled_action(app: &mut App, action: crate::pause::ScheduledAction
             reconcile(app);
         }
     }
+    if matches!(action.action, DurationAction::Start | DurationAction::Stop) {
+        let timing_verified = match action.action {
+            DurationAction::Start => {
+                app.controller.ownership() == OwnershipState::Owned
+                    && matches!(
+                        app.controller.verification(),
+                        Verification::Verified | Verification::FinerThanRequested
+                    )
+            }
+            DurationAction::Stop => {
+                app.controller.ownership() == OwnershipState::Released && app.handoff.is_none()
+            }
+            DurationAction::Pause => false,
+        };
+        let action_outcome = if timing_verified {
+            DiagnosticOutcome::Completed
+        } else {
+            DiagnosticOutcome::Unverified
+        };
+        let action_context = app.operation.map_or_else(
+            || app.diagnostics.begin_operation(DiagnosticSource::Timer),
+            |root| {
+                app.diagnostics
+                    .child_operation(root, DiagnosticSource::Timer)
+            },
+        );
+        app.diagnostics.record_verification(
+            action_context,
+            DiagnosticSource::Timer,
+            action_outcome,
+            "schedule.action.verify",
+            format!(
+                "action={} generation={} timing_verified={timing_verified}",
+                action.action.label(),
+                action.generation
+            ),
+        );
+    }
     if app.handoff_operation.is_none() {
         app.finish_operation(DiagnosticOutcome::Completed);
     }
@@ -2546,10 +2650,13 @@ impl App {
         let context = self.diagnostics.begin_operation(source);
         self.operation = Some(context);
         self.operation_source = source;
+        // Feed the controller a child of the root so native platform calls recorded
+        // during this operation carry the root as their parent operation ID.
+        let native_context = self.diagnostics.child_operation(context, source);
         self.controller.set_operation_context(Some((
-            context.operation_id,
-            context.parent_operation_id,
-            context.correlation_id,
+            native_context.operation_id,
+            native_context.parent_operation_id,
+            native_context.correlation_id,
         )));
         self.diagnostics.record_with_context(
             DiagnosticRecord {
@@ -3848,6 +3955,57 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
     }
     app.begin_operation(DiagnosticSource::TrayCommand);
     app.record("tray.command.id", format!("id={command}"));
+    let action_name = match command {
+        ID_START => "start",
+        ID_STOP => "stop",
+        LOGS_COMMAND_ID => "logs",
+        GITHUB_COMMAND_ID => "github",
+        CANCEL_SCHEDULED_COMMAND_ID => "cancel_scheduled",
+        CANCEL_PAUSE_COMMAND_ID => "cancel_pause",
+        START_IN_1_COMMAND_ID => "start_in_1m",
+        START_IN_5_COMMAND_ID => "start_in_5m",
+        START_IN_15_COMMAND_ID => "start_in_15m",
+        START_IN_30_COMMAND_ID => "start_in_30m",
+        START_IN_60_COMMAND_ID => "start_in_60m",
+        STOP_IN_1_COMMAND_ID => "stop_in_1m",
+        STOP_IN_5_COMMAND_ID => "stop_in_5m",
+        STOP_IN_15_COMMAND_ID => "stop_in_15m",
+        STOP_IN_30_COMMAND_ID => "stop_in_30m",
+        STOP_IN_60_COMMAND_ID => "stop_in_60m",
+        PAUSE_FOR_5_COMMAND_ID => "pause_for_5m",
+        PAUSE_FOR_15_COMMAND_ID => "pause_for_15m",
+        PAUSE_FOR_30_COMMAND_ID => "pause_for_30m",
+        PAUSE_FOR_60_COMMAND_ID => "pause_for_60m",
+        ID_STARTUP_ON => "startup_on",
+        ID_STARTUP_OFF => "startup_off",
+        ID_AUTOMATIC_ON => "automatic_on",
+        ID_AUTOMATIC_OFF => "automatic_off",
+        ID_QUIT => "quit",
+        _ => "unknown",
+    };
+    let command_valid = action_name != "unknown";
+    let dispatch_outcome = if command_valid {
+        DiagnosticOutcome::Completed
+    } else {
+        DiagnosticOutcome::Failed
+    };
+    let dispatch_context = app.operation.map_or_else(
+        || {
+            app.diagnostics
+                .begin_operation(DiagnosticSource::TrayCommand)
+        },
+        |root| {
+            app.diagnostics
+                .child_operation(root, DiagnosticSource::TrayCommand)
+        },
+    );
+    app.diagnostics.record_verification(
+        dispatch_context,
+        DiagnosticSource::TrayCommand,
+        dispatch_outcome,
+        "command.dispatch.verify",
+        format!("command_id={command} action={action_name} valid={command_valid}"),
+    );
     let mut operation_outcome = DiagnosticOutcome::Completed;
     match command {
         ID_START => manual_start(app),
@@ -4068,6 +4226,43 @@ unsafe fn open_diagnostic_window(app: &mut App) -> bool {
         GetModuleHandleW(std::ptr::null()),
         app as *mut App as *mut c_void,
     );
+    let diagnostic_hwnd_valid = !window.is_null();
+    let diagnostic_is_window = if diagnostic_hwnd_valid {
+        IsWindow(window)
+    } else {
+        0
+    };
+    let diagnostic_create_error = if diagnostic_hwnd_valid {
+        0
+    } else {
+        GetLastError()
+    };
+    let diagnostic_outcome = if !diagnostic_hwnd_valid {
+        DiagnosticOutcome::Failed
+    } else if diagnostic_is_window == 0 {
+        DiagnosticOutcome::Unverified
+    } else {
+        DiagnosticOutcome::Completed
+    };
+    let diagnostic_context = app.operation.map_or_else(
+        || {
+            app.diagnostics
+                .begin_operation(DiagnosticSource::TrayCommand)
+        },
+        |root| {
+            app.diagnostics
+                .child_operation(root, DiagnosticSource::TrayCommand)
+        },
+    );
+    app.diagnostics.record_verification(
+        diagnostic_context,
+        DiagnosticSource::TrayCommand,
+        diagnostic_outcome,
+        "window.diagnostic.verify",
+        format!(
+            "hwnd_valid={diagnostic_hwnd_valid} is_window={diagnostic_is_window} raw_status={diagnostic_create_error}"
+        ),
+    );
     if window.is_null() {
         app.record(
             "diagnostic.window.result",
@@ -4111,6 +4306,29 @@ unsafe fn open_diagnostic_window(app: &mut App) -> bool {
         // Populate the hidden window so its first visible frame is already real data.
         refresh_diagnostic_window(window, app, false);
         ShowWindow(window, SW_SHOWNORMAL);
+        let diagnostic_visible = IsWindowVisible(window) != 0;
+        let diagnostic_visible_outcome = if diagnostic_visible {
+            DiagnosticOutcome::Completed
+        } else {
+            DiagnosticOutcome::Unverified
+        };
+        let diagnostic_visible_context = app.operation.map_or_else(
+            || {
+                app.diagnostics
+                    .begin_operation(DiagnosticSource::TrayCommand)
+            },
+            |root| {
+                app.diagnostics
+                    .child_operation(root, DiagnosticSource::TrayCommand)
+            },
+        );
+        app.diagnostics.record_verification(
+            diagnostic_visible_context,
+            DiagnosticSource::TrayCommand,
+            diagnostic_visible_outcome,
+            "window.diagnostic.visible.verify",
+            format!("visible={diagnostic_visible} raw_status=0"),
+        );
         UpdateWindow(window);
         SetForegroundWindow(window);
         let style = GetWindowLongPtrW(window, GWL_STYLE) as u32;
@@ -7400,6 +7618,7 @@ extern "system" {
     fn GetWindowLongPtrW(hwnd: *mut c_void, index: i32) -> isize;
     fn SetWindowLongPtrW(hwnd: *mut c_void, index: i32, value: isize) -> isize;
     fn IsWindow(window: *mut c_void) -> i32;
+    fn IsWindowVisible(hwnd: *mut c_void) -> i32;
     fn IsIconic(window: *mut c_void) -> i32;
     fn PostQuitMessage(code: i32);
     fn PostMessageW(hwnd: *mut c_void, message: u32, w: usize, l: isize) -> i32;

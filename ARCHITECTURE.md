@@ -18,7 +18,7 @@ Timer-resolution selection is always query-driven. Zero is the automatic-selecti
 - `tick-platform-windows` isolates the native timer request and release calls. Its manual `ntdll` boundary uses signed `i32` NTSTATUS values and an explicit `u8` Windows BOOLEAN representation, with raw statuses preserved. Manually declared functions require explicit library attributes for ntdll, kernel32, user32, gdi32, shell32, comdlg32, and comctl32.
 - `tick-observation-windows` is the event and power observation boundary.
 - `tick-ownership` serializes preflight, request, verification, postcondition, and release while retaining the latest timer observation. A panic path must attempt an explicit release, and startup must presume zero prior ownership without writing a guessed default.
-- `tick-diagnostics` owns truthful status formatting and a bounded synchronized in-memory session event store.
+- `tick-diagnostics` owns truthful status formatting and a bounded synchronized in-memory session event store. A verification event invariant governs all state-changing steps: every state-changing step must emit a verification record confirming the observed platform state rather than inferring success from invocation alone.
 - `tick-calibration` remains an explicit unsupported future boundary. It is not a
   production control path. Tick owns local interrupt and tick granularity, while True Time owns wall-clock phase and epoch reference. Neither depends on the other, and Tick never attempts clock discipline.
 - `tick-startup-windows` isolates opt-in current-user Run-key registration and removal.
