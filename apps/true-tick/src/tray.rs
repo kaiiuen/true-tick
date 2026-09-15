@@ -58,6 +58,8 @@ mod list_view_native {
     pub const LVCF_WIDTH: u32 = 0x0002;
     pub const LVCF_TEXT: u32 = 0x0004;
     pub const LVCFMT_LEFT: i32 = 0x0000;
+    pub const LVIR_BOUNDS: i32 = 0;
+    pub const LVM_GETITEMRECT: u32 = LVM_FIRST + 14;
     pub const WM_NOTIFY: u32 = 0x004E;
     pub const LVN_ITEMCHANGED: i32 = -101;
     pub const LVN_KEYDOWN: i32 = -155;
@@ -218,12 +220,14 @@ const DIAGNOSTIC_GRID_MIN_HEIGHT: i32 = 96;
 const DIAGNOSTIC_TOOLBAR_MARGIN: i32 = 8;
 const DIAGNOSTIC_TOOLBAR_GAP: i32 = 8;
 const DIAGNOSTIC_TOOLBAR_MIN_MESSAGE_WIDTH: i32 = 140;
-const DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS: [i32; 8] = [64, 52, 72, 132, 88, 160, 64, 64];
+// Compact toolbar widths at 96 DPI in left to right order. Both WM_CREATE sizes and
+// diagnostic_toolbar_layout consume this same list so creation and layout never drift.
+const DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS: [i32; 8] = [64, 52, 64, 118, 72, 128, 56, 56];
 const DIAGNOSTIC_COLUMN_WIDTHS: [i32; 11] = [54, 70, 78, 78, 70, 86, 82, 90, 86, 160, 240];
 const DIAGNOSTIC_COLUMN_MIN_WIDTHS: [i32; 11] = [36, 52, 64, 64, 52, 64, 60, 68, 64, 84, 240];
 const DIAGNOSTIC_COLUMN_MAX_WIDTHS: [i32; 11] =
     [84, 120, 140, 144, 120, 144, 112, 124, 124, 260, 640];
-// Compact resizable outer default. Minimum tracking remains client-derived below.
+// Compact logical client default. The outer rectangle is DPI adjusted before creation.
 const DIAGNOSTIC_DEFAULT_WIDTH: i32 = 960;
 const DIAGNOSTIC_DEFAULT_HEIGHT: i32 = 520;
 const COLOR_WINDOW: i32 = 5;
@@ -237,6 +241,8 @@ const SWP_NOZORDER: u32 = 0x0004;
 const SWP_NOACTIVATE: u32 = 0x0010;
 const SWP_NOSENDCHANGING: u32 = 0x0400;
 const SB_HORZ: i32 = 0;
+const SM_CXWORKAREA: i32 = 60;
+const SM_CYWORKAREA: i32 = 61;
 
 const SS_NOPREFIX: u32 = 0x0000_0080;
 const SS_ETCHEDHORZ: u32 = 0x0000_0010;
@@ -266,7 +272,13 @@ const NIF_TIP: u32 = 0x0004;
 const NIM_ADD: u32 = 0x0000;
 const NIM_DELETE: u32 = 0x0002;
 const NIM_MODIFY: u32 = 0x0001;
+const GWLP_WNDPROC: i32 = -4;
 const GWLP_USERDATA: i32 = -21;
+
+const WM_MOUSEMOVE: u32 = 0x0200;
+const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONUP: u32 = 0x0202;
+const WM_CAPTURECHANGED: u32 = 0x0215;
 
 const IDI_APPLICATION: usize = 32512;
 const MB_ICONWARNING: u32 = 0x0000_0030;
@@ -670,6 +682,12 @@ struct App {
     diagnostic_export_button: Option<*mut c_void>,
     diagnostic_message: Option<*mut c_void>,
     diagnostic_list: Option<*mut c_void>,
+    diagnostic_list_prev_proc:
+        Option<unsafe extern "system" fn(*mut c_void, u32, usize, isize) -> isize>,
+    diagnostic_marquee_active: bool,
+    diagnostic_marquee_anchor: Point,
+    diagnostic_marquee_current: Point,
+    diagnostic_marquee_initial_selected: Vec<usize>,
     diagnostic_selection: Option<RowSelection>,
     diagnostic_selection_sequences: Option<Vec<u64>>,
     diagnostic_grid_selection_sequences: Vec<u64>,
@@ -961,6 +979,11 @@ pub fn run() {
             diagnostic_export_button: None,
             diagnostic_message: None,
             diagnostic_list: None,
+            diagnostic_list_prev_proc: None,
+            diagnostic_marquee_active: false,
+            diagnostic_marquee_anchor: Point::default(),
+            diagnostic_marquee_current: Point::default(),
+            diagnostic_marquee_initial_selected: Vec::new(),
             diagnostic_selection: None,
             diagnostic_selection_sequences: None,
             diagnostic_grid_selection_sequences: Vec::new(),
@@ -1358,6 +1381,11 @@ fn clear_diagnostic_state(app: &mut App) {
     app.diagnostic_export_button = None;
     app.diagnostic_message = None;
     app.diagnostic_list = None;
+    app.diagnostic_list_prev_proc = None;
+    app.diagnostic_marquee_active = false;
+    app.diagnostic_marquee_anchor = Point::default();
+    app.diagnostic_marquee_current = Point::default();
+    app.diagnostic_marquee_initial_selected.clear();
     app.diagnostic_selection = None;
     app.diagnostic_selection_sequences = None;
     app.diagnostic_grid_selection_sequences.clear();
@@ -2561,9 +2589,10 @@ impl App {
         let source = self
             .operation
             .map_or_else(|| diagnostic_source(name), |_| self.operation_source);
-        let context = self
-            .operation
-            .unwrap_or_else(|| self.diagnostics.begin_operation(source));
+        let context = self.operation.map_or_else(
+            || self.diagnostics.begin_operation(source),
+            |root| self.diagnostics.child_operation(root, source),
+        );
         if self.operation.is_some() {
             self.controller.set_operation_context(Some((
                 context.operation_id,
@@ -4023,6 +4052,8 @@ unsafe fn open_diagnostic_window(app: &mut App) -> bool {
     }
     let class_name = wide("TrueTickDiagnosticClass");
     let title = wide(DIAGNOSTIC_WINDOW_TITLE);
+    let dpi = GetDpiForSystem().max(96);
+    let outer = diagnostic_default_outer_size(dpi);
     let window = CreateWindowExW(
         diagnostic_window_extended_style(),
         class_name.as_ptr(),
@@ -4030,8 +4061,8 @@ unsafe fn open_diagnostic_window(app: &mut App) -> bool {
         diagnostic_window_style(),
         120,
         120,
-        DIAGNOSTIC_DEFAULT_WIDTH,
-        DIAGNOSTIC_DEFAULT_HEIGHT,
+        outer.x,
+        outer.y,
         DIAGNOSTIC_WINDOW_PARENT,
         std::ptr::null_mut(),
         GetModuleHandleW(std::ptr::null()),
@@ -4281,19 +4312,15 @@ fn diagnostic_min_client_height(dpi: u32) -> i32 {
     )
 }
 
-fn outer_size_from_client(client_width: i32, client_height: i32, frame: Rect) -> Point {
+fn outer_size_from_client(_client_width: i32, _client_height: i32, frame: Rect) -> Point {
+    // The adjusted frame already contains the full outer rectangle including the client.
     Point {
-        x: client_width.saturating_add((frame.right - frame.left).max(0)),
-        y: client_height.saturating_add((frame.bottom - frame.top).max(0)),
+        x: (frame.right - frame.left).max(0),
+        y: (frame.bottom - frame.top).max(0),
     }
 }
 
-unsafe fn diagnostic_min_outer_size(
-    window: *mut c_void,
-    client_width: i32,
-    client_height: i32,
-    dpi: u32,
-) -> Point {
+unsafe fn diagnostic_outer_size(client_width: i32, client_height: i32, dpi: u32) -> Point {
     let mut frame = Rect {
         left: 0,
         top: 0,
@@ -4326,12 +4353,40 @@ unsafe fn diagnostic_min_outer_size(
     if adjusted {
         outer_size_from_client(client_width, client_height, frame)
     } else {
-        let _ = window;
         Point {
             x: client_width,
             y: client_height,
         }
     }
+}
+
+unsafe fn diagnostic_min_outer_size(
+    window: *mut c_void,
+    client_width: i32,
+    client_height: i32,
+    dpi: u32,
+) -> Point {
+    let _ = window;
+    diagnostic_outer_size(client_width, client_height, dpi)
+}
+
+fn clamp_outer_to_work_area(outer: Point, work_width: i32, work_height: i32) -> Point {
+    let safe_width = work_width.max(320);
+    let safe_height = work_height.max(240);
+    Point {
+        x: outer.x.min(safe_width).max(320),
+        y: outer.y.min(safe_height).max(240),
+    }
+}
+
+unsafe fn diagnostic_default_outer_size(dpi: u32) -> Point {
+    let dpi = dpi.max(96);
+    let scaled_client_width = scale_logical(DIAGNOSTIC_DEFAULT_WIDTH, dpi);
+    let scaled_client_height = scale_logical(DIAGNOSTIC_DEFAULT_HEIGHT, dpi);
+    let outer = diagnostic_outer_size(scaled_client_width, scaled_client_height, dpi);
+    let work_width = GetSystemMetrics(SM_CXWORKAREA).max(0);
+    let work_height = GetSystemMetrics(SM_CYWORKAREA).max(0);
+    clamp_outer_to_work_area(outer, work_width, work_height)
 }
 
 fn diagnostic_toolbar_layout(
@@ -4487,9 +4542,10 @@ fn record_diagnostic_event_with_context(
     outcome: DiagnosticOutcome,
 ) {
     let source = DiagnosticSource::Diagnostic;
-    let context = app
-        .operation
-        .unwrap_or_else(|| app.diagnostics.begin_operation(source));
+    let context = app.operation.map_or_else(
+        || app.diagnostics.begin_operation(source),
+        |root| app.diagnostics.child_operation(root, source),
+    );
     app.diagnostics.record_with_context(
         DiagnosticRecord {
             context,
@@ -5987,6 +6043,267 @@ unsafe fn select_all_diagnostic_rows(app: &mut App) {
     update_diagnostic_grid_selection(app);
 }
 
+unsafe fn set_list_view_item_selected(list: *mut c_void, index: usize, selected: bool) {
+    let state = if selected { LVIS_SELECTED } else { 0 };
+    let item = ListViewItem {
+        mask: LVIF_STATE,
+        item: index as i32,
+        subitem: 0,
+        state,
+        state_mask: LVIS_SELECTED,
+        text: std::ptr::null_mut(),
+        text_maximum: 0,
+        image: 0,
+        parameter: 0,
+        indent: 0,
+        group_id: 0,
+        columns: 0,
+        column_indices: std::ptr::null_mut(),
+        column_formats: std::ptr::null_mut(),
+        group: 0,
+    };
+    let _ = SendMessageW(
+        list,
+        LVM_SETITEMSTATE,
+        index,
+        (&item as *const ListViewItem).cast::<c_void>() as isize,
+    );
+}
+
+fn points_to_rect(pt1: Point, pt2: Point) -> Rect {
+    Rect {
+        left: pt1.x.min(pt2.x),
+        top: pt1.y.min(pt2.y),
+        right: pt1.x.max(pt2.x),
+        bottom: pt1.y.max(pt2.y),
+    }
+}
+
+fn rects_intersect(r1: &Rect, r2: &Rect) -> bool {
+    r1.left <= r2.right && r1.right >= r2.left && r1.top <= r2.bottom && r1.bottom >= r2.top
+}
+
+fn point_from_lparam(l_param: isize) -> Point {
+    Point {
+        x: (l_param as u16) as i16 as i32,
+        y: ((l_param >> 16) as u16) as i16 as i32,
+    }
+}
+
+unsafe fn draw_marquee_rect(list: *mut c_void, anchor: Point, current: Point) {
+    let rect = points_to_rect(anchor, current);
+    if rect.left == rect.right || rect.top == rect.bottom {
+        return;
+    }
+    let hdc = GetDC(list);
+    if !hdc.is_null() {
+        DrawFocusRect(hdc, &rect);
+        ReleaseDC(list, hdc);
+    }
+}
+
+fn marquee_selected_indices(
+    band: &Rect,
+    row_rects: &[Rect],
+    initial_selected: &[usize],
+    is_additive: bool,
+) -> Vec<usize> {
+    let mut selected = Vec::new();
+    for (index, row_rect) in row_rects.iter().enumerate() {
+        let in_band = rects_intersect(band, row_rect);
+        let should_be_selected = if is_additive {
+            in_band || initial_selected.contains(&index)
+        } else {
+            in_band
+        };
+        if should_be_selected {
+            selected.push(index);
+        }
+    }
+    selected
+}
+
+unsafe fn update_marquee_selection(app: &mut App, list: *mut c_void, band: &Rect) {
+    let count = SendMessageW(list, LVM_GETITEMCOUNT, 0, 0).max(0) as usize;
+    let is_additive = GetKeyState(VK_CONTROL) < 0;
+    let mut row_rects = Vec::with_capacity(count);
+    for index in 0..count {
+        let mut row_rect = Rect {
+            left: LVIR_BOUNDS,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        let rect_result = SendMessageW(
+            list,
+            LVM_GETITEMRECT,
+            index,
+            (&mut row_rect as *mut Rect) as isize,
+        );
+        if rect_result != 0 {
+            row_rects.push(row_rect);
+        } else {
+            row_rects.push(Rect {
+                left: 0,
+                top: -1,
+                right: 0,
+                bottom: -1,
+            });
+        }
+    }
+    let selected_indices = marquee_selected_indices(
+        band,
+        &row_rects,
+        &app.diagnostic_marquee_initial_selected,
+        is_additive,
+    );
+    for index in 0..count {
+        let should_be_selected = selected_indices.contains(&index);
+        set_list_view_item_selected(list, index, should_be_selected);
+    }
+}
+
+unsafe fn handle_marquee_lbuttondown(hwnd: *mut c_void, l_param: isize) {
+    let parent = app_from_list(hwnd);
+    if parent.is_null() {
+        return;
+    }
+    let app = &mut *parent;
+    let pt = point_from_lparam(l_param);
+    SetFocus(hwnd);
+    SetCapture(hwnd);
+    app.diagnostic_marquee_active = true;
+    app.diagnostic_marquee_anchor = pt;
+    app.diagnostic_marquee_current = pt;
+    app.diagnostic_marquee_initial_selected = list_selected_item_positions(hwnd);
+    let band = points_to_rect(pt, pt);
+    update_marquee_selection(app, hwnd, &band);
+    update_diagnostic_grid_selection(app);
+}
+
+unsafe fn handle_marquee_mousemove(hwnd: *mut c_void, l_param: isize) {
+    let parent = app_from_list(hwnd);
+    if parent.is_null() {
+        return;
+    }
+    let app = &mut *parent;
+    if !app.diagnostic_marquee_active {
+        return;
+    }
+    let pt = point_from_lparam(l_param);
+    draw_marquee_rect(
+        hwnd,
+        app.diagnostic_marquee_anchor,
+        app.diagnostic_marquee_current,
+    );
+    app.diagnostic_marquee_current = pt;
+    draw_marquee_rect(
+        hwnd,
+        app.diagnostic_marquee_anchor,
+        app.diagnostic_marquee_current,
+    );
+    let band = points_to_rect(app.diagnostic_marquee_anchor, pt);
+    update_marquee_selection(app, hwnd, &band);
+    update_diagnostic_grid_selection(app);
+}
+
+unsafe fn handle_marquee_lbuttonup(hwnd: *mut c_void) {
+    let parent = app_from_list(hwnd);
+    if parent.is_null() {
+        return;
+    }
+    let app = &mut *parent;
+    if !app.diagnostic_marquee_active {
+        return;
+    }
+    draw_marquee_rect(
+        hwnd,
+        app.diagnostic_marquee_anchor,
+        app.diagnostic_marquee_current,
+    );
+    app.diagnostic_marquee_active = false;
+    app.diagnostic_marquee_initial_selected.clear();
+    if GetCapture() == hwnd {
+        ReleaseCapture();
+    }
+    InvalidateRect(hwnd, std::ptr::null(), 1);
+    update_diagnostic_grid_selection(app);
+}
+
+unsafe fn handle_marquee_capturechanged(hwnd: *mut c_void) {
+    let parent = app_from_list(hwnd);
+    if parent.is_null() {
+        return;
+    }
+    let app = &mut *parent;
+    if app.diagnostic_marquee_active {
+        draw_marquee_rect(
+            hwnd,
+            app.diagnostic_marquee_anchor,
+            app.diagnostic_marquee_current,
+        );
+        app.diagnostic_marquee_active = false;
+        app.diagnostic_marquee_initial_selected.clear();
+        InvalidateRect(hwnd, std::ptr::null(), 1);
+        update_diagnostic_grid_selection(app);
+    }
+}
+
+unsafe fn app_from_list(hwnd: *mut c_void) -> *mut App {
+    GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App
+}
+
+unsafe extern "system" fn diagnostic_list_proc(
+    hwnd: *mut c_void,
+    message: u32,
+    w_param: usize,
+    l_param: isize,
+) -> isize {
+    let parent = app_from_list(hwnd);
+    let prev_proc = if !parent.is_null() {
+        (*parent).diagnostic_list_prev_proc
+    } else {
+        None
+    };
+    match message {
+        WM_LBUTTONDOWN => {
+            handle_marquee_lbuttondown(hwnd, l_param);
+            0
+        }
+        WM_MOUSEMOVE => {
+            if !parent.is_null() && (*parent).diagnostic_marquee_active {
+                handle_marquee_mousemove(hwnd, l_param);
+                0
+            } else if let Some(prev) = prev_proc {
+                CallWindowProcW(prev, hwnd, message, w_param, l_param)
+            } else {
+                DefWindowProcW(hwnd, message, w_param, l_param)
+            }
+        }
+        WM_LBUTTONUP => {
+            if !parent.is_null() && (*parent).diagnostic_marquee_active {
+                handle_marquee_lbuttonup(hwnd);
+                0
+            } else if let Some(prev) = prev_proc {
+                CallWindowProcW(prev, hwnd, message, w_param, l_param)
+            } else {
+                DefWindowProcW(hwnd, message, w_param, l_param)
+            }
+        }
+        WM_CAPTURECHANGED => {
+            handle_marquee_capturechanged(hwnd);
+            0
+        }
+        _ => {
+            if let Some(prev) = prev_proc {
+                CallWindowProcW(prev, hwnd, message, w_param, l_param)
+            } else {
+                DefWindowProcW(hwnd, message, w_param, l_param)
+            }
+        }
+    }
+}
+
 unsafe fn handle_diagnostic_notify(app: &mut App, l_param: isize) -> bool {
     if l_param == 0 || app.diagnostic_refreshing {
         return false;
@@ -6223,7 +6540,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             WS_CHILD | WS_VISIBLE | SS_LEFT,
             0,
             0,
-            76,
+            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[0],
             24,
             hwnd,
             ID_DIAGNOSTIC_DISPLAY_LIMIT as *mut c_void,
@@ -6237,7 +6554,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
             0,
             0,
-            64,
+            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[1],
             24,
             hwnd,
             ID_DIAGNOSTIC_DISPLAY_LIMIT as *mut c_void,
@@ -6254,7 +6571,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             0,
             0,
-            76,
+            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[2],
             24,
             hwnd,
             ID_DIAGNOSTIC_SHOW_ALL as *mut c_void,
@@ -6268,7 +6585,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             WS_CHILD | WS_VISIBLE | SS_LEFT,
             0,
             0,
-            132,
+            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[3],
             24,
             hwnd,
             ID_DIAGNOSTIC_RANGE as *mut c_void,
@@ -6282,7 +6599,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             WS_CHILD | WS_VISIBLE | SS_LEFT,
             0,
             0,
-            136,
+            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[5],
             24,
             hwnd,
             std::ptr::null_mut(),
@@ -6297,7 +6614,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
             0,
             0,
-            120,
+            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[4],
             24,
             hwnd,
             ID_DIAGNOSTIC_RANGE as *mut c_void,
@@ -6315,7 +6632,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             0,
             0,
-            68,
+            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[6],
             24,
             hwnd,
             ID_DIAGNOSTIC_COPY as *mut c_void,
@@ -6329,7 +6646,7 @@ unsafe extern "system" fn diagnostic_window_proc(
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             0,
             0,
-            68,
+            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[7],
             24,
             hwnd,
             ID_DIAGNOSTIC_EXPORT as *mut c_void,
@@ -6515,6 +6832,21 @@ unsafe extern "system" fn diagnostic_window_proc(
             (*app).diagnostic_export_button = Some(export_button);
             (*app).diagnostic_message = Some(message);
             (*app).diagnostic_list = Some(list);
+            SetWindowLongPtrW(list, GWLP_USERDATA, app_ptr as isize);
+            let prev_proc = SetWindowLongPtrW(
+                list,
+                GWLP_WNDPROC,
+                diagnostic_list_proc as *const () as usize as isize,
+            );
+            if prev_proc != 0 {
+                let prev_proc_fn: unsafe extern "system" fn(
+                    *mut c_void,
+                    u32,
+                    usize,
+                    isize,
+                ) -> isize = std::mem::transmute(prev_proc as *const ());
+                (*app).diagnostic_list_prev_proc = Some(prev_proc_fn);
+            }
             refresh_diagnostic_presentation(hwnd, &mut *app);
             let _ = layout_diagnostic_controls(hwnd, &*app);
         }
@@ -7021,7 +7353,7 @@ struct Message {
     point: Point,
 }
 #[repr(C)]
-#[derive(Default, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, Eq, PartialEq)]
 struct Point {
     x: i32,
     y: i32,
@@ -7058,6 +7390,13 @@ extern "system" {
     fn TranslateMessage(message: *const Message) -> i32;
     fn DispatchMessageW(message: *const Message) -> isize;
     fn DefWindowProcW(hwnd: *mut c_void, message: u32, w: usize, l: isize) -> isize;
+    fn CallWindowProcW(
+        prev_wnd_proc: unsafe extern "system" fn(*mut c_void, u32, usize, isize) -> isize,
+        hwnd: *mut c_void,
+        message: u32,
+        w: usize,
+        l: isize,
+    ) -> isize;
     fn GetWindowLongPtrW(hwnd: *mut c_void, index: i32) -> isize;
     fn SetWindowLongPtrW(hwnd: *mut c_void, index: i32, value: isize) -> isize;
     fn IsWindow(window: *mut c_void) -> i32;
@@ -7157,7 +7496,16 @@ extern "system" {
     fn LoadIconW(instance: *mut c_void, name: *const u16) -> *mut c_void;
     fn GetModuleHandleW(name: *const u16) -> *mut c_void;
     fn GetDpiForWindow(window: *mut c_void) -> u32;
+    fn GetDpiForSystem() -> u32;
+    fn GetSystemMetrics(index: i32) -> i32;
     fn FillRect(hdc: *mut c_void, rect: *const Rect, brush: *mut c_void) -> i32;
+    fn DrawFocusRect(hdc: *mut c_void, rect: *const Rect) -> i32;
+    fn GetDC(hwnd: *mut c_void) -> *mut c_void;
+    fn ReleaseDC(hwnd: *mut c_void, hdc: *mut c_void) -> i32;
+    fn SetCapture(hwnd: *mut c_void) -> *mut c_void;
+    fn ReleaseCapture() -> i32;
+    fn GetCapture() -> *mut c_void;
+    fn SetFocus(hwnd: *mut c_void) -> *mut c_void;
     fn CreateIconIndirect(info: *const IconInfo) -> *mut c_void;
     fn DestroyIcon(icon: *mut c_void) -> i32;
 }
@@ -7535,8 +7883,8 @@ mod tests {
             toolbar.display_input.left - toolbar.display_label.right(),
             8
         );
-        assert_eq!(toolbar.message.width, 168);
-        assert_eq!(diagnostic_toolbar_min_width(96), 916);
+        assert_eq!(toolbar.message.width, 254);
+        assert_eq!(diagnostic_toolbar_min_width(96), 830);
         assert!(toolbar.message.width >= DIAGNOSTIC_TOOLBAR_MIN_MESSAGE_WIDTH);
     }
 
@@ -7549,10 +7897,11 @@ mod tests {
         let frame = Rect {
             left: -8,
             top: -31,
-            right: 8,
-            bottom: 9,
+            right: 838,
+            bottom: 333,
         };
-        let minimum = outer_size_from_client(916, 324, frame);
+        let minimum = outer_size_from_client(830, 324, frame);
+        assert_eq!(minimum, Point { x: 846, y: 364 });
         assert!(DIAGNOSTIC_DEFAULT_WIDTH >= minimum.x);
         assert!(DIAGNOSTIC_DEFAULT_HEIGHT >= minimum.y);
         let layout = diagnostic_layout(944, 480, 96);
@@ -7564,7 +7913,7 @@ mod tests {
     #[test]
     fn diagnostic_minimum_size_and_dpi_scaling_keep_summary_and_grid_visible() {
         assert_eq!(diagnostic_min_client_height(96), 324);
-        assert_eq!(diagnostic_toolbar_min_width(144), 1_374);
+        assert_eq!(diagnostic_toolbar_min_width(144), 1_245);
         assert_eq!(diagnostic_min_client_height(144), 486);
         let layout = diagnostic_layout(1_374, 486, 144);
         assert_eq!(
@@ -7596,12 +7945,12 @@ mod tests {
         let frame = Rect {
             left: -8,
             top: -31,
-            right: 8,
-            bottom: 9,
+            right: 838,
+            bottom: 333,
         };
         assert_eq!(
-            outer_size_from_client(916, 324, frame),
-            Point { x: 932, y: 364 }
+            outer_size_from_client(830, 324, frame),
+            Point { x: 846, y: 364 }
         );
     }
 
@@ -7837,7 +8186,7 @@ mod tests {
         assert!(DIAGNOSTIC_WINDOW_PARENT.is_null());
         assert_ne!(diagnostic_window_extended_style() & WS_EX_APPWINDOW, 0);
         assert_eq!(diagnostic_window_extended_style() & WS_EX_TOOLWINDOW, 0);
-        assert_eq!(diagnostic_toolbar_min_width(96), 916);
+        assert_eq!(diagnostic_toolbar_min_width(96), 830);
         assert_eq!(diagnostic_min_client_height(96), 324);
         assert_eq!(DIAGNOSTIC_TOOLBAR_HEIGHT, 36);
     }
@@ -7908,6 +8257,87 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn marquee_selection_and_rect_intersection_pure_logic() {
+        let r1 = Rect {
+            left: 10,
+            top: 10,
+            right: 50,
+            bottom: 50,
+        };
+        let r2 = Rect {
+            left: 20,
+            top: 20,
+            right: 30,
+            bottom: 30,
+        };
+        let r3 = Rect {
+            left: 60,
+            top: 60,
+            right: 80,
+            bottom: 80,
+        };
+        assert!(rects_intersect(&r1, &r2));
+        assert!(rects_intersect(&r2, &r1));
+        assert!(!rects_intersect(&r1, &r3));
+
+        let pt1 = Point { x: 50, y: 10 };
+        let pt2 = Point { x: 10, y: 50 };
+        let norm = points_to_rect(pt1, pt2);
+        assert_eq!(norm.left, 10);
+        assert_eq!(norm.top, 10);
+        assert_eq!(norm.right, 50);
+        assert_eq!(norm.bottom, 50);
+
+        let row_rects = vec![
+            Rect {
+                left: 0,
+                top: 0,
+                right: 200,
+                bottom: 20,
+            },
+            Rect {
+                left: 0,
+                top: 21,
+                right: 200,
+                bottom: 40,
+            },
+            Rect {
+                left: 0,
+                top: 41,
+                right: 200,
+                bottom: 60,
+            },
+            Rect {
+                left: 0,
+                top: 61,
+                right: 200,
+                bottom: 80,
+            },
+        ];
+
+        let band = Rect {
+            left: 10,
+            top: 15,
+            right: 50,
+            bottom: 35,
+        };
+        let selected = marquee_selected_indices(&band, &row_rects, &[], false);
+        assert_eq!(selected, vec![0, 1]);
+
+        let selected_add = marquee_selected_indices(&band, &row_rects, &[3], true);
+        assert_eq!(selected_add, vec![0, 1, 3]);
+
+        let empty_band = Rect {
+            left: 10,
+            top: 100,
+            right: 50,
+            bottom: 120,
+        };
+        let selected_empty = marquee_selected_indices(&empty_band, &row_rects, &[], false);
+        assert!(selected_empty.is_empty());
     }
 
     #[test]
@@ -8201,5 +8631,33 @@ mod tests {
             taskbar_created_decision(id, id),
             TaskbarCreatedDecision::RestoreTrayIcon
         );
+    }
+
+    #[test]
+    fn active_operation_lineage_populates_parent_operation_id() {
+        let store = Arc::new(DiagnosticStore::new(16));
+        let root = store.begin_operation(DiagnosticSource::TrayCommand);
+        let child = store.child_operation(root, DiagnosticSource::Native);
+
+        assert_ne!(root.operation_id, child.operation_id);
+        assert_eq!(child.parent_operation_id, Some(root.operation_id));
+        assert_eq!(child.correlation_id, root.correlation_id);
+
+        store.record_with_context(
+            DiagnosticRecord {
+                context: child,
+                phase: DiagnosticPhase::Observe,
+                source: DiagnosticSource::Native,
+                outcome: DiagnosticOutcome::Completed,
+                native: NativeOutcome::default(),
+            },
+            "native.NtQueryTimerResolution.call",
+            "status=success",
+        );
+
+        let events = store.snapshot();
+        let last_event = events.last().expect("event recorded");
+        assert_eq!(last_event.parent_operation_id, Some(root.operation_id));
+        assert_eq!(last_event.operation_id, child.operation_id);
     }
 }
