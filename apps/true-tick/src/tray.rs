@@ -63,6 +63,7 @@ mod list_view_native {
     pub const WM_NOTIFY: u32 = 0x004E;
     pub const LVN_ITEMCHANGED: i32 = -101;
     pub const LVN_KEYDOWN: i32 = -155;
+    pub const VK_SHIFT: i32 = 0x10;
     pub const VK_CONTROL: i32 = 0x11;
 
     #[repr(C)]
@@ -243,6 +244,8 @@ const SWP_NOSENDCHANGING: u32 = 0x0400;
 const SB_HORZ: i32 = 0;
 const SM_CXWORKAREA: i32 = 60;
 const SM_CYWORKAREA: i32 = 61;
+const SM_CXDRAG: i32 = 68;
+const SM_CYDRAG: i32 = 69;
 
 const SS_NOPREFIX: u32 = 0x0000_0080;
 const SS_ETCHEDHORZ: u32 = 0x0000_0010;
@@ -685,6 +688,7 @@ struct App {
     diagnostic_list_prev_proc:
         Option<unsafe extern "system" fn(*mut c_void, u32, usize, isize) -> isize>,
     diagnostic_marquee_active: bool,
+    diagnostic_marquee_pending: bool,
     diagnostic_marquee_anchor: Point,
     diagnostic_marquee_current: Point,
     diagnostic_marquee_initial_selected: Vec<usize>,
@@ -981,6 +985,7 @@ pub fn run() {
             diagnostic_list: None,
             diagnostic_list_prev_proc: None,
             diagnostic_marquee_active: false,
+            diagnostic_marquee_pending: false,
             diagnostic_marquee_anchor: Point::default(),
             diagnostic_marquee_current: Point::default(),
             diagnostic_marquee_initial_selected: Vec::new(),
@@ -1449,6 +1454,7 @@ fn clear_diagnostic_state(app: &mut App) {
     app.diagnostic_list = None;
     app.diagnostic_list_prev_proc = None;
     app.diagnostic_marquee_active = false;
+    app.diagnostic_marquee_pending = false;
     app.diagnostic_marquee_anchor = Point::default();
     app.diagnostic_marquee_current = Point::default();
     app.diagnostic_marquee_initial_selected.clear();
@@ -6344,6 +6350,14 @@ fn point_from_lparam(l_param: isize) -> Point {
     }
 }
 
+fn should_use_native_click_selection(shift_held: bool, ctrl_held: bool) -> bool {
+    shift_held || ctrl_held
+}
+
+fn marquee_drag_exceeded(anchor: Point, current: Point, cx_drag: i32, cy_drag: i32) -> bool {
+    (current.x - anchor.x).abs() >= cx_drag || (current.y - anchor.y).abs() >= cy_drag
+}
+
 unsafe fn draw_marquee_rect(list: *mut c_void, anchor: Point, current: Point) {
     let rect = points_to_rect(anchor, current);
     if rect.left == rect.right || rect.top == rect.bottom {
@@ -6424,13 +6438,32 @@ unsafe fn handle_marquee_lbuttondown(hwnd: *mut c_void, l_param: isize) {
     }
     let app = &mut *parent;
     let pt = point_from_lparam(l_param);
-    SetFocus(hwnd);
-    SetCapture(hwnd);
-    app.diagnostic_marquee_active = true;
+    app.diagnostic_marquee_pending = true;
     app.diagnostic_marquee_anchor = pt;
     app.diagnostic_marquee_current = pt;
+}
+
+unsafe fn handle_marquee_pending_mousemove(hwnd: *mut c_void, l_param: isize) {
+    let parent = app_from_list(hwnd);
+    if parent.is_null() {
+        return;
+    }
+    let app = &mut *parent;
+    if !app.diagnostic_marquee_pending || app.diagnostic_marquee_active {
+        return;
+    }
+    let pt = point_from_lparam(l_param);
+    let cx_drag = GetSystemMetrics(SM_CXDRAG).max(1);
+    let cy_drag = GetSystemMetrics(SM_CYDRAG).max(1);
+    if !marquee_drag_exceeded(app.diagnostic_marquee_anchor, pt, cx_drag, cy_drag) {
+        return;
+    }
+    app.diagnostic_marquee_pending = false;
+    app.diagnostic_marquee_active = true;
+    SetCapture(hwnd);
+    app.diagnostic_marquee_current = pt;
     app.diagnostic_marquee_initial_selected = list_selected_item_positions(hwnd);
-    let band = points_to_rect(pt, pt);
+    let band = points_to_rect(app.diagnostic_marquee_anchor, pt);
     update_marquee_selection(app, hwnd, &band);
     update_diagnostic_grid_selection(app);
 }
@@ -6490,6 +6523,7 @@ unsafe fn handle_marquee_capturechanged(hwnd: *mut c_void) {
         return;
     }
     let app = &mut *parent;
+    app.diagnostic_marquee_pending = false;
     if app.diagnostic_marquee_active {
         draw_marquee_rect(
             hwnd,
@@ -6521,10 +6555,27 @@ unsafe extern "system" fn diagnostic_list_proc(
     };
     match message {
         WM_LBUTTONDOWN => {
-            handle_marquee_lbuttondown(hwnd, l_param);
-            0
+            // Always forward to the native list view so it can establish the
+            // focus and selection anchor needed for Shift click range selection
+            // Only arm the custom marquee for plain clicks without modifiers
+            let native_modifiers = should_use_native_click_selection(
+                GetKeyState(VK_SHIFT) < 0,
+                GetKeyState(VK_CONTROL) < 0,
+            );
+            let result = if let Some(prev) = prev_proc {
+                CallWindowProcW(prev, hwnd, message, w_param, l_param)
+            } else {
+                DefWindowProcW(hwnd, message, w_param, l_param)
+            };
+            if !native_modifiers {
+                handle_marquee_lbuttondown(hwnd, l_param);
+            }
+            result
         }
         WM_MOUSEMOVE => {
+            if !parent.is_null() && (*parent).diagnostic_marquee_pending {
+                handle_marquee_pending_mousemove(hwnd, l_param);
+            }
             if !parent.is_null() && (*parent).diagnostic_marquee_active {
                 handle_marquee_mousemove(hwnd, l_param);
                 0
@@ -6538,10 +6589,15 @@ unsafe extern "system" fn diagnostic_list_proc(
             if !parent.is_null() && (*parent).diagnostic_marquee_active {
                 handle_marquee_lbuttonup(hwnd);
                 0
-            } else if let Some(prev) = prev_proc {
-                CallWindowProcW(prev, hwnd, message, w_param, l_param)
             } else {
-                DefWindowProcW(hwnd, message, w_param, l_param)
+                if !parent.is_null() {
+                    (*parent).diagnostic_marquee_pending = false;
+                }
+                if let Some(prev) = prev_proc {
+                    CallWindowProcW(prev, hwnd, message, w_param, l_param)
+                } else {
+                    DefWindowProcW(hwnd, message, w_param, l_param)
+                }
             }
         }
         WM_CAPTURECHANGED => {
@@ -7760,7 +7816,6 @@ extern "system" {
     fn SetCapture(hwnd: *mut c_void) -> *mut c_void;
     fn ReleaseCapture() -> i32;
     fn GetCapture() -> *mut c_void;
-    fn SetFocus(hwnd: *mut c_void) -> *mut c_void;
     fn CreateIconIndirect(info: *const IconInfo) -> *mut c_void;
     fn DestroyIcon(icon: *mut c_void) -> i32;
 }
@@ -8594,6 +8649,22 @@ mod tests {
         };
         let selected_empty = marquee_selected_indices(&empty_band, &row_rects, &[], false);
         assert!(selected_empty.is_empty());
+    }
+
+    #[test]
+    fn shift_click_bypasses_marquee_for_native_range_selection() {
+        assert!(should_use_native_click_selection(true, false));
+        assert!(should_use_native_click_selection(false, true));
+        assert!(should_use_native_click_selection(true, true));
+        assert!(!should_use_native_click_selection(false, false));
+
+        let anchor = Point { x: 100, y: 100 };
+        let still_inside = Point { x: 103, y: 102 };
+        let crossed_x = Point { x: 104, y: 100 };
+        let crossed_y = Point { x: 100, y: 104 };
+        assert!(!marquee_drag_exceeded(anchor, still_inside, 4, 4));
+        assert!(marquee_drag_exceeded(anchor, crossed_x, 4, 4));
+        assert!(marquee_drag_exceeded(anchor, crossed_y, 4, 4));
     }
 
     #[test]
