@@ -8757,7 +8757,7 @@ mod tests {
     #[test]
     fn hud_field_formatting_keeps_key_values_and_snapshot_evidence_visible() {
         let text = diagnostic_hud_field_text(DiagnosticHudFields {
-            effective: "0.500 ms",
+            effective: "0.4966 ms (4966 HNS)",
             ownership: "True™ Tick",
             power: "AC",
             startup: "On",
@@ -8769,7 +8769,7 @@ mod tests {
             chain_status: "OK",
         });
         for field in [
-            "Effective: 0.500 ms",
+            "Effective: 0.4966 ms (4966 HNS)",
             "Ownership: True™ Tick",
             "Power: AC",
             "Startup: On",

@@ -131,7 +131,7 @@ registration, and a bounded portable A/B launcher scaffold. The persisted
 acquisition, the adapter queries the current native boundaries and selects the
 numerically smallest supported boundary. It does not use a universal fixed
 `1 ms` or `0.5 ms` value. In the captured case, raw values `minimum_hns=156250`
-and `maximum_hns=5000` select `5000 HNS`, or `0.500 ms`, when that boundary is
+and `maximum_hns=5000` select `5000 HNS`, or `0.5000 ms`, when that boundary is
 reported by the current system. The adapter retains raw boundary values and
 selected HNS in diagnostics, then validates the selected value before requesting
 it. The compact tray menu starts with a clickable `True™ Tick v<version>` header sourced from Cargo package metadata. Root menu order is `True™ Tick v<version>`, a separator, `Start`, `Stop`, `Schedule >`, a separator, `Auto-start: On/Off`, `Auto-time: On/Off`, a separator, `Status >`, `Logs`, a separator, and `Quit`. Start and stop are primary and stay at the top. Scheduling and pausing are secondary and now share one submenu instead of two, so there is a single duration surface. The `Schedule >` submenu contains, in order, `Start in >`, `Stop in >`, `Pause for >`, a separator, `Cancel scheduled action`, and `Resume now`. The native menu builder, the internal label vector, and its tests all use `Pause for >`, so the label has one source of truth. Pause offers 5 minutes, 15 minutes, 30 minutes, and 1 hour. Schedule offers Start in, Stop in, Cancel scheduled action, and `Resume now` when a pause is active. Start and stop schedule choices offer 1 minute, 5 minutes, 15 minutes, 30 minutes, and 1 hour. Tooltips for Schedule actions explicitly state that selecting a new choice replaces any currently pending scheduled action. There are no two scheduling surfaces, custom duration, persistence, stacking, or indefinite pause. Auto-start controls launch at Windows login. Auto-time controls automatic timer acquisition after launch. The current defaults are `startup_enabled = true` and `automatic = false`, so login launch does not acquire timing until the user manually starts it.
@@ -150,11 +150,14 @@ observational only, so normal Quit records remaining external timing and does no
 wait for another application.
 It excludes raw pointers, private tokens, credentials, arbitrary secrets, and
 unbounded sensitive paths. The branded tooltip uses short runtime values such as
-`True™ Tick: Running · 0.497 ms`, `True™ Tick: Stopped · 0.997 ms`,
-`True™ Tick: Starting · 0.997 ms`, `True™ Tick: Stopping · 0.497 ms`,
-`True™ Tick: Warning`, and `True™ Tick: Error`. The read-only Status submenu uses concise rows such as
-`State: Running`, `Timing: 0.497 ms`, `Running for: 4m 12s`, and
-`Ownership: True™ Tick`. Values use the selected request and the latest verified effective
+`True™ Tick: Running · 0.4966 ms`, `True™ Tick: Stopped · 0.9966 ms`,
+`True™ Tick: Starting · 0.9966 ms`, `True™ Tick: Stopping · 0.4966 ms`,
+`True™ Tick: Warning`, and `True™ Tick: Error`. Timing is shown as exact
+four-decimal milliseconds derived from the native 100-nanosecond unit with no
+rounding, so 4966 HNS is written `0.4966 ms`. The read-only Status submenu uses concise rows such as
+`State: Running`, `Timing: 0.4966 ms (4966 HNS)`, `Running for: 4m 12s`, and
+`Ownership: True™ Tick`, where the detailed Timing row and the diagnostic HUD
+Effective field add the raw HNS unit count to the same unrounded value. Values use the selected request and the latest verified effective
 observation as distinct fields, and another platform boundary is allowed. After a
 	successful request, the returned effective observation replaces the preflight
 	current value in controller and app state. After release, the returned current
@@ -167,14 +170,14 @@ finer value remains, the app shows red `Stopped` with external timing and logs t
 Tick ownership is released while another or unknown client keeps finer timing. There is no
 synthetic parenthetical status string rendered by the application. This
 classification also applies to battery-policy and other owned-request releases.
-The captured `current_hns=9966` value was about `0.997 ms` because the old config requested
+The captured `current_hns=9966` value was `0.9966 ms` because the old config requested
 `10000 HNS`. That config is migrated to automatic selection. At startup, the controller always queries the current effective timing, even when True™ Tick is stopped and Auto-time is off. A successful query is displayed as stopped current timing without claiming Tick ownership. A failed query is displayed as `Stopped · Timing unknown` and recorded as a diagnostic failure. The selected or requested boundary remains separate from the current effective observation.
 
 Power broadcasts refresh timing and recalculate the visible state for both Auto-time settings. With Auto-time off, AC and no owned request show stopped current timing and wait for manual Start. Battery, Battery Saver, and unknown power remain conservative and release owned timing when policy requires it. Returning to AC with Auto-time on attempts acquisition. Returning to AC with Auto-time off shows stopped current timing rather than leaving a stale blocked state.
 
 Duration scheduling is session-only and uses monotonic deadlines. Only one scheduled action or pause exists. A new selection logs the replacement before it replaces the old generation. Cancellation invalidates the generation and kills the bounded coordinator timer, so stale timer events do nothing. Start in queues a future acquire intent, refreshes current power at the deadline, and applies AC, battery, Battery Saver, and unknown policy again. A blocked start is logged as suppressed and does not acquire. Stop in uses the guarded release path, records a no-op when already released, and uses the existing yellow handoff watcher when release leaves finer external timing. Pause for immediately suppresses acquisition and releases through ownership logic. A scheduled Start remains released until its deadline. A scheduled Stop keeps owned timing until its deadline unless policy blocks it. Expiry or cancellation refreshes policy and re-evaluates it through the same serialized path. The coordinator uses at most one bounded Windows timer and does not poll permanently.
 
-The display uses `Unknown` when no valid observation is available. Raw HNS and full event details remain in the diagnostic window. The read-only Status submenu records current state, effective timing, monotonic running duration, next action, and ownership. The local diagnostic session records automatic selection,
+The display uses `Unknown` when no valid observation is available. Timing values are exact four-decimal milliseconds taken from the native 100-nanosecond unit with no rounding, so 4966 HNS is displayed as `0.4966 ms`. The context menu Timing row and the diagnostic HUD Effective field add the raw unit count in the form `0.4966 ms (4966 HNS)`. Raw HNS and full event details remain in the diagnostic window. The read-only Status submenu records current state, effective timing, monotonic running duration, next action, and ownership. The local diagnostic session records automatic selection,
 raw native boundaries, selected HNS, requested HNS, effective HNS, raw status,
 and an `equal`, `finer`, or `unverified` effective relation. The tooltip, status
 summary, and diagnostic header use the latest verified effective observation from
@@ -339,7 +342,7 @@ running `sha256sum -c SHA256SUMS.txt` in the extracted folder.
 
 ## Tray tooltip and ownership contract
 
-The tray tooltip is branded and concise. It uses the current effective timing from the authoritative snapshot, never the requested interval. Valid timing is shown with a middle dot, for example `True™ Tick: Running · 0.497 ms`. Invalid timing is shown as `True™ Tick: Stopped · Timing unknown` or `Timing unknown`. Tooltips are always of the format `True™ Tick: <state> · <timing>`, and parenthetical forms such as `Stopped (current: X ms)` or `Stopped (external: X ms)` are not used on any surface. The states are `Stopped`, `Running`, `Starting`, `Stopping`, `Stopping, handoff`, `Starting in 5m 0s`, and `Paused for 5m 0s`. A plain paused state has no countdown. Countdowns explicitly include seconds to prevent ambiguity. Positive schedule and pause time rounds upward from the monotonic deadline. For a scheduled start, the tooltip displays the countdown while the timer remains released. For a scheduled stop, the tooltip shows the countdown while the timer remains owned until the deadline. Positive fractional remaining seconds round upward so a five minute choice initially reads as five minutes zero seconds (`5m 0s`).
+The tray tooltip is branded and concise. It uses the current effective timing from the authoritative snapshot, never the requested interval. Valid timing is shown with a middle dot, for example `True™ Tick: Running · 0.4966 ms`. Invalid timing is shown as `True™ Tick: Stopped · Timing unknown` or `Timing unknown`. Timing uses exact four-decimal milliseconds over the native 100-nanosecond unit, so 4966 HNS is written `0.4966 ms` with no rounding, and raw HNS units appear only in detailed status views such as the context menu Timing row and the diagnostic HUD Effective field, which show `0.4966 ms (4966 HNS)`. Tooltips are always of the format `True™ Tick: <state> · <timing>`, and parenthetical forms such as `Stopped (current: X ms)` or `Stopped (external: X ms)` are not used on any surface. The states are `Stopped`, `Running`, `Starting`, `Stopping`, `Stopping, handoff`, `Starting in 5m 0s`, and `Paused for 5m 0s`. A plain paused state has no countdown. Countdowns explicitly include seconds to prevent ambiguity. Positive schedule and pause time rounds upward from the monotonic deadline. For a scheduled start, the tooltip displays the countdown while the timer remains released. For a scheduled stop, the tooltip shows the countdown while the timer remains owned until the deadline. Positive fractional remaining seconds round upward so a five minute choice initially reads as five minutes zero seconds (`5m 0s`).
 
 The icon follows the same derived lifecycle state as the tooltip. Running with verified ownership is green. Stopped is red. Scheduled, paused, transitioning, handoff, and unverified states are yellow. Warning, error, and policy-blocked states retain the existing red safety mapping. Scheduled Start and Pause release True™ Tick ownership immediately. Scheduled Stop retains ownership until its deadline unless AC, battery, Battery Saver, or unknown policy requires an earlier release. The popup Status rows use the same snapshot and lifecycle wording, with additional running duration, next action, and ownership detail.
 

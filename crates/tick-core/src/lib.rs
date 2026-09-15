@@ -31,10 +31,25 @@ impl Hns {
     }
 
     /// Formats the value for concise user-facing millisecond display.
+    ///
+    /// The output is exact to four decimal places because one HNS is exactly
+    /// one ten-thousandth of a millisecond. No rounding is applied.
     pub fn format_milliseconds(self) -> String {
-        let thousandths = self.0.saturating_add(HNS_PER_THOUSANDTH_MILLISECOND / 2)
-            / HNS_PER_THOUSANDTH_MILLISECOND;
-        format!("{}.{:03}", thousandths / 1_000, thousandths % 1_000)
+        format!(
+            "{}.{:04}",
+            self.0 / HNS_PER_MILLISECOND,
+            self.0 % HNS_PER_MILLISECOND
+        )
+    }
+
+    /// Formats the value with both exact milliseconds and the raw HNS count.
+    pub fn format_detailed(self) -> String {
+        format!(
+            "{}.{:04} ms ({} HNS)",
+            self.0 / HNS_PER_MILLISECOND,
+            self.0 % HNS_PER_MILLISECOND,
+            self.0
+        )
     }
 }
 
@@ -153,8 +168,19 @@ mod tests {
 
     #[test]
     fn hns_millisecond_formatting_uses_the_shared_conversion() {
-        assert_eq!(Hns::new(4_966).format_milliseconds(), "0.497");
-        assert_eq!(Hns::new(5_000).format_milliseconds(), "0.500");
+        assert_eq!(Hns::new(4_966).format_milliseconds(), "0.4966");
+        assert_eq!(Hns::new(5_000).format_milliseconds(), "0.5000");
+        assert_eq!(Hns::new(9_999).format_milliseconds(), "0.9999");
+        assert_eq!(Hns::new(156_250).format_milliseconds(), "15.6250");
+    }
+
+    #[test]
+    fn hns_detailed_formatting_includes_raw_units() {
+        assert_eq!(Hns::new(4_966).format_detailed(), "0.4966 ms (4966 HNS)");
+        assert_eq!(
+            Hns::new(156_250).format_detailed(),
+            "15.6250 ms (156250 HNS)"
+        );
     }
 
     #[test]

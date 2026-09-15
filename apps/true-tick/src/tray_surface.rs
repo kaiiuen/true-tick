@@ -635,7 +635,14 @@ fn format_duration_seconds(seconds: u64) -> String {
 }
 
 fn effective_timing_label(timing: TimingValues) -> String {
-    effective_timing_suffix(timing)
+    if timing.valid && !timing.invalid_interval {
+        timing.effective.map_or_else(
+            || "Timing unknown".to_owned(),
+            |value| value.format_detailed(),
+        )
+    } else {
+        "Timing unknown".to_owned()
+    }
 }
 
 fn running_for_label(running_for: Option<Duration>) -> String {
@@ -991,7 +998,7 @@ mod tests {
         let timing = TimingValues::from_snapshot(snapshot, false, false, false, true);
         assert_eq!(
             tooltip(TrayStatus::Running, timing),
-            "True™ Tick: Running · 0.497 ms"
+            "True™ Tick: Running · 0.4966 ms"
         );
         let status = status_menu_items(
             TrayStatus::Running,
@@ -1002,7 +1009,7 @@ mod tests {
             Instant::now(),
         );
         assert_eq!(status[0].label, "State: Running");
-        assert_eq!(status[1].label, "Timing: 0.497 ms");
+        assert_eq!(status[1].label, "Timing: 0.4966 ms (4966 HNS)");
         assert_eq!(status[2].label, "Running for: 4m 12s");
     }
 
@@ -1263,7 +1270,7 @@ mod tests {
                     valid: true,
                 },
             ),
-            "True™ Tick: Stopped · 0.497 ms"
+            "True™ Tick: Stopped · 0.4966 ms"
         );
     }
 
@@ -1560,15 +1567,15 @@ mod tests {
         };
         assert_eq!(
             tooltip(TrayStatus::Running, exact),
-            "True™ Tick: Running · 0.500 ms"
+            "True™ Tick: Running · 0.5000 ms"
         );
         assert_eq!(
             tooltip(TrayStatus::Running, finer),
-            "True™ Tick: Running · 0.497 ms"
+            "True™ Tick: Running · 0.4966 ms"
         );
         assert_eq!(
             tooltip(TrayStatus::Stopped, finer),
-            "True™ Tick: Stopped · 0.497 ms"
+            "True™ Tick: Stopped · 0.4966 ms"
         );
         assert_eq!(
             tooltip(
@@ -1582,7 +1589,7 @@ mod tests {
         );
         assert_eq!(
             tooltip(TrayStatus::Stopping, finer),
-            "True™ Tick: Stopping · 0.497 ms"
+            "True™ Tick: Stopping · 0.4966 ms"
         );
         assert_eq!(
             tooltip(
@@ -1594,7 +1601,7 @@ mod tests {
                     ..TimingValues::default()
                 }
             ),
-            "True™ Tick: Stopping, handoff · 0.497 ms"
+            "True™ Tick: Stopping, handoff · 0.4966 ms"
         );
         assert_eq!(
             tooltip(
@@ -1606,7 +1613,7 @@ mod tests {
                     ..TimingValues::default()
                 }
             ),
-            "True™ Tick: Stopped · 0.497 ms"
+            "True™ Tick: Stopped · 0.4966 ms"
         );
         assert_eq!(
             tooltip(
@@ -1630,19 +1637,19 @@ mod tests {
         };
         assert_eq!(
             tooltip_at(TrayStatus::Running, timing, None, now),
-            "True™ Tick: Running · 0.497 ms"
+            "True™ Tick: Running · 0.4966 ms"
         );
         assert_eq!(
             tooltip_at(TrayStatus::Stopped, timing, None, now),
-            "True™ Tick: Stopped · 0.497 ms"
+            "True™ Tick: Stopped · 0.4966 ms"
         );
         assert_eq!(
             tooltip_at(TrayStatus::Starting, timing, None, now),
-            "True™ Tick: Starting · 0.497 ms"
+            "True™ Tick: Starting · 0.4966 ms"
         );
         assert_eq!(
             tooltip_at(TrayStatus::Stopping, timing, None, now),
-            "True™ Tick: Stopping · 0.497 ms"
+            "True™ Tick: Stopping · 0.4966 ms"
         );
         assert_eq!(
             tooltip_at(
@@ -1654,7 +1661,7 @@ mod tests {
                 None,
                 now,
             ),
-            "True™ Tick: Stopping, handoff · 0.497 ms"
+            "True™ Tick: Stopping, handoff · 0.4966 ms"
         );
     }
 
@@ -1682,19 +1689,19 @@ mod tests {
         };
         assert_eq!(
             tooltip_at(TrayStatus::ScheduledStart, timing, Some(start), now),
-            "True™ Tick: Starting in 5m 0s · 0.997 ms"
+            "True™ Tick: Starting in 5m 0s · 0.9966 ms"
         );
         assert_eq!(
             tooltip_at(TrayStatus::ScheduledStop, timing, Some(stop), now),
-            "True™ Tick: Stopping in 5m 0s · 0.997 ms"
+            "True™ Tick: Stopping in 5m 0s · 0.9966 ms"
         );
         assert_eq!(
             tooltip_at(TrayStatus::Paused, timing, Some(pause), now),
-            "True™ Tick: Paused for 5m 0s · 0.997 ms"
+            "True™ Tick: Paused for 5m 0s · 0.9966 ms"
         );
         assert_eq!(
             tooltip_at(TrayStatus::Paused, timing, None, now),
-            "True™ Tick: Paused · 0.997 ms"
+            "True™ Tick: Paused · 0.9966 ms"
         );
     }
 
@@ -1761,7 +1768,7 @@ mod tests {
                 None,
                 now,
             ),
-            "True™ Tick: Stopped · 0.497 ms"
+            "True™ Tick: Stopped · 0.4966 ms"
         );
         assert_eq!(
             tooltip_at(TrayStatus::Error, TimingValues::default(), None, now),
@@ -1815,9 +1822,9 @@ mod tests {
 
     #[test]
     fn timing_format_rounds_hns_without_exposing_raw_units() {
-        assert_eq!(format_ms(Hns::new(4_966)), "0.497");
-        assert_eq!(format_ms(Hns::new(5_000)), "0.500");
-        assert_eq!(format_ms(Hns::new(156_250)), "15.625");
+        assert_eq!(format_ms(Hns::new(4_966)), "0.4966");
+        assert_eq!(format_ms(Hns::new(5_000)), "0.5000");
+        assert_eq!(format_ms(Hns::new(156_250)), "15.6250");
     }
 
     #[test]
