@@ -240,6 +240,10 @@ pub const MAX_TSV_ROWS: usize = HARD_MAX_EVENTS;
 pub const MAX_TSV_BYTES: usize =
     REPORT_COLUMNS.len() * (MAX_FIELD_LENGTH + 3) * MAX_TSV_ROWS + MAX_TSV_ROWS * 2 + 256;
 
+pub const MAX_CSV_ROWS: usize = MAX_TSV_ROWS;
+pub const MAX_CSV_BYTES: usize =
+    REPORT_COLUMNS.len() * (MAX_FIELD_LENGTH * 2 + 3) * MAX_CSV_ROWS + MAX_CSV_ROWS * 2 + 256;
+
 pub fn snapshot_is_truncated(events: &[DiagnosticEvent]) -> bool {
     events
         .first()
@@ -620,6 +624,39 @@ pub fn format_tsv(rows: &[DiagnosticGridRow]) -> String {
             }
             let cell = row.cells.get(index).map_or("", String::as_str);
             output.push_str(&sanitize(cell));
+        }
+        output.push_str("\r\n");
+    }
+    output
+}
+
+fn csv_field(cell: &str) -> String {
+    let field = truncate_utf8(cell, MAX_FIELD_LENGTH);
+    if !field.contains([',', '"', '\n', '\r']) {
+        return field;
+    }
+    let mut quoted = String::with_capacity(field.len() + 2);
+    quoted.push('"');
+    for character in field.chars() {
+        if character == '"' {
+            quoted.push('"');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    quoted
+}
+
+pub fn format_csv(rows: &[DiagnosticGridRow]) -> String {
+    let mut output = REPORT_COLUMNS.join(",");
+    output.push_str("\r\n");
+    for row in rows.iter().take(MAX_CSV_ROWS) {
+        for index in 0..REPORT_COLUMNS.len() {
+            if index > 0 {
+                output.push(',');
+            }
+            let cell = row.cells.get(index).map_or("", String::as_str);
+            output.push_str(&csv_field(cell));
         }
         output.push_str("\r\n");
     }
@@ -1205,6 +1242,48 @@ mod tests {
         assert!(output.len() <= MAX_TSV_BYTES);
         assert_eq!(output.lines().count(), 2);
         assert_eq!(output.lines().nth(1).unwrap().split('\t').count(), 11);
+    }
+
+    #[test]
+    fn csv_formatter_has_the_report_header_and_clean_cells_without_quotes() {
+        let row = DiagnosticGridRow {
+            cells: vec!["1".to_owned(), "42".to_owned(), "+3ms".to_owned()],
+        };
+        let output = format_csv(&[row]);
+        assert_eq!(
+            output,
+            "Row,Sequence,Elapsed,Operation,Parent,Correlation,Phase,Source,Outcome,Event,Details\r\n1,42,+3ms,,,,,,,,\r\n"
+        );
+    }
+
+    #[test]
+    fn csv_formatter_quotes_special_fields_and_doubles_internal_quotes() {
+        let row = DiagnosticGridRow {
+            cells: vec![
+                "a,b".to_owned(),
+                "say \"hi\"".to_owned(),
+                "line\nbreak".to_owned(),
+                "carriage\rreturn".to_owned(),
+                "plain".to_owned(),
+            ],
+        };
+        let output = format_csv(&[row]);
+        assert!(output.contains("\"a,b\""));
+        assert!(output.contains("\"say \"\"hi\"\"\""));
+        assert!(output.contains("\"line\nbreak\""));
+        assert!(output.contains("\"carriage\rreturn\""));
+        assert!(output.contains(",plain,"));
+        assert!(output.len() <= MAX_CSV_BYTES);
+    }
+
+    #[test]
+    fn csv_header_matches_the_eleven_report_columns() {
+        let output = format_csv(&[]);
+        assert_eq!(
+            output,
+            "Row,Sequence,Elapsed,Operation,Parent,Correlation,Phase,Source,Outcome,Event,Details\r\n"
+        );
+        assert_eq!(output.trim_end().split(',').count(), 11);
     }
 
     #[test]

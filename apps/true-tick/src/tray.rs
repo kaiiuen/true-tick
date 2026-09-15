@@ -10,13 +10,13 @@ use std::sync::Arc;
 
 use tick_core::{DesiredIntent, DesiredIntentQueue};
 use tick_diagnostics::{
-    diagnostic_grid_rows, diagnostic_grid_rows_for_sequences, format_tsv, latest_row_selection,
-    parse_display_limit, parse_row_selection, retention_summary, row_selection_for_sequences,
-    selected_event_sequences, selected_event_sequences_for_positions,
+    diagnostic_grid_rows, diagnostic_grid_rows_for_sequences, format_csv, format_tsv,
+    latest_row_selection, parse_display_limit, parse_row_selection, retention_summary,
+    row_selection_for_sequences, selected_event_sequences, selected_event_sequences_for_positions,
     selected_event_sequences_for_sequences, snapshot_is_truncated, truncate_utf8,
-    visible_positions_for_sequences, DiagnosticOutcome, DiagnosticPhase, DiagnosticRecord,
-    DiagnosticSource, DiagnosticStore, NativeOutcome, OperationContext, RowSelection,
-    DEFAULT_MAX_EVENTS, REPORT_COLUMNS,
+    visible_positions_for_sequences, DiagnosticGridRow, DiagnosticOutcome, DiagnosticPhase,
+    DiagnosticRecord, DiagnosticSource, DiagnosticStore, NativeOutcome, OperationContext,
+    RowSelection, DEFAULT_MAX_EVENTS, REPORT_COLUMNS,
 };
 use tick_observation_windows::{ObservationSource, WindowsObservation};
 use tick_ownership::{OwnershipState, TimerController, TimingSnapshot, Verification};
@@ -743,18 +743,53 @@ pub fn run() {
         };
         let executable = get_module_file_name_w_path_with_diagnostics(Some(&diagnostics));
         diagnostics.record("lifecycle.executable_observed", "path=redacted");
-        if let Ok(root) = crate::portable::portable_root_from_slot_executable(&executable) {
-            let selection = crate::portable::select(&root);
-            diagnostics.record(
-                "portable.active_slot.selection",
-                format!("result={}", selection.description()),
-            );
-        } else {
-            diagnostics.record(
-                "portable.active_slot.selection",
-                "result=not_portable_slot_layout",
-            );
-        }
+        let (is_slot_layout, portable_root_str, active_slot_selection, slot_executable_target) =
+            match crate::portable::portable_root_from_slot_executable(&executable) {
+                Ok(root) => {
+                    let selection = crate::portable::select(&root);
+                    diagnostics.record(
+                        "portable.active_slot.selection",
+                        format!("result={}", selection.description()),
+                    );
+                    let (selection_str, target_str) = match &selection {
+                        crate::portable::Selection::Selected { slot, path } => (
+                            format!("Selected({slot:?})"),
+                            path.join("true-tick.exe").display().to_string(),
+                        ),
+                        crate::portable::Selection::RepairRequired(reason) => {
+                            (format!("RepairRequired({reason})"), "none".to_string())
+                        }
+                    };
+                    (true, root.display().to_string(), selection_str, target_str)
+                }
+                Err(_) => {
+                    diagnostics.record(
+                        "portable.active_slot.selection",
+                        "result=not_portable_slot_layout",
+                    );
+                    let selection_str = if cfg!(debug_assertions)
+                        && tick_startup_windows::is_development_executable(&executable)
+                    {
+                        "DevelopmentTarget".to_string()
+                    } else {
+                        "none".to_string()
+                    };
+                    let target_str = if cfg!(debug_assertions)
+                        && tick_startup_windows::is_development_executable(&executable)
+                    {
+                        executable.display().to_string()
+                    } else {
+                        "none".to_string()
+                    };
+                    (false, "none".to_string(), selection_str, target_str)
+                }
+            };
+        diagnostics.record(
+            "lifecycle.portable_environment",
+            format!(
+                "is_slot_layout={is_slot_layout} portable_root={portable_root_str} active_slot_selection={active_slot_selection} slot_executable_target={slot_executable_target}"
+            ),
+        );
         let config_path = config::path_from_executable(&executable);
         let (loaded, config_status, config_migrated) =
             match config::load_with_migration(&config_path) {
@@ -847,12 +882,27 @@ pub fn run() {
         let power_observation_error = match observation.refresh_power() {
             Ok(snapshot) => {
                 diagnostics.record(
+                    "power.observation.raw",
+                    format!(
+                        "power_state={:?} battery_saver={:?}",
+                        snapshot.state, snapshot.battery_saver
+                    ),
+                );
+                diagnostics.record(
                     "power.initial_observation",
                     format!("result=success state={:?}", snapshot.state),
                 );
                 None
             }
             Err(error) => {
+                let snapshot = observation.power();
+                diagnostics.record(
+                    "power.observation.raw",
+                    format!(
+                        "power_state={:?} battery_saver={:?}",
+                        snapshot.state, snapshot.battery_saver
+                    ),
+                );
                 diagnostics.record(
                     "power.initial_observation",
                     format!("result=error reason={error}"),
@@ -2095,6 +2145,14 @@ fn refresh_power_for_duration(app: &mut App, source: &str) {
         format!("source={source} fields=sanitized"),
     );
     let result = app.observation.refresh_power();
+    let power_snapshot = app.observation.power();
+    app.record(
+        "power.observation.raw",
+        format!(
+            "power_state={:?} battery_saver={:?}",
+            power_snapshot.state, power_snapshot.battery_saver
+        ),
+    );
     app.record(
         "duration.power_observation",
         format!(
@@ -2975,6 +3033,14 @@ unsafe extern "system" fn window_proc(
                 let previous = app.observation.power().state;
                 app.record("native.GetSystemPowerStatus.call", "fields=sanitized");
                 let result = app.observation.refresh_power();
+                let power_snapshot = app.observation.power();
+                app.record(
+                    "power.observation.raw",
+                    format!(
+                        "power_state={:?} battery_saver={:?}",
+                        power_snapshot.state, power_snapshot.battery_saver
+                    ),
+                );
                 app.record(
                     "power.observation",
                     format!(
@@ -5339,10 +5405,11 @@ unsafe fn copy_tsv_to_clipboard(owner: *mut c_void, text: &str) -> Result<(), Na
 }
 
 unsafe fn choose_export_path(owner: *mut c_void) -> Result<Option<PathBuf>, NativeFailure> {
-    let filter = wide("TSV files (*.tsv)\0*.tsv\0All files (*.*)\0*.*\0\0");
+    let filter =
+        wide("CSV files (*.csv)\0*.csv\0TSV files (*.tsv)\0*.tsv\0All files (*.*)\0*.*\0\0");
     let title = wide("Export True™ Tick diagnostic log");
-    let default_extension = wide("tsv");
-    let mut file = wide("true-tick-log.tsv");
+    let default_extension = wide("csv");
+    let mut file = wide("true-tick-log.csv");
     file.resize(MAX_EXPORT_PATH_UTF16, 0);
     let mut dialog = OpenFileNameW {
         struct_size: size_of::<OpenFileNameW>() as u32,
@@ -5396,6 +5463,40 @@ unsafe fn choose_export_path(owner: *mut c_void) -> Result<Option<PathBuf>, Nati
 
 fn export_io_error(error: &std::io::Error) -> u32 {
     error.raw_os_error().unwrap_or(1).try_into().unwrap_or(1)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiagnosticExportFormat {
+    Csv,
+    Tsv,
+}
+
+impl DiagnosticExportFormat {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Csv => "CSV",
+            Self::Tsv => "TSV",
+        }
+    }
+}
+
+fn export_format_for_path(path: &Path) -> DiagnosticExportFormat {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("tsv") => DiagnosticExportFormat::Tsv,
+        _ => DiagnosticExportFormat::Csv,
+    }
+}
+
+fn format_export_rows(rows: &[DiagnosticGridRow], format: DiagnosticExportFormat) -> String {
+    match format {
+        DiagnosticExportFormat::Csv => format_csv(rows),
+        DiagnosticExportFormat::Tsv => format_tsv(rows),
+    }
 }
 
 unsafe fn write_export_tsv(path: &Path, text: &str) -> Result<(), NativeFailure> {
@@ -5669,13 +5770,15 @@ fn diagnostic_toolbar_action(app: &mut App, action: &str) {
                     return;
                 }
             };
-            let write_result = unsafe { write_export_tsv(&path, &tsv) };
+            let format = export_format_for_path(&path);
+            let export_text = format_export_rows(&rows, format);
+            let write_result = unsafe { write_export_tsv(&path, &export_text) };
             match write_result {
                 Ok(()) => {
                     unsafe {
                         set_diagnostic_message(
                             app,
-                            format!("Exported {} rows as TSV.", rows.len()),
+                            format!("Exported {} rows as {}.", rows.len(), format.label()),
                         );
                     }
                     app.record(
@@ -7251,6 +7354,57 @@ mod tests {
             map_save_dialog_result(0, 1223),
             DiagnosticNativeAction::Failed { raw_error: 1223 }
         );
+    }
+
+    #[test]
+    fn export_format_is_csv_by_default_and_tsv_only_for_tsv_extension() {
+        assert_eq!(
+            export_format_for_path(Path::new("true-tick-log.csv")),
+            DiagnosticExportFormat::Csv
+        );
+        assert_eq!(
+            export_format_for_path(Path::new("true-tick-log.CSV")),
+            DiagnosticExportFormat::Csv
+        );
+        assert_eq!(
+            export_format_for_path(Path::new("true-tick-log.tsv")),
+            DiagnosticExportFormat::Tsv
+        );
+        assert_eq!(
+            export_format_for_path(Path::new("true-tick-log.TSV")),
+            DiagnosticExportFormat::Tsv
+        );
+        assert_eq!(
+            export_format_for_path(Path::new("true-tick-log")),
+            DiagnosticExportFormat::Csv
+        );
+        assert_eq!(
+            export_format_for_path(Path::new("true-tick-log.txt")),
+            DiagnosticExportFormat::Csv
+        );
+    }
+
+    #[test]
+    fn export_formatter_produces_rfc4180_csv_and_sanitized_tsv() {
+        let row = DiagnosticGridRow {
+            cells: vec![
+                "1".to_owned(),
+                "a,b".to_owned(),
+                "say \"hi\"".to_owned(),
+                "line\nbreak".to_owned(),
+            ],
+        };
+        let csv = format_export_rows(std::slice::from_ref(&row), DiagnosticExportFormat::Csv);
+        assert_eq!(
+            csv,
+            "Row,Sequence,Elapsed,Operation,Parent,Correlation,Phase,Source,Outcome,Event,Details\r\n1,\"a,b\",\"say \"\"hi\"\"\",\"line\nbreak\",,,,,,,\r\n"
+        );
+        let tsv = format_export_rows(&[row], DiagnosticExportFormat::Tsv);
+        assert!(tsv.starts_with(
+            "Row\tSequence\tElapsed\tOperation\tParent\tCorrelation\tPhase\tSource\tOutcome\tEvent\tDetails\r\n"
+        ));
+        assert!(tsv.contains("a,b"));
+        assert!(tsv.contains("line break"));
     }
 
     #[test]
