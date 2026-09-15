@@ -73,8 +73,15 @@ text outcome column so status never depends on tint or colour alone.
 Ctrl+C works when the grid has focus. Copy and Export use selected grid rows first.
 When no grid rows are selected, both use the separate `Rows to copy/export:` range
 input over the full retained snapshot. Display slicing is strictly independent from the
-transfer range, which prevents a view filter from corrupting an export.
-The `Show rows:` display limit never changes transfer selection. Ctrl+A selects all currently
+transfer range, which prevents a view filter from corrupting an export. A separate
+`Export all` button bypasses both the grid selection and the transfer range and always
+exports the complete unfiltered event snapshot, so an active category filter or
+selection can never silently truncate a full export.
+The `Show rows:` display limit never changes transfer selection. A `CBS_DROPDOWNLIST`
+category combo box on the toolbar filters the grid by `EventCategory` in real time,
+offering `All categories`, Startup, Timer, Power, UI, Schedule, and System. A
+`CBN_SELCHANGE` selection records `diagnostic.category_filter.changed` and refreshes
+the grid to show only matching events. Ctrl+A selects all currently
 displayed rows when the grid has focus. A refresh preserves selected event sequences when retained. Truncation drops
 invalid selections, preserves valid selected events, and shows and logs a concise
 selection reset. These UI actions do not change timer state.
@@ -92,7 +99,9 @@ remains 512.
 
 A refresh suspends redraw while controls and the list are updated, then re-enables
 redraw, explicitly invalidates and updates the summary `STATIC` and `ListView`, and
-updates the parent window once within the same batch. `WM_SIZE` only performs one deferred control
+updates the parent window once within the same batch. The explicit post-redraw target
+list now covers all 16 diagnostic children, including the category filter combo and
+the Export all button. `WM_SIZE` only performs one deferred control
 reposition pass. It does not snapshot data, rebuild rows, or fit columns. Horizontal
 scrolling and header interaction do not fit columns. Auto-fit runs after the initial
 population or a material data snapshot change, once per snapshot generation. Fixed
@@ -100,7 +109,7 @@ columns are bounded and Details absorbs remaining width. Normal refresh restores
 horizontal scroll position when Windows permits it. Reopening reuses the existing
 window and posts one refresh rather than rebuilding synchronously.
 
-The diagnostic summary is a restrained native HUD. A lifecycle-derived State line is larger and bold, followed by a compact three-line telemetry block with `|` separators that carries Effective timing, Ownership, Power, Startup, Running duration, Next action, and the retained event history and visible row count. Native etched separators make the HUD, one-row toolbar, and report grid distinct. The HUD is a read-only `STATIC` presentation with no `WS_VSCROLL`, `ES_AUTOVSCROLL`, or multiline edit style. Its base height is 104 logical pixels. At 96 DPI the toolbar client minimum is 830 pixels and the minimum client height is 240 pixels. `WM_GETMINMAXINFO` converts those intended client minimums to outer tracking dimensions with `AdjustWindowRectExForDpi`, with the legacy frame API as a fallback. Completing a redraw pass invalidates and updates all 14 diagnostic child controls explicitly, so no control stays blank after `WM_SETREDRAW` while it waits for a mouse hover.
+The diagnostic summary is a restrained native HUD. A lifecycle-derived State line is larger and bold, followed by a compact three-line telemetry block with `|` separators that carries Effective timing, Ownership, Power, Startup, Running duration, Next action, the retained event history and visible row count, and the event-chain integrity status. The integrity field runs `verify_event_chain` over the current snapshot and shows `Chain: OK` when every entry hash and link verifies, or `Chain: Error at #<index>` naming the first offending retained row. Native etched separators make the HUD, one-row toolbar, and report grid distinct. The HUD is a read-only `STATIC` presentation with no `WS_VSCROLL`, `ES_AUTOVSCROLL`, or multiline edit style. Its base height is 104 logical pixels. At 96 DPI the toolbar client minimum is 830 pixels and the minimum client height is 240 pixels. `WM_GETMINMAXINFO` converts those intended client minimums to outer tracking dimensions with `AdjustWindowRectExForDpi`, with the legacy frame API as a fallback. Completing a redraw pass invalidates and updates all 14 diagnostic child controls explicitly, so no control stays blank after `WM_SETREDRAW` while it waits for a mouse hover.
 
 Layout failure handling records `BeginDeferWindowPos`, every failed `DeferWindowPos`, and `EndDeferWindowPos`. It then positions every child with individual `SetWindowPos` calls. Child creation returns `-1` after every partial child set is destroyed. Reuse verifies the parent and every required child before showing the window.
 
@@ -193,10 +202,26 @@ and attempts only a controlled matching release. Normal message-loop shutdown
 attempts this cleanup once and preserves an unverified warning when it fails. Events use monotonic sequence numbers and elapsed time
 from process start. The default bound is 512 events. Newest events are retained
 with a truncation marker when the bound is reached. Disk persistence for full
-session logs is deferred. Session events retain operation_id, optional
+session logs uses a rolling daily file rather than an unbounded single log. After
+each diagnostic refresh and once at shutdown, a background thread appends every
+newly recorded event to `Data/logs/true-tick-YYYY-MM-DD.csv` under the portable
+root, or to `logs/` beside the executable in a non-portable layout. Each line is
+an RFC 4180 CSV row with the eleven report columns plus hex-encoded `PrevHash` and
+`EntryHash` columns. The app tracks `last_persisted_event_sequence` so only new
+events are appended, and write failures are reported to stderr without altering
+timer state. Session events retain operation_id, optional
 parent_operation_id, correlation_id, finite phase, finite source, finite outcome,
 and typed native NTSTATUS, Win32 last-error, requested HNS, selected HNS, and
 effective HNS fields where available. Rendered text is bounded and sanitized.
+
+Every event participates in a SHA-256 integrity chain. The store seeds the chain
+from a deterministic genesis digest of `TrueTick-Genesis-v1`. Each event stores
+the preceding entry hash in `prev_hash` and its own `entry_hash` over the link,
+sequence, timestamp, name, and details. `verify_event_chain` replays a snapshot
+and reports the first index whose content or link hash fails, so any modification
+to a recorded event is detected. A six-variant `EventCategory` enum classifies
+every event as Startup, Timer, Power, UI, Schedule, or System for the category
+filter and for log review.
 The header uses a fixed safe Windows shell URL operation for GitHub. Tooltip
 tracking uses absolute signed screen coordinates and deactivates on failed
 `GetCursorPos`. Runtime shell, taskbar, and Windows notification behavior remains
@@ -405,15 +430,15 @@ The current True™ Tick menu order is `True™ Tick v<version>`, a separator, `
 
 While the popup is open, True™ Tick retains its root, Schedule, and Status menu handles and runs a popup-only 500 ms UI refresh timer. The timer updates dynamic Status rows, ownership, enabled states, and cancellation state. A separate one-second UI timer runs only while a schedule or pause is active. Its publication key includes the action generation and the rounded remaining-second bucket, so `Shell_NotifyIconW(NIM_MODIFY)` publishes each displayed countdown change without a high-frequency loop. Positive fractional remaining seconds round upward, so a new five-minute pause initially displays `5m 0s`. Elapsed durations remain floored.
 
-Logs opens a normal taskbar window with a concise summary above a read-only native `SysListView32` report. The window opens at a compact 960x520 client area at 96 DPI, scaled for the current DPI, converted to outer dimensions with DPI-aware frame metrics, and clamped to the primary work area so high-DPI displays no longer open an oversized window. The list and tooltip classes require one explicit `InitCommonControlsEx` call before controls are created, together with the embedded Common Controls v6 manifest. Columns are `Row`, `Sequence`, `Elapsed`, `Operation`, `Parent`, `Correlation`, `Phase`, `Source`, `Outcome`, `Event`, and `Details`. `Row` is the current 1-based retained-session row position. `Sequence` is the event sequence number and is not a row selector. Each existing `DiagnosticStore` snapshot row is converted from typed `DiagnosticEvent` fields, inserted with `LVM_INSERTITEMW` on the list HWND, then filled with `LVM_SETITEMTEXTW` for each remaining column. List creation failure, negative row insertion, failed cell text updates, and a bounded refresh row count are recorded with native return values and raw Win32 status. The native control copies the bounded UTF-16 text during each synchronous message. Refresh is posted and coalesced on the diagnostic window UI thread. The session is local and bounded to 512 retained events with a truncation marker. It is not persisted or public telemetry. Diagnostic logs include verified outcome evidence for window creation, icon registration, menu dispatches, and timer changes. Invalid current timing is shown as `Timing unknown`, never as an old current value.
+Logs opens a normal taskbar window with a concise summary above a read-only native `SysListView32` report. The window opens at a compact 960x520 client area at 96 DPI, scaled for the current DPI, converted to outer dimensions with DPI-aware frame metrics, and clamped to the primary work area so high-DPI displays no longer open an oversized window. The list and tooltip classes require one explicit `InitCommonControlsEx` call before controls are created, together with the embedded Common Controls v6 manifest. Columns are `Row`, `Sequence`, `Elapsed`, `Operation`, `Parent`, `Correlation`, `Phase`, `Source`, `Outcome`, `Event`, and `Details`. `Row` is the current 1-based retained-session row position. `Sequence` is the event sequence number and is not a row selector. Each existing `DiagnosticStore` snapshot row is converted from typed `DiagnosticEvent` fields, inserted with `LVM_INSERTITEMW` on the list HWND, then filled with `LVM_SETITEMTEXTW` for each remaining column. A `CBS_DROPDOWNLIST` category combo box filters the grid by `EventCategory` in real time. List creation failure, negative row insertion, failed cell text updates, and a bounded refresh row count are recorded with native return values and raw Win32 status. The native control copies the bounded UTF-16 text during each synchronous message. Refresh is posted and coalesced on the diagnostic window UI thread. The session is local and bounded to 512 retained events with a truncation marker. A rolling daily CSV file under `Data/logs/` persists newly recorded events on a background thread, but the window itself is not public telemetry. Diagnostic logs include verified outcome evidence for window creation, icon registration, menu dispatches, and timer changes. Invalid current timing is shown as `Timing unknown`, never as an old current value.
 
 ## Diagnostic report toolbar
 
-The `True™ Tick Status and Diagnostics` window places one fixed toolbar row between the status summary and the read-only Logs report. It keeps `Show rows:`, its input, `Show all`, `Rows to copy/export:`, its input, `Selected: N rows`, `Copy`, and `Export` on that row with compact fixed control widths. One shared `DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS` table defines the compact logical widths consumed by both `WM_CREATE` control creation and `WM_SIZE` layout, so every control stays inside the window at any DPI. The row is recalculated on `WM_SIZE` and never wraps or stacks. The default display limit is 100 rows. Display changes refresh the grid from the newest retained rows in chronological order. Empty or invalid display input leaves the last valid view unchanged and shows a short validation state.
+The `True™ Tick Status and Diagnostics` window places one fixed toolbar row between the status summary and the read-only Logs report. It keeps `Show rows:`, its input, `Show all`, a category filter combo box, `Rows to copy/export:`, its input, `Selected: N rows`, `Copy`, `Export`, and `Export all` on that row with compact fixed control widths. One shared `DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS` table defines the compact logical widths consumed by both `WM_CREATE` control creation and `WM_SIZE` layout, so every control stays inside the window at any DPI. The row is recalculated on `WM_SIZE` and never wraps or stacks. The default display limit is 100 rows. Display changes refresh the grid from the newest retained rows in chronological order. Empty or invalid display input leaves the last valid view unchanged and shows a short validation state.
 
 The Transfer group says `Rows to copy/export:`. Its input is independent from `Show rows` and accepts empty or `all` for all retained rows, `12` for one retained row, or `12-24` for an inclusive range. Whitespace is trimmed. Row numbers are 1-based positions in the current retained snapshot, not event sequence IDs. For example, retained rows `353-354` can contain event sequences `753-754`. Hidden retained rows can be copied or exported intentionally. Malformed, reversed, zero, negative, and out-of-range values show a short validation message, disable both actions, and create a diagnostic validation event. A refresh preserves selected events by sequence when they remain retained. If they are gone, the transfer selection is visibly reset and recorded.
 
-`Copy` and `Export` use exactly the selected retained rows from the full bounded snapshot, not the displayed slice. Both include the eleven report columns `Row`, `Sequence`, `Elapsed`, `Operation`, `Parent`, `Correlation`, `Phase`, `Source`, `Outcome`, `Event`, and `Details`. All eleven columns are preserved as tab separated values to guarantee lossless downstream analysis. The clipboard path uses standard Windows ownership transfer and releases temporary allocations safely. `Export` opens the standard Windows Save dialog with the concise default filename `true-tick-log.tsv`, then writes a UTF-8 TSV file with the same header and selected rows through a bounded same-directory temporary file replacement. Canceling the dialog is a normal logged cancellation and is not shown as an error.
+`Copy` and `Export` use exactly the selected retained rows from the full bounded snapshot, not the displayed slice. `Export all` ignores the selection, the transfer range, and the category filter entirely and exports the complete snapshot. Both include the eleven report columns `Row`, `Sequence`, `Elapsed`, `Operation`, `Parent`, `Correlation`, `Phase`, `Source`, `Outcome`, `Event`, and `Details`. All eleven columns are preserved as tab separated values to guarantee lossless downstream analysis. The clipboard path uses standard Windows ownership transfer and releases temporary allocations safely. `Export` and `Export all` open the standard Windows Save dialog with the concise default filename `true-tick-log.csv`, then write a UTF-8 file with the same header and selected rows through a bounded same-directory temporary file replacement. The dialog filter offers CSV first, then TSV, then all files, and the chosen extension selects the output format. Canceling the dialog is a normal logged cancellation and is not shown as an error.
 
 The grid auto-fits headers and visible content through native ListView column-width messages after refresh and on resize. Fixed columns use DPI-scaled minimum and maximum widths. Details fills remaining client width and keeps horizontal scrolling available when bounded content needs more space. Edit controls use the system GUI font and a minimum height that keeps text vertically centered. The diagnostic class paints its client background with Windows system colors and handles erase, paint, and static or edit colors so widened areas do not become black while high-contrast colors remain available.
 
