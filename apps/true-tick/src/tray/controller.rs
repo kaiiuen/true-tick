@@ -35,6 +35,11 @@ const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 const ERROR_ALREADY_EXISTS: u32 = 183;
 const SINGLE_INSTANCE_MUTEX_NAME: &str = "Local\\TrueTickSingleInstance";
 const TASKBAR_CREATED_MESSAGE_NAME: &str = "TaskbarCreated";
+const TRAY_WINDOW_CLASS_NAME: &str = "TrueTickTrayClass";
+const ANOTHER_INSTANCE_MESSAGE_NAME: &str = "TrueTickAnotherInstance";
+const ANOTHER_INSTANCE_INFO_TITLE: &str = "True Tick";
+const ANOTHER_INSTANCE_INFO_TEXT: &str = "True Tick is already running.";
+const MB_ICONINFORMATION: u32 = 0x0000_0040;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SingleInstanceDecision {
@@ -64,6 +69,29 @@ fn taskbar_created_decision(message: u32, registered_message: u32) -> TaskbarCre
         TaskbarCreatedDecision::RestoreTrayIcon
     } else {
         TaskbarCreatedDecision::Ignore
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AnotherInstanceDecision {
+    Notify,
+    Record,
+    Ignore,
+}
+
+fn another_instance_decision(message: u32, registered_message: u32) -> AnotherInstanceDecision {
+    if registered_message != 0 && message == registered_message {
+        AnotherInstanceDecision::Record
+    } else {
+        AnotherInstanceDecision::Ignore
+    }
+}
+
+fn another_instance_notify_decision(hwnd: *mut c_void) -> AnotherInstanceDecision {
+    if hwnd.is_null() {
+        AnotherInstanceDecision::Ignore
+    } else {
+        AnotherInstanceDecision::Notify
     }
 }
 
@@ -153,7 +181,10 @@ pub(crate) struct App {
     pub(crate) config_path: PathBuf,
     pub(crate) executable: PathBuf,
     pub(crate) startup_status: String,
+    pub(crate) operating_slot_label: String,
+    pub(crate) portable_root_label: String,
     pub(crate) taskbar_created_message: u32,
+    pub(crate) another_instance_message: u32,
     pub(crate) tray_icon: Option<NotifyIconData>,
     pub(crate) timing_snapshot: TimingSnapshot,
     pub(crate) timing_snapshot_valid: bool,
@@ -177,6 +208,8 @@ pub(crate) struct App {
     pub(crate) diagnostic_export_button: Option<*mut c_void>,
     pub(crate) diagnostic_export_all_button: Option<*mut c_void>,
     pub(crate) diagnostic_category_filter: Option<*mut c_void>,
+    pub(crate) diagnostic_search_label: Option<*mut c_void>,
+    pub(crate) diagnostic_search_input: Option<*mut c_void>,
     pub(crate) diagnostic_selected_category: Option<EventCategory>,
     pub(crate) diagnostic_message: Option<*mut c_void>,
     pub(crate) diagnostic_list: Option<*mut c_void>,
@@ -194,6 +227,7 @@ pub(crate) struct App {
     pub(crate) diagnostic_selection_reset: bool,
     pub(crate) diagnostic_display_limit: usize,
     pub(crate) diagnostic_display_all: bool,
+    pub(crate) diagnostic_search_text: String,
     pub(crate) diagnostic_message_text: String,
     pub(crate) diagnostic_refresh_pending: bool,
     pub(crate) diagnostic_refreshing: bool,
@@ -254,6 +288,54 @@ pub fn run() {
                     "native.CloseHandle",
                     format!("result={} raw_status={}", result != 0, raw_status),
                 );
+                let another_instance_name = wide(ANOTHER_INSTANCE_MESSAGE_NAME);
+                let another_instance_message =
+                    RegisterWindowMessageW(another_instance_name.as_ptr());
+                let another_instance_error = if another_instance_message == 0 {
+                    GetLastError()
+                } else {
+                    0
+                };
+                diagnostics.record(
+                    "native.RegisterWindowMessageW.AnotherInstance",
+                    format!(
+                        "message_id={another_instance_message} raw_status={another_instance_error}"
+                    ),
+                );
+                let tray_class_name = wide(TRAY_WINDOW_CLASS_NAME);
+                let running_window = FindWindowW(tray_class_name.as_ptr(), std::ptr::null());
+                let find_error = if running_window.is_null() {
+                    GetLastError()
+                } else {
+                    0
+                };
+                diagnostics.record(
+                    "native.FindWindowW.tray",
+                    format!(
+                        "found={} raw_status={find_error}",
+                        !running_window.is_null()
+                    ),
+                );
+                if matches!(
+                    another_instance_notify_decision(running_window),
+                    AnotherInstanceDecision::Notify
+                ) && another_instance_message != 0
+                {
+                    let posted = PostMessageW(running_window, another_instance_message, 0, 0);
+                    let post_error = if posted == 0 { GetLastError() } else { 0 };
+                    diagnostics.record(
+                        "native.PostMessageW.another_instance",
+                        format!("result={} raw_status={post_error}", posted != 0),
+                    );
+                }
+                let info_title = wide(ANOTHER_INSTANCE_INFO_TITLE);
+                let info_text = wide(ANOTHER_INSTANCE_INFO_TEXT);
+                MessageBoxW(
+                    std::ptr::null_mut(),
+                    info_text.as_ptr(),
+                    info_title.as_ptr(),
+                    MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
+                );
                 std::process::exit(0);
             }
             SingleInstanceDecision::Failure { raw_error } => {
@@ -266,6 +348,34 @@ pub fn run() {
         };
         let executable = get_module_file_name_w_path_with_diagnostics(Some(&diagnostics));
         let log_directory = crate::logging::resolve_log_directory(&executable);
+        let previous_marker = crate::session::read_session_marker(&log_directory);
+        match crate::session::classify_previous_session(previous_marker.as_deref()) {
+            crate::session::PreviousSession::UncleanShutdown => {
+                diagnostics.record(
+                    "lifecycle.unclean_shutdown",
+                    format!(
+                        "previous_marker={}",
+                        previous_marker.as_deref().map(str::trim).unwrap_or("")
+                    ),
+                );
+                show_unclean_shutdown_warning();
+            }
+            crate::session::PreviousSession::CleanExit => {
+                diagnostics.record("lifecycle.clean_start", "previous_marker=clean");
+            }
+            crate::session::PreviousSession::FirstRun => {
+                diagnostics.record("lifecycle.clean_start", "previous_marker=absent");
+            }
+        }
+        if let Err(error) = crate::session::write_session_marker(
+            &log_directory,
+            crate::session::SESSION_STATE_RUNNING,
+        ) {
+            diagnostics.record(
+                "lifecycle.session_marker.error",
+                format!("result=running_write_failed error={error}"),
+            );
+        }
         diagnostics.record("lifecycle.executable_observed", "path=redacted");
         let (is_slot_layout, portable_root_str, active_slot_selection, slot_executable_target) =
             match crate::portable::portable_root_from_slot_executable(&executable) {
@@ -314,6 +424,21 @@ pub fn run() {
                 "is_slot_layout={is_slot_layout} portable_root={portable_root_str} active_slot_selection={active_slot_selection} slot_executable_target={slot_executable_target}"
             ),
         );
+        let operating_slot_label = if is_slot_layout {
+            executable
+                .parent()
+                .and_then(|directory| directory.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("Unknown")
+                .to_owned()
+        } else if cfg!(debug_assertions)
+            && tick_startup_windows::is_development_executable(&executable)
+        {
+            "Development".to_owned()
+        } else {
+            "Standalone".to_owned()
+        };
+        let portable_root_label = portable_root_str.clone();
         let config_path = config::path_from_executable(&executable);
         let (loaded, config_status, config_migrated) =
             match config::load_with_migration(&config_path) {
@@ -446,6 +571,17 @@ pub fn run() {
             "native.RegisterWindowMessageW.TaskbarCreated",
             format!("message_id={taskbar_created_message} raw_status={taskbar_created_error}"),
         );
+        let another_instance_name = wide(ANOTHER_INSTANCE_MESSAGE_NAME);
+        let another_instance_message = RegisterWindowMessageW(another_instance_name.as_ptr());
+        let another_instance_error = if another_instance_message == 0 {
+            GetLastError()
+        } else {
+            0
+        };
+        diagnostics.record(
+            "native.RegisterWindowMessageW.AnotherInstance",
+            format!("message_id={another_instance_message} raw_status={another_instance_error}"),
+        );
         let presets_manager = PresetsManager::from_seconds_list(&loaded.schedule_presets_seconds);
         let app = Box::new(App {
             controller: TimerController::new(
@@ -462,7 +598,10 @@ pub fn run() {
             config_path,
             executable,
             startup_status,
+            operating_slot_label,
+            portable_root_label,
             taskbar_created_message,
+            another_instance_message,
             tray_icon: None,
             timing_snapshot: TimingSnapshot::default(),
             timing_snapshot_valid: false,
@@ -486,6 +625,8 @@ pub fn run() {
             diagnostic_export_button: None,
             diagnostic_export_all_button: None,
             diagnostic_category_filter: None,
+            diagnostic_search_label: None,
+            diagnostic_search_input: None,
             diagnostic_selected_category: None,
             diagnostic_message: None,
             diagnostic_list: None,
@@ -502,6 +643,7 @@ pub fn run() {
             diagnostic_selection_reset: false,
             diagnostic_display_limit: 100,
             diagnostic_display_all: false,
+            diagnostic_search_text: String::new(),
             diagnostic_message_text: String::new(),
             diagnostic_refresh_pending: false,
             diagnostic_refreshing: false,
@@ -538,7 +680,7 @@ pub fn run() {
         let app_ptr = Box::into_raw(app);
         let app = &mut *app_ptr;
         app.begin_operation(DiagnosticSource::Startup);
-        let class_name = wide("TrueTickTrayClass");
+        let class_name = wide(TRAY_WINDOW_CLASS_NAME);
         let instance = GetModuleHandleW(std::ptr::null());
         if instance.is_null() {
             app.record(
@@ -891,6 +1033,7 @@ pub fn run() {
             "lifecycle.shutdown.resources",
             "result=destroyed_before_app_drop",
         );
+        mark_session_clean(app);
         crate::logging::flush_diagnostic_events_to_disk(
             &app.diagnostics,
             &mut app.last_persisted_event_sequence,
@@ -900,9 +1043,22 @@ pub fn run() {
     }
 }
 
+fn mark_session_clean(app: &App) {
+    if let Err(error) = crate::session::write_session_marker(
+        &app.log_directory,
+        crate::session::SESSION_STATE_CLEAN,
+    ) {
+        app.diagnostics.record(
+            "lifecycle.session_marker.error",
+            format!("result=clean_write_failed error={error}"),
+        );
+    }
+}
+
 unsafe fn abort_startup(app_ptr: *mut App, message: &str) {
     let app = Box::from_raw(app_ptr);
     app.diagnostics.record("lifecycle.startup.abort", message);
+    mark_session_clean(&app);
     drop(app);
     show_shutdown_warning(std::ptr::null_mut(), message);
 }
@@ -914,6 +1070,7 @@ unsafe fn abort_after_window(app_ptr: *mut App, hwnd: *mut c_void, message: &str
     }
     let app = Box::from_raw(app_ptr);
     app.diagnostics.record("lifecycle.startup.abort", message);
+    mark_session_clean(&app);
     drop(app);
     show_shutdown_warning(std::ptr::null_mut(), message);
 }
@@ -1271,6 +1428,13 @@ unsafe extern "system" fn window_proc(
             {
                 restore_tray_icon(hwnd, app);
             }
+            msg if matches!(
+                another_instance_decision(msg, app.another_instance_message),
+                AnotherInstanceDecision::Record
+            ) =>
+            {
+                app.record("lifecycle.another_instance_attempt", "source=second_launch");
+            }
             WM_TRAY if tray_notification_opens_menu(l_param as usize, app.menu_active) => {
                 show_menu(hwnd, app)
             }
@@ -1422,6 +1586,8 @@ extern "system" {
     fn GetMessageW(message: *mut Message, hwnd: *mut c_void, min: u32, max: u32) -> i32;
     fn TranslateMessage(message: *const Message) -> i32;
     fn DispatchMessageW(message: *const Message) -> isize;
+    fn FindWindowW(class: *const u16, title: *const u16) -> *mut c_void;
+    fn PostMessageW(hwnd: *mut c_void, message: u32, w: usize, l: isize) -> i32;
 }
 
 #[link(name = "comctl32")]
@@ -1657,5 +1823,46 @@ mod tests {
             taskbar_created_decision(id, id),
             TaskbarCreatedDecision::RestoreTrayIcon
         );
+    }
+
+    #[test]
+    fn another_instance_decision_matches_registered_message_only_when_valid() {
+        assert_eq!(
+            another_instance_decision(0xC000, 0xC000),
+            AnotherInstanceDecision::Record
+        );
+        assert_eq!(
+            another_instance_decision(0xC000, 0xC001),
+            AnotherInstanceDecision::Ignore
+        );
+        assert_eq!(
+            another_instance_decision(0, 0),
+            AnotherInstanceDecision::Ignore
+        );
+        assert_eq!(
+            another_instance_decision(0x0001, 0),
+            AnotherInstanceDecision::Ignore
+        );
+    }
+
+    #[test]
+    fn another_instance_notify_decision_maps_found_window_and_null() {
+        assert_eq!(
+            another_instance_notify_decision(std::ptr::null_mut()),
+            AnotherInstanceDecision::Ignore
+        );
+        let found = std::ptr::dangling_mut::<c_void>();
+        assert_eq!(
+            another_instance_notify_decision(found),
+            AnotherInstanceDecision::Notify
+        );
+    }
+
+    #[test]
+    fn another_instance_registered_message_name_is_exact() {
+        assert_eq!(ANOTHER_INSTANCE_MESSAGE_NAME, "TrueTickAnotherInstance");
+        let wide_name = wide(ANOTHER_INSTANCE_MESSAGE_NAME);
+        assert_eq!(wide_name.last(), Some(&0));
+        assert_eq!(wide_name.len(), "TrueTickAnotherInstance".len() + 1);
     }
 }

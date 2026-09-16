@@ -4,6 +4,7 @@ mod config;
 mod logging;
 mod pause;
 mod portable;
+mod session;
 mod shutdown;
 mod tray_surface;
 

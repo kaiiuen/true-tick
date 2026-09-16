@@ -391,7 +391,7 @@ pub unsafe extern "system" fn presets_window_proc(
                     ),
                 );
             }
-            destroy_created_diagnostic_controls([
+            destroy_created_diagnostic_controls(&[
                 listbox,
                 label,
                 input,

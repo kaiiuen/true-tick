@@ -196,6 +196,8 @@ pub(crate) const GWLP_WNDPROC: i32 = -4;
 pub(crate) const GWLP_USERDATA: i32 = -21;
 
 pub(crate) const MB_ICONWARNING: u32 = 0x0000_0030;
+const MB_OK: u32 = 0x0000_0000;
+const MB_SETFOREGROUND: u32 = 0x0001_0000;
 const MB_YESNO: u32 = 0x0000_0004;
 const MB_DEFBUTTON2: u32 = 0x0000_0100;
 const IDYES: i32 = 6;
@@ -414,8 +416,8 @@ fn publish_tray_icon(app: &mut App) {
     app.publish();
 }
 
-pub(crate) unsafe fn destroy_created_diagnostic_controls(controls: [*mut c_void; 16]) {
-    for control in controls {
+pub(crate) unsafe fn destroy_created_diagnostic_controls(controls: &[*mut c_void]) {
+    for &control in controls {
         if !control.is_null() {
             let _ = DestroyWindow(control);
         }
@@ -426,6 +428,24 @@ unsafe fn show_shutdown_warning(hwnd: *mut c_void, message: &str) {
     let text = wide(message);
     let title = wide("True™ Tick shutdown warning");
     MessageBoxW(hwnd, text.as_ptr(), title.as_ptr(), MB_ICONWARNING);
+}
+
+/// Warns once per launch that the previous session ended without a clean
+/// shutdown. The box is shown on a spawned thread so the startup path is
+/// never gated on user acknowledgment and the main loop is never delayed.
+pub(crate) fn show_unclean_shutdown_warning() {
+    let text = wide(
+        "True Tick did not shut down cleanly last time. The previous session may have ended from a force quit or a system crash.",
+    );
+    let title = wide("True Tick");
+    std::thread::spawn(move || unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONWARNING | MB_SETFOREGROUND,
+        );
+    });
 }
 
 fn bounded_startup_status(value: impl AsRef<str>) -> String {

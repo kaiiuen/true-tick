@@ -1396,6 +1396,18 @@ mod tests {
     }
 
     #[test]
+    fn battery_releases_regardless_of_auto_time() {
+        assert_eq!(
+            power_reconciliation(true, PowerState::Battery, OwnershipState::Owned),
+            PowerReconciliation::ReleaseBlocked
+        );
+        assert_eq!(
+            power_reconciliation(false, PowerState::Battery, OwnershipState::Owned),
+            PowerReconciliation::ReleaseBlocked
+        );
+    }
+
+    #[test]
     fn unknown_power_releases_conservatively() {
         assert_eq!(
             power_reconciliation(true, PowerState::Unknown, OwnershipState::Owned),

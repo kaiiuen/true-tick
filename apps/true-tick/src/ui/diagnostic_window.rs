@@ -37,7 +37,7 @@ use crate::tray::{
     WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_TABSTOP, WS_VISIBLE,
     WS_VSCROLL,
 };
-use crate::tray_surface::status_menu_items;
+use crate::tray_surface::{status_menu_items, GITHUB_URL};
 
 pub const DIAGNOSTIC_WINDOW_CLASS: &str = "TrueTickDiagnosticClass";
 
@@ -51,6 +51,7 @@ const ID_DIAGNOSTIC_DISPLAY_LIMIT: usize = 1204;
 const ID_DIAGNOSTIC_SHOW_ALL: usize = 1205;
 const ID_DIAGNOSTIC_CATEGORY_FILTER: usize = 1206;
 const ID_DIAGNOSTIC_EXPORT_ALL: usize = 1207;
+const ID_DIAGNOSTIC_SEARCH: usize = 1208;
 const CBN_SELCHANGE: usize = 1;
 const CBS_DROPDOWNLIST: u32 = 0x0003;
 const CB_ADDSTRING: u32 = 0x0143;
@@ -67,7 +68,7 @@ const WS_EX_APPWINDOW: u32 = 0x00040000;
 const DIAGNOSTIC_WINDOW_TITLE: &str = "True™ Tick Status and Diagnostics";
 const DIAGNOSTIC_LOADING_SUMMARY: &str = "Loading True™ Tick diagnostics...";
 const DIAGNOSTIC_WINDOW_PARENT: *mut c_void = std::ptr::null_mut();
-const DIAGNOSTIC_SUMMARY_HEIGHT: i32 = 104;
+const DIAGNOSTIC_SUMMARY_HEIGHT: i32 = 140;
 const DIAGNOSTIC_HUD_STATE_HEIGHT: i32 = 32;
 const DIAGNOSTIC_SEPARATOR_HEIGHT: i32 = 2;
 const DIAGNOSTIC_TOOLBAR_HEIGHT: i32 = 36;
@@ -77,13 +78,14 @@ const DIAGNOSTIC_TOOLBAR_GAP: i32 = 8;
 const DIAGNOSTIC_TOOLBAR_MIN_MESSAGE_WIDTH: i32 = 140;
 // Compact toolbar widths at 96 DPI in left to right order. Both WM_CREATE sizes and
 // diagnostic_toolbar_layout consume this same list so creation and layout never drift.
-const DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS: [i32; 10] = [64, 52, 64, 100, 118, 72, 128, 56, 56, 70];
+const DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS: [i32; 12] =
+    [64, 52, 64, 100, 48, 110, 118, 72, 128, 56, 56, 70];
 const DIAGNOSTIC_COLUMN_WIDTHS: [i32; 11] = [54, 70, 78, 78, 70, 86, 82, 90, 86, 160, 240];
 const DIAGNOSTIC_COLUMN_MIN_WIDTHS: [i32; 11] = [36, 52, 64, 64, 52, 64, 60, 68, 64, 84, 240];
 const DIAGNOSTIC_COLUMN_MAX_WIDTHS: [i32; 11] =
     [84, 120, 140, 144, 120, 144, 112, 124, 124, 260, 640];
 // Compact logical client default. The outer rectangle is DPI adjusted before creation.
-const DIAGNOSTIC_DEFAULT_WIDTH: i32 = 1_120;
+const DIAGNOSTIC_DEFAULT_WIDTH: i32 = 1_280;
 const DIAGNOSTIC_DEFAULT_HEIGHT: i32 = 520;
 const DIAGNOSTIC_RANGE_INPUT_LIMIT: usize = 64;
 const WS_HSCROLL: u32 = 0x00100000;
@@ -175,13 +177,16 @@ fn clear_diagnostic_state(app: &mut App) {
     app.diagnostic_display_label = None;
     app.diagnostic_display_input = None;
     app.diagnostic_show_all_button = None;
+    app.diagnostic_category_filter = None;
+    app.diagnostic_search_label = None;
+    app.diagnostic_search_input = None;
+    app.diagnostic_search_text.clear();
     app.diagnostic_toolbar_label = None;
     app.diagnostic_selection_summary = None;
     app.diagnostic_range_input = None;
     app.diagnostic_copy_button = None;
     app.diagnostic_export_button = None;
     app.diagnostic_export_all_button = None;
-    app.diagnostic_category_filter = None;
     app.diagnostic_selected_category = None;
     app.diagnostic_message = None;
     app.diagnostic_list = None;
@@ -216,6 +221,8 @@ unsafe fn diagnostic_children_ready(app: &App) -> bool {
         app.diagnostic_display_input,
         app.diagnostic_show_all_button,
         app.diagnostic_category_filter,
+        app.diagnostic_search_label,
+        app.diagnostic_search_input,
         app.diagnostic_toolbar_label,
         app.diagnostic_selection_summary,
         app.diagnostic_range_input,
@@ -426,17 +433,27 @@ fn power_state_label(power: PowerState) -> &'static str {
     }
 }
 
+fn search_matches(search: &str, event_name: &str, details: &str) -> bool {
+    let needle = search.trim();
+    if needle.is_empty() {
+        return true;
+    }
+    let needle = needle.to_lowercase();
+    event_name.to_lowercase().contains(&needle) || details.to_lowercase().contains(&needle)
+}
+
 fn diagnostic_filtered_events<'a>(
     app: &App,
     events: &'a [DiagnosticEvent],
 ) -> Vec<&'a DiagnosticEvent> {
-    match app.diagnostic_selected_category {
-        None => events.iter().collect(),
-        Some(category) => events
-            .iter()
-            .filter(|event| EventCategory::from_event_name(&event.name) == category)
-            .collect(),
-    }
+    events
+        .iter()
+        .filter(|event| {
+            app.diagnostic_selected_category
+                .is_none_or(|category| EventCategory::from_event_name(&event.name) == category)
+                && search_matches(&app.diagnostic_search_text, &event.name, &event.details)
+        })
+        .collect()
 }
 
 fn diagnostic_filtered_visible_events<'a>(
@@ -475,6 +492,8 @@ struct DiagnosticHudFields<'a> {
     visible: usize,
     retained: usize,
     chain_status: &'a str,
+    slot: &'a str,
+    root: &'a str,
 }
 
 fn diagnostic_hud_field_text(fields: DiagnosticHudFields<'_>) -> String {
@@ -489,9 +508,12 @@ fn diagnostic_hud_field_text(fields: DiagnosticHudFields<'_>) -> String {
         visible,
         retained,
         chain_status,
+        slot,
+        root,
     } = fields;
+    let version = env!("CARGO_PKG_VERSION");
     format!(
-        "Effective: {effective}  |  Ownership: {ownership}  |  Power: {power}\r\nStartup: {startup}  |  Running: {running_duration}  |  Next: {next_action}\r\nHistory: {history}  |  Showing {visible} of {retained} retained rows  |  Chain: {chain_status}\r\n"
+        "Effective: {effective}  |  Ownership: {ownership}  |  Power: {power}\r\nStartup: {startup}  |  Running: {running_duration}  |  Next: {next_action}\r\nHistory: {history}  |  Showing {visible} of {retained} retained rows  |  Chain: {chain_status}\r\nSlot: {slot}  |  Root: {root}\r\nTrue\u{2122} Tick v{version} by kaiiuen  |  {GITHUB_URL}\r\n"
     )
 }
 
@@ -546,6 +568,8 @@ fn diagnostic_summary_text(app: &App, retained: usize) -> String {
         visible,
         retained,
         chain_status: &chain_status,
+        slot: &app.operating_slot_label,
+        root: &app.portable_root_label,
     })
 }
 
@@ -598,6 +622,8 @@ struct DiagnosticToolbarLayout {
     display_input: DiagnosticLayoutRect,
     show_all: DiagnosticLayoutRect,
     category_filter: DiagnosticLayoutRect,
+    search_label: DiagnosticLayoutRect,
+    search_input: DiagnosticLayoutRect,
     transfer_label: DiagnosticLayoutRect,
     range_input: DiagnosticLayoutRect,
     selection_summary: DiagnosticLayoutRect,
@@ -743,12 +769,14 @@ fn diagnostic_toolbar_layout(
     let display_input = next(widths[1]);
     let show_all = next(widths[2]);
     let category_filter = next(widths[3]);
-    let transfer_label = next(widths[4]);
-    let range_input = next(widths[5]);
-    let selection_summary = next(widths[6]);
-    let copy = next(widths[7]);
-    let export = next(widths[8]);
-    let export_all = next(widths[9]);
+    let search_label = next(widths[4]);
+    let search_input = next(widths[5]);
+    let transfer_label = next(widths[6]);
+    let range_input = next(widths[7]);
+    let selection_summary = next(widths[8]);
+    let copy = next(widths[9]);
+    let export = next(widths[10]);
+    let export_all = next(widths[11]);
     let message_left = cursor;
     let message_width = width
         .saturating_sub(message_left)
@@ -765,6 +793,8 @@ fn diagnostic_toolbar_layout(
         display_input,
         show_all,
         category_filter,
+        search_label,
+        search_input,
         transfer_label,
         range_input,
         selection_summary,
@@ -841,6 +871,19 @@ fn diagnostic_summary_style() -> u32 {
 
 unsafe fn diagnostic_display_text(app: &App) -> String {
     let Some(input) = app.diagnostic_display_input else {
+        return String::new();
+    };
+    let length = GetWindowTextLengthW(input);
+    if length <= 0 {
+        return String::new();
+    }
+    let mut buffer = vec![0u16; length as usize + 1];
+    let copied = GetWindowTextW(input, buffer.as_mut_ptr(), buffer.len() as i32);
+    String::from_utf16_lossy(&buffer[..copied as usize])
+}
+
+unsafe fn diagnostic_search_text(app: &App) -> String {
+    let Some(input) = app.diagnostic_search_input else {
         return String::new();
     };
     let length = GetWindowTextLengthW(input);
@@ -1180,7 +1223,7 @@ unsafe fn record_diagnostic_layout_failure(
     );
 }
 
-unsafe fn fallback_diagnostic_layout(
+unsafe fn apply_diagnostic_layout(
     window: *mut c_void,
     app: &App,
     controls: &[(Option<*mut c_void>, DiagnosticLayoutRect)],
@@ -1190,12 +1233,12 @@ unsafe fn fallback_diagnostic_layout(
         let Some(control) = *control else {
             record_diagnostic_layout_failure(app, "missing_control", Some(index), 0);
             success = false;
-            continue;
+            break;
         };
         if IsWindow(control) == 0 {
             record_diagnostic_event_with_context(
                 app,
-                "diagnostic.layout.fallback_skipped",
+                "diagnostic.layout.skipped",
                 format!(
                     "control_index={index} reason=not_a_window raw_status={}",
                     GetLastError()
@@ -1208,7 +1251,7 @@ unsafe fn fallback_diagnostic_layout(
         if rect.width <= 0 || rect.height <= 0 {
             record_diagnostic_event_with_context(
                 app,
-                "diagnostic.layout.fallback_skipped",
+                "diagnostic.layout.skipped",
                 format!(
                     "control_index={index} reason=empty_rect width={} height={}",
                     rect.width, rect.height
@@ -1230,86 +1273,11 @@ unsafe fn fallback_diagnostic_layout(
         {
             record_diagnostic_layout_failure(app, "SetWindowPos", Some(index), GetLastError());
             success = false;
+            break;
         }
     }
     let _ = InvalidateRect(window, std::ptr::null(), 1);
     success
-}
-
-unsafe fn apply_diagnostic_layout(
-    window: *mut c_void,
-    app: &App,
-    controls: &[(Option<*mut c_void>, DiagnosticLayoutRect)],
-) -> bool {
-    let mut defer = BeginDeferWindowPos(controls.len() as i32);
-    if defer.is_null() {
-        record_diagnostic_layout_failure(app, "BeginDeferWindowPos", None, GetLastError());
-        return fallback_diagnostic_layout(window, app, controls);
-    }
-    let mut deferred_failure = false;
-    for (index, (control, rect)) in controls.iter().enumerate() {
-        let Some(control) = *control else {
-            record_diagnostic_layout_failure(app, "missing_control", Some(index), 0);
-            deferred_failure = true;
-            continue;
-        };
-        if deferred_failure {
-            continue;
-        }
-        if IsWindow(control) == 0 {
-            record_diagnostic_event_with_context(
-                app,
-                "diagnostic.layout.defer_skipped",
-                format!(
-                    "control_index={index} reason=not_a_window raw_status={}",
-                    GetLastError()
-                ),
-                DiagnosticPhase::Render,
-                DiagnosticOutcome::Suppressed,
-            );
-            continue;
-        }
-        if rect.width <= 0 || rect.height <= 0 {
-            record_diagnostic_event_with_context(
-                app,
-                "diagnostic.layout.defer_skipped",
-                format!(
-                    "control_index={index} reason=empty_rect width={} height={}",
-                    rect.width, rect.height
-                ),
-                DiagnosticPhase::Render,
-                DiagnosticOutcome::Suppressed,
-            );
-            continue;
-        }
-        let next = DeferWindowPos(
-            defer,
-            control,
-            std::ptr::null_mut(),
-            rect.left,
-            rect.top,
-            rect.width,
-            rect.height,
-            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
-        );
-        if next.is_null() {
-            record_diagnostic_layout_failure(app, "DeferWindowPos", Some(index), GetLastError());
-            deferred_failure = true;
-        } else {
-            defer = next;
-        }
-    }
-    let end_result = EndDeferWindowPos(defer);
-    if end_result == 0 {
-        record_diagnostic_layout_failure(app, "EndDeferWindowPos", None, GetLastError());
-        deferred_failure = true;
-    }
-    if deferred_failure {
-        fallback_diagnostic_layout(window, app, controls)
-    } else {
-        let _ = InvalidateRect(window, std::ptr::null(), 1);
-        true
-    }
 }
 
 unsafe fn fit_diagnostic_details_to_viewport(list: *mut c_void, client_width: i32, dpi: u32) {
@@ -1365,6 +1333,8 @@ unsafe fn layout_diagnostic_controls(window: *mut c_void, app: &App) -> bool {
         (app.diagnostic_display_input, toolbar.display_input),
         (app.diagnostic_show_all_button, toolbar.show_all),
         (app.diagnostic_category_filter, toolbar.category_filter),
+        (app.diagnostic_search_label, toolbar.search_label),
+        (app.diagnostic_search_input, toolbar.search_input),
         (app.diagnostic_toolbar_label, toolbar.transfer_label),
         (app.diagnostic_range_input, toolbar.range_input),
         (app.diagnostic_selection_summary, toolbar.selection_summary),
@@ -1526,6 +1496,8 @@ enum DiagnosticChildRedrawTarget {
     DisplayInput,
     ShowAllButton,
     CategoryFilter,
+    SearchLabel,
+    SearchInput,
     ToolbarLabel,
     SelectionSummary,
     RangeInput,
@@ -1536,7 +1508,7 @@ enum DiagnosticChildRedrawTarget {
     List,
 }
 
-const DIAGNOSTIC_POST_REDRAW_CHILD_TARGETS: [DiagnosticChildRedrawTarget; 16] = [
+const DIAGNOSTIC_POST_REDRAW_CHILD_TARGETS: [DiagnosticChildRedrawTarget; 18] = [
     DiagnosticChildRedrawTarget::HudState,
     DiagnosticChildRedrawTarget::Summary,
     DiagnosticChildRedrawTarget::HudSeparator,
@@ -1545,6 +1517,8 @@ const DIAGNOSTIC_POST_REDRAW_CHILD_TARGETS: [DiagnosticChildRedrawTarget; 16] = 
     DiagnosticChildRedrawTarget::DisplayInput,
     DiagnosticChildRedrawTarget::ShowAllButton,
     DiagnosticChildRedrawTarget::CategoryFilter,
+    DiagnosticChildRedrawTarget::SearchLabel,
+    DiagnosticChildRedrawTarget::SearchInput,
     DiagnosticChildRedrawTarget::ToolbarLabel,
     DiagnosticChildRedrawTarget::SelectionSummary,
     DiagnosticChildRedrawTarget::RangeInput,
@@ -1569,6 +1543,8 @@ unsafe fn set_diagnostic_redraw(app: &App, enabled: bool) {
         app.diagnostic_display_input,
         app.diagnostic_show_all_button,
         app.diagnostic_category_filter,
+        app.diagnostic_search_label,
+        app.diagnostic_search_input,
         app.diagnostic_toolbar_label,
         app.diagnostic_selection_summary,
         app.diagnostic_range_input,
@@ -1597,6 +1573,8 @@ unsafe fn finish_diagnostic_redraw(window: *mut c_void, app: &App) {
             DiagnosticChildRedrawTarget::DisplayInput => app.diagnostic_display_input,
             DiagnosticChildRedrawTarget::ShowAllButton => app.diagnostic_show_all_button,
             DiagnosticChildRedrawTarget::CategoryFilter => app.diagnostic_category_filter,
+            DiagnosticChildRedrawTarget::SearchLabel => app.diagnostic_search_label,
+            DiagnosticChildRedrawTarget::SearchInput => app.diagnostic_search_input,
             DiagnosticChildRedrawTarget::ToolbarLabel => app.diagnostic_toolbar_label,
             DiagnosticChildRedrawTarget::SelectionSummary => app.diagnostic_selection_summary,
             DiagnosticChildRedrawTarget::RangeInput => app.diagnostic_range_input,
@@ -2574,6 +2552,21 @@ fn diagnostic_category_filter_changed(app: &mut App) {
     request_diagnostic_refresh(app);
 }
 
+fn diagnostic_search_changed(app: &mut App) {
+    let search = unsafe { diagnostic_search_text(app) };
+    if search == app.diagnostic_search_text {
+        return;
+    }
+    app.diagnostic_search_text = search;
+    app.begin_operation(DiagnosticSource::Diagnostic);
+    app.record(
+        "diagnostic.search.changed",
+        format!("query_bytes={}", app.diagnostic_search_text.len()),
+    );
+    app.finish_operation(DiagnosticOutcome::Completed);
+    request_diagnostic_refresh(app);
+}
+
 pub(crate) fn request_diagnostic_refresh(app: &mut App) {
     if diagnostic_refresh_is_coalesced(app.diagnostic_refresh_pending, app.diagnostic_refreshing) {
         if app.diagnostic_refreshing {
@@ -2710,6 +2703,8 @@ unsafe fn set_diagnostic_control_fonts(app: &mut App) {
         app.diagnostic_display_input,
         app.diagnostic_show_all_button,
         app.diagnostic_category_filter,
+        app.diagnostic_search_label,
+        app.diagnostic_search_input,
         app.diagnostic_toolbar_label,
         app.diagnostic_selection_summary,
         app.diagnostic_range_input,
@@ -2792,6 +2787,8 @@ unsafe fn refresh_diagnostic_presentation(hwnd: *mut c_void, app: &mut App) {
         app.diagnostic_display_input,
         app.diagnostic_show_all_button,
         app.diagnostic_category_filter,
+        app.diagnostic_search_label,
+        app.diagnostic_search_input,
         app.diagnostic_toolbar_label,
         app.diagnostic_selection_summary,
         app.diagnostic_range_input,
@@ -2957,6 +2954,37 @@ pub unsafe extern "system" fn diagnostic_window_proc(
             }
             let _ = SendMessageW(category_combo, CB_SETCURSEL, 0, 0);
         }
+        let search_label = CreateWindowExW(
+            0,
+            static_class.as_ptr(),
+            wide("Search:").as_ptr(),
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            0,
+            0,
+            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[4],
+            24,
+            hwnd,
+            std::ptr::null_mut(),
+            GetModuleHandleW(std::ptr::null()),
+            std::ptr::null_mut(),
+        );
+        let search_input = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            wide("EDIT").as_ptr(),
+            std::ptr::null(),
+            WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
+            0,
+            0,
+            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[5],
+            24,
+            hwnd,
+            ID_DIAGNOSTIC_SEARCH as *mut c_void,
+            GetModuleHandleW(std::ptr::null()),
+            std::ptr::null_mut(),
+        );
+        if !search_input.is_null() {
+            SendMessageW(search_input, EM_LIMITTEXT, DIAGNOSTIC_RANGE_INPUT_LIMIT, 0);
+        }
         let label = CreateWindowExW(
             0,
             static_class.as_ptr(),
@@ -2964,7 +2992,7 @@ pub unsafe extern "system" fn diagnostic_window_proc(
             WS_CHILD | WS_VISIBLE | SS_LEFT,
             0,
             0,
-            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[4],
+            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[6],
             24,
             hwnd,
             ID_DIAGNOSTIC_RANGE as *mut c_void,
@@ -2978,7 +3006,7 @@ pub unsafe extern "system" fn diagnostic_window_proc(
             WS_CHILD | WS_VISIBLE | SS_LEFT,
             0,
             0,
-            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[6],
+            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[8],
             24,
             hwnd,
             std::ptr::null_mut(),
@@ -2993,7 +3021,7 @@ pub unsafe extern "system" fn diagnostic_window_proc(
             WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
             0,
             0,
-            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[5],
+            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[7],
             24,
             hwnd,
             ID_DIAGNOSTIC_RANGE as *mut c_void,
@@ -3011,7 +3039,7 @@ pub unsafe extern "system" fn diagnostic_window_proc(
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             0,
             0,
-            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[7],
+            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[9],
             24,
             hwnd,
             ID_DIAGNOSTIC_COPY as *mut c_void,
@@ -3025,7 +3053,7 @@ pub unsafe extern "system" fn diagnostic_window_proc(
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             0,
             0,
-            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[8],
+            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[10],
             24,
             hwnd,
             ID_DIAGNOSTIC_EXPORT as *mut c_void,
@@ -3039,7 +3067,7 @@ pub unsafe extern "system" fn diagnostic_window_proc(
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             0,
             0,
-            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[9],
+            DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS[11],
             24,
             hwnd,
             ID_DIAGNOSTIC_EXPORT_ALL as *mut c_void,
@@ -3092,6 +3120,8 @@ pub unsafe extern "system" fn diagnostic_window_proc(
         let display_input_error = control_error(display_input);
         let show_all_error = control_error(show_all_button);
         let category_error = control_error(category_combo);
+        let search_label_error = control_error(search_label);
+        let search_input_error = control_error(search_input);
         let label_error = control_error(label);
         let selection_summary_error = control_error(selection_summary);
         let range_error = control_error(range_input);
@@ -3108,6 +3138,8 @@ pub unsafe extern "system" fn diagnostic_window_proc(
             || display_input.is_null()
             || show_all_button.is_null()
             || category_combo.is_null()
+            || search_label.is_null()
+            || search_input.is_null()
             || label.is_null()
             || selection_summary.is_null()
             || range_input.is_null()
@@ -3121,7 +3153,7 @@ pub unsafe extern "system" fn diagnostic_window_proc(
                 (*(app_ptr as *mut App)).diagnostics.record(
                     "native.CreateWindowExW.diagnostic_control.error",
                     format!(
-                        "hud_state_null={} hud_state_raw_status={} summary_null={} summary_raw_status={} hud_separator_null={} hud_separator_raw_status={} toolbar_separator_null={} toolbar_separator_raw_status={} display_label_null={} display_label_raw_status={} display_input_null={} display_input_raw_status={} show_all_null={} show_all_raw_status={} category_null={} category_raw_status={} label_null={} label_raw_status={} selection_summary_null={} selection_summary_raw_status={} range_null={} range_raw_status={} copy_null={} copy_raw_status={} export_null={} export_raw_status={} export_all_null={} export_all_raw_status={} message_null={} message_raw_status={} list_null={} list_raw_status={}",
+                        "hud_state_null={} hud_state_raw_status={} summary_null={} summary_raw_status={} hud_separator_null={} hud_separator_raw_status={} toolbar_separator_null={} toolbar_separator_raw_status={} display_label_null={} display_label_raw_status={} display_input_null={} display_input_raw_status={} show_all_null={} show_all_raw_status={} category_null={} category_raw_status={} search_label_null={} search_label_raw_status={} search_input_null={} search_input_raw_status={} label_null={} label_raw_status={} selection_summary_null={} selection_summary_raw_status={} range_null={} range_raw_status={} copy_null={} copy_raw_status={} export_null={} export_raw_status={} export_all_null={} export_all_raw_status={} message_null={} message_raw_status={} list_null={} list_raw_status={}",
                         hud_state.is_null(),
                         hud_state_error,
                         summary.is_null(),
@@ -3138,6 +3170,10 @@ pub unsafe extern "system" fn diagnostic_window_proc(
                         show_all_error,
                         category_combo.is_null(),
                         category_error,
+                        search_label.is_null(),
+                        search_label_error,
+                        search_input.is_null(),
+                        search_input_error,
                         label.is_null(),
                         label_error,
                         selection_summary.is_null(),
@@ -3157,7 +3193,7 @@ pub unsafe extern "system" fn diagnostic_window_proc(
                     ),
                 );
             }
-            destroy_created_diagnostic_controls([
+            destroy_created_diagnostic_controls(&[
                 hud_state,
                 summary,
                 hud_separator,
@@ -3166,6 +3202,8 @@ pub unsafe extern "system" fn diagnostic_window_proc(
                 display_input,
                 show_all_button,
                 category_combo,
+                search_label,
+                search_input,
                 label,
                 selection_summary,
                 range_input,
@@ -3186,6 +3224,8 @@ pub unsafe extern "system" fn diagnostic_window_proc(
             display_input,
             show_all_button,
             category_combo,
+            search_label,
+            search_input,
             label,
             selection_summary,
             range_input,
@@ -3204,7 +3244,7 @@ pub unsafe extern "system" fn diagnostic_window_proc(
                     format!("raw_status={raw_error}"),
                 );
             }
-            destroy_created_diagnostic_controls([
+            destroy_created_diagnostic_controls(&[
                 hud_state,
                 summary,
                 hud_separator,
@@ -3213,6 +3253,8 @@ pub unsafe extern "system" fn diagnostic_window_proc(
                 display_input,
                 show_all_button,
                 category_combo,
+                search_label,
+                search_input,
                 label,
                 selection_summary,
                 range_input,
@@ -3233,6 +3275,8 @@ pub unsafe extern "system" fn diagnostic_window_proc(
             (*app).diagnostic_display_input = Some(display_input);
             (*app).diagnostic_show_all_button = Some(show_all_button);
             (*app).diagnostic_category_filter = Some(category_combo);
+            (*app).diagnostic_search_label = Some(search_label);
+            (*app).diagnostic_search_input = Some(search_input);
             (*app).diagnostic_toolbar_label = Some(label);
             (*app).diagnostic_selection_summary = Some(selection_summary);
             (*app).diagnostic_range_input = Some(range_input);
@@ -3321,6 +3365,10 @@ pub unsafe extern "system" fn diagnostic_window_proc(
             }
             if command == ID_DIAGNOSTIC_CATEGORY_FILTER && notification == CBN_SELCHANGE {
                 diagnostic_category_filter_changed(&mut *app);
+                return 0;
+            }
+            if command == ID_DIAGNOSTIC_SEARCH && notification == EN_CHANGE {
+                diagnostic_search_changed(&mut *app);
                 return 0;
             }
             if command == ID_DIAGNOSTIC_RANGE && notification == EN_CHANGE {
@@ -3420,18 +3468,6 @@ extern "system" {
         ex_style: u32,
         dpi: u32,
     ) -> i32;
-    fn BeginDeferWindowPos(number: i32) -> *mut c_void;
-    fn DeferWindowPos(
-        defer: *mut c_void,
-        window: *mut c_void,
-        insert_after: *mut c_void,
-        x: i32,
-        y: i32,
-        width: i32,
-        height: i32,
-        flags: u32,
-    ) -> *mut c_void;
-    fn EndDeferWindowPos(defer: *mut c_void) -> i32;
     fn GetScrollPos(window: *mut c_void, bar: i32) -> i32;
     fn SetScrollPos(window: *mut c_void, bar: i32, position: i32, redraw: i32) -> i32;
     fn OpenClipboard(owner: *mut c_void) -> i32;
@@ -3462,19 +3498,20 @@ extern "system" {
 }
 
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DiagnosticLayoutPath {
-    Deferred,
-    Fallback,
+fn diagnostic_layout_guard_allows(rect: DiagnosticLayoutRect, is_window: bool) -> bool {
+    is_window && rect.width > 0 && rect.height > 0
 }
 
 #[cfg(test)]
-fn diagnostic_layout_path(begin_ok: bool, defer_ok: bool, end_ok: bool) -> DiagnosticLayoutPath {
-    if begin_ok && defer_ok && end_ok {
-        DiagnosticLayoutPath::Deferred
-    } else {
-        DiagnosticLayoutPath::Fallback
+fn diagnostic_layout_stops_on_first_failure(position_ok: &[bool]) -> (usize, bool) {
+    let mut applied = 0usize;
+    for ok in position_ok {
+        if !ok {
+            return (applied, false);
+        }
+        applied += 1;
     }
+    (applied, true)
 }
 
 #[cfg(test)]
@@ -3564,6 +3601,8 @@ mod tests {
         assert_ne!(ID_DIAGNOSTIC_DISPLAY_LIMIT, ID_DIAGNOSTIC_RANGE);
         assert_ne!(ID_DIAGNOSTIC_SHOW_ALL, ID_DIAGNOSTIC_RANGE);
         assert_ne!(ID_DIAGNOSTIC_CATEGORY_FILTER, ID_DIAGNOSTIC_RANGE);
+        assert_ne!(ID_DIAGNOSTIC_SEARCH, ID_DIAGNOSTIC_RANGE);
+        assert_ne!(ID_DIAGNOSTIC_SEARCH, ID_DIAGNOSTIC_EXPORT_ALL);
         assert_eq!(DIAGNOSTIC_RANGE_INPUT_LIMIT, 64);
         assert_eq!(DIAGNOSTIC_TOOLBAR_HEIGHT, 36);
         let selection = RowSelection::new(12, 24);
@@ -3576,6 +3615,7 @@ mod tests {
             "diagnostic.display_limit.override",
             "diagnostic.display_limit.validation",
             "diagnostic.category_filter.changed",
+            "diagnostic.search.changed",
             "diagnostic.range.parsed",
             "diagnostic.copy.request",
             "diagnostic.copy.result",
@@ -3626,7 +3666,7 @@ mod tests {
         assert_ne!(style & WS_VISIBLE, 0);
         assert_ne!(style & SS_NOPREFIX, 0);
         assert_eq!(style & (0x0020_0000 | 0x0040 | 0x0004), 0);
-        assert_eq!(DIAGNOSTIC_SUMMARY_HEIGHT, 104);
+        assert_eq!(DIAGNOSTIC_SUMMARY_HEIGHT, 140);
     }
 
     #[test]
@@ -3642,33 +3682,47 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_layout_falls_back_after_any_deferred_position_failure() {
+    fn diagnostic_layout_guards_and_stop_on_first_failure() {
+        let good = DiagnosticLayoutRect {
+            left: 0,
+            top: 0,
+            width: 10,
+            height: 10,
+        };
+        let flat = DiagnosticLayoutRect {
+            left: 0,
+            top: 0,
+            width: 0,
+            height: 10,
+        };
+        assert!(diagnostic_layout_guard_allows(good, true));
+        assert!(!diagnostic_layout_guard_allows(good, false));
+        assert!(!diagnostic_layout_guard_allows(flat, true));
         assert_eq!(
-            diagnostic_layout_path(true, true, true),
-            DiagnosticLayoutPath::Deferred
+            diagnostic_layout_stops_on_first_failure(&[true, true, true]),
+            (3, true)
         );
         assert_eq!(
-            diagnostic_layout_path(false, true, true),
-            DiagnosticLayoutPath::Fallback
+            diagnostic_layout_stops_on_first_failure(&[true, false, true]),
+            (1, false)
         );
         assert_eq!(
-            diagnostic_layout_path(true, false, true),
-            DiagnosticLayoutPath::Fallback
+            diagnostic_layout_stops_on_first_failure(&[false]),
+            (0, false)
         );
-        assert_eq!(
-            diagnostic_layout_path(true, true, false),
-            DiagnosticLayoutPath::Fallback
-        );
+        assert_eq!(diagnostic_layout_stops_on_first_failure(&[]), (0, true));
     }
     #[test]
     fn diagnostic_toolbar_layout_is_one_row_and_derived_from_flow() {
-        let layout = diagnostic_layout(1_104, 480, 96);
+        let layout = diagnostic_layout(1_190, 480, 96);
         let toolbar = layout.toolbar;
         let controls = [
             toolbar.display_label,
             toolbar.display_input,
             toolbar.show_all,
             toolbar.category_filter,
+            toolbar.search_label,
+            toolbar.search_input,
             toolbar.transfer_label,
             toolbar.range_input,
             toolbar.selection_summary,
@@ -3688,8 +3742,8 @@ mod tests {
             toolbar.display_input.left - toolbar.display_label.right(),
             8
         );
-        assert_eq!(toolbar.message.width, 228);
-        assert_eq!(diagnostic_toolbar_min_width(96), 1_016);
+        assert_eq!(toolbar.message.width, 140);
+        assert_eq!(diagnostic_toolbar_min_width(96), 1_190);
         assert!(toolbar.message.width >= DIAGNOSTIC_TOOLBAR_MIN_MESSAGE_WIDTH);
     }
 
@@ -3697,7 +3751,7 @@ mod tests {
     fn compact_default_outer_size_keeps_one_row_toolbar_and_grid_usable() {
         assert_eq!(
             (DIAGNOSTIC_DEFAULT_WIDTH, DIAGNOSTIC_DEFAULT_HEIGHT),
-            (1_120, 520)
+            (1_280, 520)
         );
         let frame = Rect {
             left: -8,
@@ -3705,11 +3759,12 @@ mod tests {
             right: 1_024,
             bottom: 249,
         };
-        let minimum = outer_size_from_client(1_016, 240, frame);
+        let minimum = outer_size_from_client(1_190, 240, frame);
         assert_eq!(minimum, Point { x: 1_032, y: 280 });
+        assert!(DIAGNOSTIC_DEFAULT_WIDTH >= diagnostic_toolbar_min_width(96));
         assert!(DIAGNOSTIC_DEFAULT_WIDTH >= minimum.x);
         assert!(DIAGNOSTIC_DEFAULT_HEIGHT >= minimum.y);
-        let layout = diagnostic_layout(1_104, 480, 96);
+        let layout = diagnostic_layout(1_280, 480, 96);
         assert!(layout.toolbar.message.width >= DIAGNOSTIC_TOOLBAR_MIN_MESSAGE_WIDTH);
         assert!(layout.list.height >= DIAGNOSTIC_GRID_MIN_HEIGHT);
         assert!(layout.toolbar.display_input.top == layout.toolbar.export.top);
@@ -3717,10 +3772,10 @@ mod tests {
 
     #[test]
     fn diagnostic_minimum_size_and_dpi_scaling_keep_summary_and_grid_visible() {
-        assert_eq!(diagnostic_min_client_height(96), 240);
-        assert_eq!(diagnostic_toolbar_min_width(144), 1_524);
-        assert_eq!(diagnostic_min_client_height(144), 360);
-        let layout = diagnostic_layout(1_600, 360, 144);
+        assert_eq!(diagnostic_min_client_height(96), 276);
+        assert_eq!(diagnostic_toolbar_min_width(144), 1_785);
+        assert_eq!(diagnostic_min_client_height(144), 414);
+        let layout = diagnostic_layout(1_600, 414, 144);
         assert_eq!(
             layout.hud_state.height,
             scale_logical(DIAGNOSTIC_HUD_STATE_HEIGHT, 144)
@@ -3763,7 +3818,7 @@ mod tests {
     fn hud_field_formatting_keeps_key_values_and_snapshot_evidence_visible() {
         let text = diagnostic_hud_field_text(DiagnosticHudFields {
             effective: "0.4966 ms (4966 HNS)",
-            ownership: "True™ Tick",
+            ownership: "True\u{2122} Tick",
             power: "AC",
             startup: "On",
             running_duration: "4m 12s",
@@ -3772,10 +3827,12 @@ mod tests {
             visible: 4,
             retained: 12,
             chain_status: "OK",
+            slot: "A",
+            root: "C:\\Portable\\TrueTick",
         });
         for field in [
             "Effective: 0.4966 ms (4966 HNS)",
-            "Ownership: True™ Tick",
+            "Ownership: True\u{2122} Tick",
             "Power: AC",
             "Startup: On",
             "Running: 4m 12s",
@@ -3783,10 +3840,16 @@ mod tests {
             "History: retained_events=12 retention_cap=512 truncated=true",
             "Showing 4 of 12 retained rows",
             "Chain: OK",
+            "Slot: A",
+            "Root: C:\\Portable\\TrueTick",
+            "True\u{2122} Tick v",
+            "by kaiiuen",
+            GITHUB_URL,
         ] {
             assert!(text.contains(field), "missing HUD field: {field}");
         }
-        assert_eq!(text.lines().count(), 3);
+        assert!(text.contains(env!("CARGO_PKG_VERSION")));
+        assert_eq!(text.lines().count(), 5);
     }
 
     #[test]
@@ -3882,8 +3945,8 @@ mod tests {
         assert!(DIAGNOSTIC_WINDOW_PARENT.is_null());
         assert_ne!(diagnostic_window_extended_style() & WS_EX_APPWINDOW, 0);
         assert_eq!(diagnostic_window_extended_style() & WS_EX_TOOLWINDOW, 0);
-        assert_eq!(diagnostic_toolbar_min_width(96), 1_016);
-        assert_eq!(diagnostic_min_client_height(96), 240);
+        assert_eq!(diagnostic_toolbar_min_width(96), 1_190);
+        assert_eq!(diagnostic_min_client_height(96), 276);
         assert_eq!(DIAGNOSTIC_TOOLBAR_HEIGHT, 36);
     }
     #[test]
@@ -3934,6 +3997,9 @@ mod tests {
             "(*app).diagnostic_display_label = Some(display_label);",
             "(*app).diagnostic_display_input = Some(display_input);",
             "(*app).diagnostic_show_all_button = Some(show_all_button);",
+            "(*app).diagnostic_category_filter = Some(category_combo);",
+            "(*app).diagnostic_search_label = Some(search_label);",
+            "(*app).diagnostic_search_input = Some(search_input);",
             "(*app).diagnostic_toolbar_label = Some(label);",
             "(*app).diagnostic_selection_summary = Some(selection_summary);",
             "(*app).diagnostic_range_input = Some(range_input);",
@@ -4054,6 +4120,8 @@ mod tests {
                 DiagnosticChildRedrawTarget::DisplayInput,
                 DiagnosticChildRedrawTarget::ShowAllButton,
                 DiagnosticChildRedrawTarget::CategoryFilter,
+                DiagnosticChildRedrawTarget::SearchLabel,
+                DiagnosticChildRedrawTarget::SearchInput,
                 DiagnosticChildRedrawTarget::ToolbarLabel,
                 DiagnosticChildRedrawTarget::SelectionSummary,
                 DiagnosticChildRedrawTarget::RangeInput,
@@ -4079,5 +4147,28 @@ mod tests {
         assert!(rows
             .iter()
             .all(|row| row.cells.len() == REPORT_COLUMNS.len()));
+    }
+
+    #[test]
+    fn search_matches_treats_empty_and_blank_queries_as_match_all() {
+        assert!(search_matches("", "timer.tick", "result=ok"));
+        assert!(search_matches("   ", "timer.tick", "result=ok"));
+    }
+
+    #[test]
+    fn search_matches_event_name_case_insensitively() {
+        assert!(search_matches("TICK", "timer.tick", "result=ok"));
+        assert!(search_matches("timer.T", "Timer.Tick", ""));
+    }
+
+    #[test]
+    fn search_matches_details_case_insensitively() {
+        assert!(search_matches("RAW_STATUS", "native.error", "raw_status=5"));
+        assert!(search_matches("hwnd", "diag", "HWND_VALID=1"));
+    }
+
+    #[test]
+    fn search_matches_rejects_text_absent_from_name_and_details() {
+        assert!(!search_matches("clipboard", "timer.tick", "result=ok"));
     }
 }

@@ -18,17 +18,21 @@ use super::{
     quit_decision, schedule_duration_action, schedule_preset_action, set_automatic, set_startup,
     show_quit_warning, show_shutdown_warning, wide, App, AppendMenuW, CreatePopupMenu,
     CreateWindowExW, DestroyMenu, DiagnosticOutcome, DiagnosticSource, GetCursorPos, GetLastError,
-    GetMenuItemCount, GetMenuStringW, GetModuleHandleW, KillTimer, MessageBoxW, ModifyMenuW,
-    NativeResult, Point, PopupMenuHandles, PostQuitMessage, QuitDecision, QuitDialogDecision, Rect,
-    SendMessageW, SetForegroundWindow, SetTimer, ToolInfo, TrackPopupMenu, ID_AUTOMATIC_OFF,
-    ID_AUTOMATIC_ON, ID_QUIT, ID_START, ID_STARTUP_OFF, ID_STARTUP_ON, ID_STOP, MB_ICONWARNING,
-    POPUP_REFRESH_INTERVAL_MS, POPUP_REFRESH_TIMER_ID, TTF_ABSOLUTE, TTF_IDISHWND, TTF_TRACK,
-    TTM_ADDTOOLW, TTM_TRACKACTIVATE, TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_ALWAYSTIP,
-    TTS_NOPREFIX, WS_EX_TOPMOST, WS_POPUP,
+    GetMenuItemCount, GetMenuStringW, GetModuleHandleW, GetSystemMetrics, KillTimer, MessageBoxW,
+    ModifyMenuW, NativeResult, Point, PopupMenuHandles, PostQuitMessage, QuitDecision,
+    QuitDialogDecision, Rect, SendMessageW, SetForegroundWindow, SetTimer, ToolInfo,
+    TrackPopupMenu, ID_AUTOMATIC_OFF, ID_AUTOMATIC_ON, ID_QUIT, ID_START, ID_STARTUP_OFF,
+    ID_STARTUP_ON, ID_STOP, MB_ICONWARNING, POPUP_REFRESH_INTERVAL_MS, POPUP_REFRESH_TIMER_ID,
+    TTF_ABSOLUTE, TTF_IDISHWND, TTF_TRACK, TTM_ADDTOOLW, TTM_TRACKACTIVATE, TTM_TRACKPOSITION,
+    TTM_UPDATETIPTEXTW, TTS_ALWAYSTIP, TTS_NOPREFIX, WS_EX_TOPMOST, WS_POPUP,
 };
 
+pub(crate) const TPM_LEFTALIGN: u32 = 0x0000;
+pub(crate) const TPM_TOPALIGN: u32 = 0x0000;
 pub(crate) const TPM_RIGHTBUTTON: u32 = 0x0002;
 pub(crate) const TPM_RETURNCMD: u32 = 0x0100;
+pub(crate) const SM_CXWORKAREA: i32 = 60;
+pub(crate) const SM_CYWORKAREA: i32 = 61;
 pub(crate) const MF_STRING: u32 = 0x0000;
 pub(crate) const MF_SEPARATOR: u32 = 0x0800;
 pub(crate) const MF_GRAYED: u32 = 0x0001;
@@ -57,6 +61,19 @@ pub(crate) unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
         );
         app.menu_active = false;
         return;
+    }
+    let work_width = GetSystemMetrics(SM_CXWORKAREA).max(0);
+    let work_height = GetSystemMetrics(SM_CYWORKAREA).max(0);
+    if work_width > 0 && work_height > 0 {
+        anchor = clamp_menu_anchor(
+            anchor,
+            Rect {
+                left: 0,
+                top: 0,
+                right: work_width,
+                bottom: work_height,
+            },
+        );
     }
     loop {
         let menu = CreatePopupMenu();
@@ -178,7 +195,7 @@ pub(crate) unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
         }
         let command = TrackPopupMenu(
             menu,
-            TPM_RIGHTBUTTON | TPM_RETURNCMD,
+            TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
             anchor.x,
             anchor.y,
             0,
@@ -1024,6 +1041,15 @@ pub(crate) fn returned_menu_command(result: i32) -> Option<usize> {
     (result > 0).then_some(result as usize)
 }
 
+pub(crate) fn clamp_menu_anchor(point: Point, work: Rect) -> Point {
+    let max_x = work.right.saturating_sub(1).max(work.left);
+    let max_y = work.bottom.saturating_sub(1).max(work.top);
+    Point {
+        x: point.x.clamp(work.left, max_x),
+        y: point.y.clamp(work.top, max_y),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1056,6 +1082,40 @@ mod tests {
     fn signed_screen_coordinates_keep_their_low_32_bits() {
         assert_eq!(track_position_lparam(-1, -2) as u32, 0xfffe_ffff);
         assert_eq!(track_position_lparam(-1920, 1080) as u32, 0x0438_f880);
+    }
+
+    #[test]
+    fn clamp_menu_anchor_keeps_point_inside_work_area() {
+        let work = Rect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        };
+        assert_eq!(
+            clamp_menu_anchor(Point { x: 500, y: 400 }, work),
+            Point { x: 500, y: 400 }
+        );
+        let work = Rect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        };
+        assert_eq!(
+            clamp_menu_anchor(Point { x: 2500, y: 3000 }, work),
+            Point { x: 1919, y: 1039 }
+        );
+        let work = Rect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        };
+        assert_eq!(
+            clamp_menu_anchor(Point { x: -10, y: -20 }, work),
+            Point { x: 0, y: 0 }
+        );
     }
 
     #[test]
