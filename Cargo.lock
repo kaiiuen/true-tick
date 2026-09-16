@@ -93,6 +93,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tick-multiclient"
+version = "0.1.0"
+dependencies = [
+ "tick-core",
+ "tick-ownership",
+ "tick-platform-windows",
+]
+
+[[package]]
 name = "tick-observation-windows"
 version = "0.1.0"
 dependencies = [

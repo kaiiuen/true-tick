@@ -493,6 +493,43 @@ mod tests {
     }
 
     #[test]
+    fn startup_controller_presumes_zero_prior_ownership_without_writing_defaults() {
+        let controller = fixture_controller();
+        assert_eq!(controller.ownership(), OwnershipState::Released);
+        assert_eq!(controller.selected_interval(), None);
+        assert_eq!(controller.release_boundary(), None);
+        assert_eq!(controller.verification(), Verification::NotCollected);
+        assert_eq!(controller.observation(), None);
+        assert_eq!(controller.snapshot(), TimingSnapshot::default());
+        assert_eq!(controller.status(), Status::Released);
+    }
+
+    #[test]
+    fn failed_or_uncertain_release_keeps_ownership_tracked_for_retry() {
+        let mut controller = TimerController::new(
+            FixturePlatform {
+                request_observation: TimerObservation {
+                    requested: Hns::new(5_000),
+                    reported_current: Hns::new(4_966),
+                    raw_status: 0,
+                },
+                release_result: Err(TimerError::ReleaseFailed { raw_status: -1 }),
+                query_results: Vec::new(),
+            },
+            Hns::new(5_000),
+        );
+        controller.start().unwrap();
+        assert_eq!(controller.ownership(), OwnershipState::Owned);
+        assert_eq!(
+            controller.stop(),
+            Err(TimerError::ReleaseFailed { raw_status: -1 })
+        );
+        assert_eq!(controller.ownership(), OwnershipState::Owned);
+        assert_eq!(controller.selected_interval(), Some(Hns::new(5_000)));
+        assert_eq!(controller.verification(), Verification::Unverified);
+    }
+
+    #[test]
     fn startup_query_observes_current_timing_without_ownership() {
         let mut controller = fixture_controller();
         let observation = controller.query().unwrap();

@@ -1356,10 +1356,23 @@ mod tests {
             power_reconciliation(false, PowerState::Battery, OwnershipState::Released),
             PowerReconciliation::ReleaseBlocked
         );
-        assert_eq!(
-            power_reconciliation(false, PowerState::Ac, OwnershipState::Released),
-            PowerReconciliation::ShowStopped
-        );
+        let reconciliation = power_reconciliation(false, PowerState::Ac, OwnershipState::Released);
+        assert_eq!(reconciliation, PowerReconciliation::ShowStopped);
+
+        let status = match reconciliation {
+            PowerReconciliation::ShowStopped => TrayStatus::Stopped,
+            PowerReconciliation::ReleaseBlocked => TrayStatus::Blocked,
+            _ => TrayStatus::Running,
+        };
+        assert_ne!(status, TrayStatus::Blocked);
+        assert_eq!(status, TrayStatus::Stopped);
+
+        let timing = TimingValues {
+            effective: Some(Hns::new(4_966)),
+            valid: true,
+            ..TimingValues::default()
+        };
+        assert_eq!(tooltip(status, timing), "True™ Tick: Stopped · 0.4966 ms");
     }
 
     #[test]

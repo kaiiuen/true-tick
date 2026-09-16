@@ -572,6 +572,35 @@ mod tests {
     }
 
     #[test]
+    fn boundary_normalization_is_numeric_regardless_of_arrival_order() {
+        // Same pair arriving in each possible order must normalize identically.
+        let (forward, _) = native_resolution_values(5_000, 156_250, 9_966);
+        let (inverted, _) = native_resolution_values(156_250, 5_000, 9_966);
+        assert_eq!(forward.numeric_interval(), inverted.numeric_interval());
+        assert_eq!(
+            forward.numeric_interval(),
+            (Hns::new(5_000), Hns::new(156_250))
+        );
+        assert_eq!(
+            forward.smallest_supported_boundary(),
+            inverted.smallest_supported_boundary()
+        );
+
+        // Validation outcome for the same probe value must match across orders.
+        for bounds in [forward, inverted] {
+            assert_eq!(validate_interval(bounds, Hns::new(10_000)), Ok(()));
+            assert_eq!(
+                validate_interval(bounds, Hns::new(4_999)),
+                Err(TimerError::InvalidInterval)
+            );
+            assert_eq!(
+                validate_interval(bounds, Hns::new(156_251)),
+                Err(TimerError::InvalidInterval)
+            );
+        }
+    }
+
+    #[test]
     fn automatic_selection_uses_the_smallest_numeric_boundary() {
         let (bounds, current) = native_resolution_values(156_250, 5_000, 9_966);
         let query = TimerQuery {
@@ -596,6 +625,48 @@ mod tests {
             query.resolve_request(Hns::ZERO),
             Err(TimerError::InvalidInterval)
         );
+    }
+
+    #[test]
+    fn automatic_selection_rejects_inverted_unavailable_boundaries() {
+        // Zero bound arriving in the maximum slot still fails cleanly.
+        let query = TimerQuery {
+            bounds: TimerBounds {
+                minimum_interval: Hns::new(15_625),
+                maximum_interval: Hns::ZERO,
+            },
+            reported_current: Hns::ZERO,
+            raw_status: STATUS_SUCCESS,
+        };
+        assert_eq!(
+            query.resolve_request(Hns::ZERO),
+            Err(TimerError::InvalidInterval)
+        );
+
+        // Bounds beyond the u32 domain fail cleanly even when inverted.
+        let query = TimerQuery {
+            bounds: TimerBounds {
+                minimum_interval: Hns::new(u32::MAX as u64 + 2),
+                maximum_interval: Hns::new(u32::MAX as u64 + 1),
+            },
+            reported_current: Hns::ZERO,
+            raw_status: STATUS_SUCCESS,
+        };
+        assert_eq!(
+            query.resolve_request(Hns::ZERO),
+            Err(TimerError::InvalidInterval)
+        );
+    }
+
+    #[test]
+    fn automatic_selection_resolves_smallest_boundary_for_inverted_pair() {
+        let (bounds, current) = native_resolution_values(5_000, 156_250, 9_966);
+        let query = TimerQuery {
+            bounds,
+            reported_current: current,
+            raw_status: STATUS_SUCCESS,
+        };
+        assert_eq!(query.resolve_request(Hns::ZERO), Ok(Hns::new(5_000)));
     }
 
     #[test]
@@ -633,6 +704,28 @@ mod tests {
         );
         assert_eq!(
             validate_interval(bounds, Hns::new(15_626)),
+            Err(TimerError::InvalidInterval)
+        );
+        assert_eq!(
+            validate_interval(bounds, Hns::new(u32::MAX as u64 + 1)),
+            Err(TimerError::InvalidInterval)
+        );
+    }
+
+    #[test]
+    fn fixed_selection_passes_requested_value_through_unchanged() {
+        let (bounds, current) = native_resolution_values(156_250, 5_000, 9_966);
+        let query = TimerQuery {
+            bounds,
+            reported_current: current,
+            raw_status: STATUS_SUCCESS,
+        };
+        assert_eq!(
+            query.resolve_request(Hns::new(10_000)),
+            Ok(Hns::new(10_000))
+        );
+        assert_eq!(
+            query.resolve_request(Hns::new(200_000)),
             Err(TimerError::InvalidInterval)
         );
     }
@@ -692,6 +785,27 @@ mod tests {
         };
         assert!(!beyond_boundary.is_satisfied());
         assert_eq!(beyond_boundary.effective_relation(), "unverified");
+    }
+
+    #[test]
+    fn hardware_tolerance_accepts_exactly_one_hundred_hns_overshoot() {
+        // A 100 HNS overshoot is the maximum satisfied deviation.
+        let observation = TimerObservation {
+            requested: Hns::new(10_000),
+            reported_current: Hns::new(10_000 + HARDWARE_TIMER_TOLERANCE_HNS),
+            raw_status: STATUS_SUCCESS,
+        };
+        assert!(observation.is_satisfied());
+        assert!(!observation.is_finer_than_requested());
+        assert_eq!(observation.effective_relation(), "satisfied");
+
+        let overshot = TimerObservation {
+            requested: Hns::new(10_000),
+            reported_current: Hns::new(10_000 + HARDWARE_TIMER_TOLERANCE_HNS + 1),
+            raw_status: STATUS_SUCCESS,
+        };
+        assert!(!overshot.is_satisfied());
+        assert_eq!(overshot.effective_relation(), "unverified");
     }
 
     #[test]

@@ -165,6 +165,34 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_gate_distinguishes_normal_shutdown_from_message_loop_failure() {
+        assert_eq!(
+            shutdown_disposition(MessageLoopExit::NormalQuit, true, false),
+            ShutdownDisposition::Complete
+        );
+        assert_eq!(
+            shutdown_disposition(MessageLoopExit::NormalQuit, true, true),
+            ShutdownDisposition::Complete
+        );
+        assert_eq!(
+            shutdown_disposition(
+                MessageLoopExit::GetMessageFailed { raw_error: 1 },
+                true,
+                false
+            ),
+            ShutdownDisposition::ExitAfterMessageLoopError
+        );
+        assert_eq!(
+            shutdown_disposition(
+                MessageLoopExit::GetMessageFailed { raw_error: 1 },
+                true,
+                true
+            ),
+            ShutdownDisposition::ExitAfterMessageLoopError
+        );
+    }
+
+    #[test]
     fn message_loop_failure_never_reports_normal_shutdown_complete() {
         assert_eq!(
             shutdown_disposition(

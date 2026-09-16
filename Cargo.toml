@@ -9,6 +9,7 @@ members = [
     "crates/tick-diagnostics",
     "crates/tick-calibration",
     "crates/tick-startup-windows",
+    "crates/tick-multiclient",
     "apps/true-tick",
     "apps/launcher",
 ]
