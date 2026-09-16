@@ -66,6 +66,13 @@ pub(crate) fn power_reconciliation(
     }
 }
 
+pub(crate) const fn uncertain_recovery_attempts_acquire(
+    automatic: bool,
+    power: PowerState,
+) -> bool {
+    automatic && matches!(power, PowerState::Ac)
+}
+
 pub(crate) const fn lifecycle_status(status: TrayStatus, handoff_active: bool) -> TrayStatus {
     if handoff_active || matches!(status, TrayStatus::Pausing) {
         TrayStatus::Stopping
@@ -535,9 +542,9 @@ pub(crate) const fn dpi_to_icon_canvas(dpi: u32) -> i32 {
 
 pub(crate) const fn icon_pixel_color(status: TrayStatus) -> u32 {
     match status.icon_color() {
-        IconColor::Green => 0x0000b000,
-        IconColor::Yellow => 0x00d0d000,
-        IconColor::Red => 0x00d00000,
+        IconColor::Green => 0xFF00B000,
+        IconColor::Yellow => 0xFFD0D000,
+        IconColor::Red => 0xFFD00000,
     }
 }
 
@@ -1445,8 +1452,18 @@ mod tests {
     }
 
     #[test]
+    fn uncertain_recovery_attempts_acquire_only_on_ac_with_automatic() {
+        assert!(uncertain_recovery_attempts_acquire(true, PowerState::Ac));
+        assert!(!uncertain_recovery_attempts_acquire(false, PowerState::Ac));
+        assert!(!uncertain_recovery_attempts_acquire(
+            true,
+            PowerState::Battery
+        ));
+    }
+
+    #[test]
     fn status_colors_are_stable_for_native_icon_pixels() {
-        assert_eq!(icon_pixel_color(TrayStatus::Running), 0x0000b000);
+        assert_eq!(icon_pixel_color(TrayStatus::Running), 0xFF00B000);
         for status in [
             TrayStatus::Starting,
             TrayStatus::Stopping,
@@ -1454,7 +1471,7 @@ mod tests {
             TrayStatus::Degraded,
             TrayStatus::Unverified,
         ] {
-            assert_eq!(icon_pixel_color(status), 0x00d0d000);
+            assert_eq!(icon_pixel_color(status), 0xFFD0D000);
         }
         for status in [
             TrayStatus::Stopped,
@@ -1462,7 +1479,29 @@ mod tests {
             TrayStatus::Unsupported,
             TrayStatus::Error,
         ] {
-            assert_eq!(icon_pixel_color(status), 0x00d00000);
+            assert_eq!(icon_pixel_color(status), 0xFFD00000);
+        }
+    }
+
+    #[test]
+    fn icon_pixel_colors_are_fully_opaque() {
+        for status in [
+            TrayStatus::Running,
+            TrayStatus::Starting,
+            TrayStatus::ScheduledStart,
+            TrayStatus::Pausing,
+            TrayStatus::Stopping,
+            TrayStatus::ScheduledStop,
+            TrayStatus::Paused,
+            TrayStatus::Pending,
+            TrayStatus::Degraded,
+            TrayStatus::Unverified,
+            TrayStatus::Stopped,
+            TrayStatus::Blocked,
+            TrayStatus::Unsupported,
+            TrayStatus::Error,
+        ] {
+            assert_eq!(icon_pixel_color(status) >> 24, 0xFF);
         }
     }
 

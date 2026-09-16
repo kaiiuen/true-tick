@@ -128,8 +128,9 @@ pub(crate) mod list_view_native {
 }
 
 use crate::tray_surface::{
-    power_reconciliation, release_needs_handoff, HandoffProgress, HandoffTracker,
-    PowerReconciliation, TrayStatus, GITHUB_URL, HANDOFF_POLL_INTERVAL_MS,
+    power_reconciliation, release_needs_handoff, uncertain_recovery_attempts_acquire,
+    HandoffProgress, HandoffTracker, PowerReconciliation, TrayStatus, GITHUB_URL,
+    HANDOFF_POLL_INTERVAL_MS,
 };
 
 const WM_APP: u32 = 0x8000;
@@ -1265,10 +1266,14 @@ fn apply_power_reconciliation(app: &mut App) {
         return;
     }
     let power = app.observation.power().state;
-    let action = power_reconciliation(app.config.automatic, power, app.controller.ownership());
+    let automatic = app.config.automatic;
+    let action = power_reconciliation(automatic, power, app.controller.ownership());
     app.record(
         "policy.power_reconciliation",
-        format!("power={power:?} action={action:?}"),
+        format!(
+            "power={power:?} automatic={automatic} ownership={:?} action={action:?}",
+            app.controller.ownership()
+        ),
     );
     match action {
         PowerReconciliation::Acquire => apply_policy(app),
@@ -1283,7 +1288,37 @@ fn apply_power_reconciliation(app: &mut App) {
         ),
         PowerReconciliation::ShowStopped => show_ownership_status(app, TrayStatus::Stopped),
         PowerReconciliation::PreserveOwned => show_ownership_status(app, TrayStatus::Stopped),
-        PowerReconciliation::PreserveUncertain => show_ownership_status(app, TrayStatus::Stopped),
+        PowerReconciliation::PreserveUncertain => {
+            if uncertain_recovery_attempts_acquire(automatic, power) {
+                let settle = guarded_release(
+                    app,
+                    "power reconciliation settles uncertain ownership",
+                    TrayStatus::Stopped,
+                );
+                let settled = app.controller.ownership() == OwnershipState::Released;
+                app.record(
+                    "policy.power_reconciliation.uncertain_settle",
+                    format!(
+                        "result={settle:?} ownership={:?}",
+                        app.controller.ownership()
+                    ),
+                );
+                if settle.is_ok() && settled {
+                    apply_policy(app);
+                } else {
+                    app.record(
+                        "policy.power_reconciliation.uncertain_unsettled",
+                        format!(
+                            "result={settle:?} ownership={:?} fallback=stopped",
+                            app.controller.ownership()
+                        ),
+                    );
+                    show_ownership_status(app, TrayStatus::Stopped);
+                }
+            } else {
+                show_ownership_status(app, TrayStatus::Stopped);
+            }
+        }
     }
 }
 

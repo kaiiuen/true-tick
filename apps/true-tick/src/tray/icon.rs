@@ -86,12 +86,17 @@ pub(crate) const fn dpi_to_canvas_size(dpi: u32) -> u32 {
     dpi_to_icon_canvas(dpi) as u32
 }
 
+// A 1bpp bitmap scan line is padded to a 4 byte boundary per Windows
+fn mask_buffer_len(canvas: i32) -> usize {
+    (((canvas + 31) / 32) * 4) as usize * canvas as usize
+}
+
 pub(crate) unsafe fn status_icon(status: TrayStatus, dpi: u32) -> Result<*mut c_void, u32> {
     let color = icon_pixel_color(status);
     let canvas = dpi_to_canvas_size(dpi) as i32;
     let pixel_count = (canvas * canvas) as usize;
     let pixels = vec![color; pixel_count];
-    let mask = vec![0u8; pixel_count / 8];
+    let mask = vec![0u8; mask_buffer_len(canvas)];
     let bitmap = CreateBitmap(canvas, canvas, 1, 32, pixels.as_ptr() as *const c_void);
     if bitmap.is_null() {
         return Err(GetLastError());
@@ -234,5 +239,12 @@ mod tests {
         assert_eq!(dpi_to_canvas_size(175), 32);
         assert_eq!(dpi_to_canvas_size(288), 32);
         assert_eq!(dpi_to_canvas_size(289), 64);
+    }
+
+    #[test]
+    fn mask_buffer_len_pads_each_scan_line_to_four_bytes() {
+        for (canvas, expected) in [(16, 64), (20, 80), (24, 96), (32, 128), (64, 512)] {
+            assert_eq!(mask_buffer_len(canvas), expected);
+        }
     }
 }
