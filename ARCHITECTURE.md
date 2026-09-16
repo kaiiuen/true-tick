@@ -2,6 +2,25 @@
 
 This repository contains an internal v1 runtime, not a production release.
 
+## Source Layout
+
+```
+apps/true-tick/src/
+  main.rs                  Application entry point
+  config.rs                Configuration parsing, validation, and atomic persistence
+  pause.rs                 Duration presets, scheduling state, and coordinator
+  portable.rs              A/B slot detection and launcher resolution
+  shutdown.rs              Guarded shutdown and cleanup gate
+  tray.rs                  Tray icon, shell notifications, menu construction, and message loop
+  tray_surface.rs          Pure tray menu model, tooltip contract, and status rows
+  win32/mod.rs             Native Win32 types, constants, and FFI declarations
+  ui/mod.rs                UI module root
+  ui/diagnostic_window.rs  Diagnostic Logs window, HUD, toolbar, layout, and export
+  ui/marquee.rs            Report grid subclass with marquee drag selection
+  ui/presets_window.rs     Time Manager interval presets dialog
+  logging/mod.rs           Rolling daily CSV audit log writer
+```
+
 ## Runtime invariants
 
 The ownership lifecycle is the source of truth for visible timer status. An active release handoff always derives to yellow `Stopping, handoff` and remains protected from unrelated startup, configuration, logging, or power diagnostic publication. Handoff completion clears the tracker and publishes red `Stopped` with the observed current effective timing. A bounded timeout clears the tracker and publishes red `Stopped` with the observed current effective timing while ownership remains released. The icon uses the same derived lifecycle state as the text.

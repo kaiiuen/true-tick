@@ -9,6 +9,25 @@ technical paths retain the lowercase unspaced technical identifier true-tick.
 
 ## Lifecycle and timing invariants
 
+## Module layout
+
+```
+apps/true-tick/src/
+  main.rs                  Application entry point
+  config.rs                Configuration parsing, validation, and atomic persistence
+  pause.rs                 Duration presets, scheduling state, and coordinator
+  portable.rs              A/B slot detection and launcher resolution
+  shutdown.rs              Guarded shutdown and cleanup gate
+  tray.rs                  Tray icon, shell notifications, menu construction, and message loop
+  tray_surface.rs          Pure tray menu model, tooltip contract, and status rows
+  win32/mod.rs             Native Win32 types, constants, and FFI declarations
+  ui/mod.rs                UI module root
+  ui/diagnostic_window.rs  Diagnostic Logs window, HUD, toolbar, layout, and export
+  ui/marquee.rs            Report grid subclass with marquee drag selection
+  ui/presets_window.rs     Time Manager interval presets dialog
+  logging/mod.rs           Rolling daily CSV audit log writer
+```
+
 The timer lifecycle is authoritative for the tray status. While a release handoff is active, the derived status is always yellow `Stopping, handoff` and unrelated configuration, startup, logging, or power diagnostics cannot replace it with red `Error`, `Stopped`, or `Blocked`. The icon color is derived from that same lifecycle state. A handoff completion clears the tracker and publishes red `Stopped` with the current effective timing in the standard `True™ Tick: Stopped · <timing>` tooltip format. A bounded timeout clears the tracker and publishes red `Stopped` with the current effective timing while ownership remains released. The tooltip always displays `True™ Tick: <state> · <timing>`, and never uses synthetic parenthetical status forms.
 
 Manual and automatic changes use a latest-wins desired intent queue with only `Acquire` and `Release`. An intent received during `Starting` or `Stopping` is retained and processed after the transition. Native request and release calls remain serialized and idempotent. Power policy is applied when the queued intent is processed. Auto-time off on AC therefore remains stopped when no release is pending.

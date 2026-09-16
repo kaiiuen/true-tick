@@ -11,10 +11,12 @@ use crate::tray::list_view_native::{
     LVIR_BOUNDS, LVM_GETITEMCOUNT, LVM_GETITEMRECT, VK_CONTROL, VK_SHIFT,
 };
 use crate::tray::{
-    list_selected_item_positions, set_list_view_item_selected, update_diagnostic_grid_selection,
     App, CallWindowProcW, DefWindowProcW, DrawFocusRect, GetCapture, GetDC, GetKeyState,
     GetSystemMetrics, GetWindowLongPtrW, InvalidateRect, Point, Rect, ReleaseCapture, ReleaseDC,
     SendMessageW, SetCapture, GWLP_USERDATA,
+};
+use crate::ui::diagnostic_window::{
+    list_selected_item_positions, set_list_view_item_selected, update_diagnostic_grid_selection,
 };
 
 const VK_LBUTTON: i32 = 0x01;
