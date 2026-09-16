@@ -385,6 +385,7 @@ pub(crate) unsafe fn restore_tray_icon(hwnd: *mut c_void, app: &mut App) {
         app.lifecycle_status(),
         app.timing_values(),
         app.pause.current(),
+        app.last_block_reason,
     ) {
         Ok(icon) => icon,
         Err(raw_error) => {
@@ -651,6 +652,10 @@ fn acquire_timer(app: &mut App) {
             }
         }
     };
+    if start_result.is_ok() {
+        // A successful acquisition supersedes any earlier policy block.
+        app.last_block_reason = None;
+    }
     if status == TrayStatus::Running {
         app.running_since = Some(std::time::Instant::now());
     } else {
@@ -680,6 +685,11 @@ fn release_for_policy(app: &mut App, reason: tick_policy::PolicyReason) {
         tick_policy::PolicyReason::NoEligibleProfile
         | tick_policy::PolicyReason::EligibleProfile => TrayStatus::Stopped,
     };
+    if released_status == TrayStatus::Blocked {
+        app.last_block_reason = Some(reason);
+    } else {
+        app.last_block_reason = None;
+    }
     if matches!(
         app.controller.ownership(),
         OwnershipState::Owned | OwnershipState::Uncertain
@@ -1415,7 +1425,7 @@ fn refresh_timing_observation(app: &mut App) -> Option<TimerObservation> {
         Ok(observation) => {
             app.sync_timing_snapshot();
             app.timing_snapshot_valid = true;
-            app.record(
+            app.record_with_outcome(
                 "timer.query.observation",
                 format!(
                     "requested_hns={} effective_hns={} raw_status={} effective_relation={}",
@@ -1424,6 +1434,7 @@ fn refresh_timing_observation(app: &mut App) -> Option<TimerObservation> {
                     observation.raw_status,
                     observation.effective_relation()
                 ),
+                DiagnosticOutcome::Completed,
             );
             Some(observation)
         }
@@ -2240,5 +2251,126 @@ mod tests {
         let last_event = events.last().expect("event recorded");
         assert_eq!(last_event.parent_operation_id, Some(root.operation_id));
         assert_eq!(last_event.operation_id, child.operation_id);
+    }
+
+    fn test_app(diagnostics: Arc<DiagnosticStore>) -> App {
+        use crate::pause::{DurationCoordinator, PresetsManager};
+        use tick_observation_windows::WindowsObservation;
+        use tick_ownership::{TimerController, TimingSnapshot};
+        use tick_platform_windows::WindowsTimerPlatform;
+
+        let config = config::Config::default();
+        App {
+            controller: TimerController::new(
+                WindowsTimerPlatform::with_diagnostics(diagnostics.clone()),
+                config.request_interval,
+            ),
+            observation: WindowsObservation::default(),
+            config,
+            tray_status: TrayStatus::Stopped,
+            last_block_reason: None,
+            config_path: PathBuf::new(),
+            executable: PathBuf::new(),
+            startup_status: String::new(),
+            operating_slot_label: String::new(),
+            portable_root_label: String::new(),
+            taskbar_created_message: 0,
+            another_instance_message: 0,
+            tray_icon: None,
+            timing_snapshot: TimingSnapshot::default(),
+            timing_snapshot_valid: false,
+            invalid_interval: false,
+            external_timing: false,
+            desired_intent: tick_core::DesiredIntentQueue::new(),
+            diagnostics,
+            diagnostic_window: None,
+            diagnostic_state_font: None,
+            diagnostic_hud_state: None,
+            diagnostic_summary: None,
+            diagnostic_hud_separator: None,
+            diagnostic_toolbar_separator: None,
+            diagnostic_display_label: None,
+            diagnostic_display_input: None,
+            diagnostic_show_all_button: None,
+            diagnostic_toolbar_label: None,
+            diagnostic_selection_summary: None,
+            diagnostic_range_input: None,
+            diagnostic_copy_button: None,
+            diagnostic_export_button: None,
+            diagnostic_export_all_button: None,
+            diagnostic_category_filter: None,
+            diagnostic_search_label: None,
+            diagnostic_search_input: None,
+            diagnostic_selected_category: None,
+            diagnostic_message: None,
+            diagnostic_list: None,
+            diagnostic_list_prev_proc: None,
+            diagnostic_marquee_active: false,
+            diagnostic_marquee_pending: false,
+            diagnostic_marquee_anchor: Point::default(),
+            diagnostic_marquee_current: Point::default(),
+            diagnostic_marquee_initial_selected: Vec::new(),
+            diagnostic_selection: None,
+            diagnostic_selection_sequences: None,
+            diagnostic_grid_selection_sequences: Vec::new(),
+            diagnostic_grid_selection_reset: false,
+            diagnostic_selection_reset: false,
+            diagnostic_display_limit: 100,
+            diagnostic_display_all: false,
+            diagnostic_controls_initializing: false,
+            diagnostic_search_text: String::new(),
+            diagnostic_message_text: String::new(),
+            diagnostic_refresh_pending: false,
+            diagnostic_refreshing: false,
+            diagnostic_refresh_direct_recorded: false,
+            diagnostic_refresh_follow_up_scheduled: false,
+            diagnostic_layout_stable: false,
+            diagnostic_snapshot_key: None,
+            diagnostic_snapshot_generation: 0,
+            diagnostic_auto_fit_generation: None,
+            menu_active: false,
+            popup_menus: None,
+            popup_refresh_timer_active: false,
+            schedule_display_timer_active: false,
+            handoff: None,
+            menu_help: None,
+            menu_help_text: Vec::new(),
+            pause: DurationCoordinator::new(),
+            presets_manager: PresetsManager::new(),
+            presets_window: None,
+            presets_listbox: None,
+            presets_input: None,
+            duration_timer_id: None,
+            duration_timer_generation: None,
+            scheduled_operation: None,
+            running_since: None,
+            shutdown_gate: crate::shutdown::ShutdownGate::new(),
+            operation: None,
+            operation_source: DiagnosticSource::Internal,
+            handoff_operation: None,
+            last_publication: None,
+            log_directory: PathBuf::new(),
+            last_persisted_event_sequence: 0,
+        }
+    }
+
+    #[test]
+    fn explicit_outcome_records_completed_despite_unverified_detail_token() {
+        let store = Arc::new(DiagnosticStore::new(16));
+        let mut app = test_app(store.clone());
+
+        app.record_with_outcome(
+            "timer.query.observation",
+            "requested_hns=156250 effective_hns=156250 raw_status=0 effective_relation=unverified",
+            DiagnosticOutcome::Completed,
+        );
+
+        let events = store.snapshot();
+        let event = events
+            .iter()
+            .find(|event| event.name == "timer.query.observation")
+            .expect("observation event recorded");
+        assert_eq!(event.outcome, DiagnosticOutcome::Completed);
+        assert!(event.details.contains("effective_relation=unverified"));
     }
 }

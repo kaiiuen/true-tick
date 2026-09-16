@@ -171,6 +171,7 @@ pub(crate) struct PublicationKey {
     requested: Option<tick_core::Hns>,
     handoff: bool,
     scheduled: Option<(DurationAction, u64, u64)>,
+    block_reason: Option<tick_policy::PolicyReason>,
 }
 
 pub(crate) struct App {
@@ -178,6 +179,8 @@ pub(crate) struct App {
     pub(crate) observation: WindowsObservation,
     pub(crate) config: config::Config,
     pub(crate) tray_status: TrayStatus,
+    /// Policy reason that explains why timing ownership is blocked.
+    pub(crate) last_block_reason: Option<tick_policy::PolicyReason>,
     pub(crate) config_path: PathBuf,
     pub(crate) executable: PathBuf,
     pub(crate) startup_status: String,
@@ -227,6 +230,7 @@ pub(crate) struct App {
     pub(crate) diagnostic_selection_reset: bool,
     pub(crate) diagnostic_display_limit: usize,
     pub(crate) diagnostic_display_all: bool,
+    pub(crate) diagnostic_controls_initializing: bool,
     pub(crate) diagnostic_search_text: String,
     pub(crate) diagnostic_message_text: String,
     pub(crate) diagnostic_refresh_pending: bool,
@@ -595,6 +599,7 @@ pub fn run() {
             } else {
                 TrayStatus::Stopped
             },
+            last_block_reason: None,
             config_path,
             executable,
             startup_status,
@@ -643,6 +648,7 @@ pub fn run() {
             diagnostic_selection_reset: false,
             diagnostic_display_limit: 100,
             diagnostic_display_all: false,
+            diagnostic_controls_initializing: false,
             diagnostic_search_text: String::new(),
             diagnostic_message_text: String::new(),
             diagnostic_refresh_pending: false,
@@ -903,6 +909,7 @@ pub fn run() {
             app.lifecycle_status(),
             app.timing_values(),
             app.pause.current(),
+            app.last_block_reason,
         ) {
             Ok(icon) => icon,
             Err(raw_error) => {
@@ -1343,6 +1350,44 @@ impl App {
         crate::ui::diagnostic_window::request_diagnostic_refresh(self);
     }
 
+    /// Records an event with an explicitly supplied outcome instead of deriving
+    /// one from the name and details text. Use this when details carry
+    /// informational tokens that would confuse the substring heuristic.
+    pub(crate) fn record_with_outcome(
+        &mut self,
+        name: &str,
+        details: impl AsRef<str>,
+        outcome: DiagnosticOutcome,
+    ) {
+        let details = details.as_ref();
+        let source = self
+            .operation
+            .map_or_else(|| diagnostic_source(name), |_| self.operation_source);
+        let context = self.operation.map_or_else(
+            || self.diagnostics.begin_operation(source),
+            |root| self.diagnostics.child_operation(root, source),
+        );
+        if self.operation.is_some() {
+            self.controller.set_operation_context(Some((
+                context.operation_id,
+                context.parent_operation_id,
+                context.correlation_id,
+            )));
+        }
+        self.diagnostics.record_with_context(
+            DiagnosticRecord {
+                context,
+                phase: diagnostic_phase(name),
+                source,
+                outcome,
+                native: native_outcome(name, details),
+            },
+            name,
+            details,
+        );
+        crate::ui::diagnostic_window::request_diagnostic_refresh(self);
+    }
+
     pub(crate) fn publish(&mut self) {
         let status = self.lifecycle_status();
         if status != TrayStatus::Running || self.controller.ownership() != OwnershipState::Owned {
@@ -1361,12 +1406,19 @@ impl App {
                 .pause
                 .current()
                 .map(|action| scheduled_display_key(action, now)),
+            block_reason: self.last_block_reason,
         };
         if self.last_publication == Some(key) {
             return;
         }
         self.last_publication = Some(key);
-        let status_text = tooltip_at(status, timing, self.pause.current(), now);
+        let status_text = tooltip_at(
+            status,
+            timing,
+            self.pause.current(),
+            now,
+            self.last_block_reason,
+        );
         self.record(
             "tray.status.changed",
             format!("status={status:?} tooltip={status_text}"),
@@ -1385,7 +1437,13 @@ impl App {
             ),
         );
         if let Some(icon) = self.tray_icon.as_mut() {
-            if let Err(raw_error) = update_icon(icon, status, timing, self.pause.current()) {
+            if let Err(raw_error) = update_icon(
+                icon,
+                status,
+                timing,
+                self.pause.current(),
+                self.last_block_reason,
+            ) {
                 self.record(
                     "native.Shell_NotifyIconW.modify.error",
                     format!("raw_status={raw_error}"),

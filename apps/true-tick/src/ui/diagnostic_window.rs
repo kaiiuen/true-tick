@@ -138,6 +138,27 @@ fn map_save_dialog_result(result: i32, extended_error: u32) -> DiagnosticNativeA
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DisplayLimitInputDecision {
+    Apply(usize),
+    PreserveEmpty,
+    Invalid,
+}
+
+// Classifies raw Show rows text before any state or operation side effects.
+// Blank input keeps the previous limit so a transient empty edit during
+// creation or mid edit typing never marks an unrelated operation Failed.
+fn display_limit_input_decision(input: &str) -> DisplayLimitInputDecision {
+    if input.trim().is_empty() {
+        DisplayLimitInputDecision::PreserveEmpty
+    } else {
+        match parse_display_limit(input) {
+            Ok(limit) => DisplayLimitInputDecision::Apply(limit),
+            Err(_) => DisplayLimitInputDecision::Invalid,
+        }
+    }
+}
 const fn diagnostic_window_style() -> u32 {
     WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS
 }
@@ -202,6 +223,7 @@ fn clear_diagnostic_state(app: &mut App) {
     app.diagnostic_grid_selection_reset = false;
     app.diagnostic_selection_reset = false;
     app.diagnostic_message_text.clear();
+    app.diagnostic_controls_initializing = false;
     app.diagnostic_refresh_pending = false;
     app.diagnostic_refreshing = false;
     app.diagnostic_refresh_direct_recorded = false;
@@ -781,7 +803,7 @@ fn diagnostic_toolbar_layout(
     let message_width = width
         .saturating_sub(message_left)
         .saturating_sub(margin)
-        .max(0);
+        .max(scale_logical(DIAGNOSTIC_TOOLBAR_MIN_MESSAGE_WIDTH, dpi));
     let message = DiagnosticLayoutRect {
         left: message_left,
         top: row_top,
@@ -2467,44 +2489,59 @@ fn diagnostic_range_changed(app: &mut App) {
 
 fn diagnostic_display_changed(app: &mut App) {
     let input = unsafe { diagnostic_display_text(app) };
-    let Ok(limit) = parse_display_limit(&input) else {
-        app.begin_operation(DiagnosticSource::Diagnostic);
-        app.record(
-            "diagnostic.display_limit.validation",
-            format!(
-                "result=invalid input_bytes={} retained_cap={}",
-                input.len(),
-                app.diagnostics.maximum_events()
-            ),
-        );
-        unsafe {
-            set_diagnostic_message(
-                app,
+    match display_limit_input_decision(&input) {
+        DisplayLimitInputDecision::PreserveEmpty => {
+            app.begin_operation(DiagnosticSource::Diagnostic);
+            app.record(
+                "diagnostic.display_limit.validation",
                 format!(
-                    "Invalid Show rows value: {}",
-                    parse_display_limit(&input).unwrap_err()
+                    "result=empty input_bytes={} retained_cap={}",
+                    input.len(),
+                    app.diagnostics.maximum_events()
                 ),
             );
+            app.finish_operation(DiagnosticOutcome::Suppressed);
         }
-        app.finish_operation(DiagnosticOutcome::Failed);
-        return;
-    };
-    app.diagnostic_display_limit = limit;
-    app.diagnostic_display_all = false;
-    app.begin_operation(DiagnosticSource::Diagnostic);
-    app.record(
-        "diagnostic.display_limit.changed",
-        format!("result=success limit={limit} override=none"),
-    );
-    unsafe {
-        if app
-            .diagnostic_message_text
-            .starts_with("Invalid Show rows value:")
-        {
-            set_diagnostic_message(app, "");
+        DisplayLimitInputDecision::Invalid => {
+            app.begin_operation(DiagnosticSource::Diagnostic);
+            app.record(
+                "diagnostic.display_limit.validation",
+                format!(
+                    "result=invalid input_bytes={} retained_cap={}",
+                    input.len(),
+                    app.diagnostics.maximum_events()
+                ),
+            );
+            unsafe {
+                set_diagnostic_message(
+                    app,
+                    format!(
+                        "Invalid Show rows value: {}",
+                        parse_display_limit(&input).unwrap_err()
+                    ),
+                );
+            }
+            app.finish_operation(DiagnosticOutcome::Suppressed);
+        }
+        DisplayLimitInputDecision::Apply(limit) => {
+            app.diagnostic_display_limit = limit;
+            app.diagnostic_display_all = false;
+            app.begin_operation(DiagnosticSource::Diagnostic);
+            app.record(
+                "diagnostic.display_limit.changed",
+                format!("result=success limit={limit} override=none"),
+            );
+            unsafe {
+                if app
+                    .diagnostic_message_text
+                    .starts_with("Invalid Show rows value:")
+                {
+                    set_diagnostic_message(app, "");
+                }
+            }
+            app.finish_operation(DiagnosticOutcome::Completed);
         }
     }
-    app.finish_operation(DiagnosticOutcome::Completed);
 }
 
 fn diagnostic_show_all(app: &mut App) {
@@ -2822,6 +2859,10 @@ pub unsafe extern "system" fn diagnostic_window_proc(
         }
         let app = app_ptr as *mut App;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, app_ptr as isize);
+        // Edit controls fire EN_CHANGE while they are created and populated.
+        // The guard keeps those creation notifications from being treated as
+        // user edits until the initial population completes below.
+        (*app).diagnostic_controls_initializing = true;
         let static_class = wide("STATIC");
         let hud_state = CreateWindowExW(
             0,
@@ -3302,6 +3343,7 @@ pub unsafe extern "system" fn diagnostic_window_proc(
             }
             refresh_diagnostic_presentation(hwnd, &mut *app);
             let _ = layout_diagnostic_controls(hwnd, &*app);
+            (*app).diagnostic_controls_initializing = false;
         }
         return 0;
     }
@@ -3355,6 +3397,14 @@ pub unsafe extern "system" fn diagnostic_window_proc(
         } else if message == WM_COMMAND {
             let command = w_param & 0xffff;
             let notification = (w_param >> 16) & 0xffff;
+            let edit_notification = notification == EN_CHANGE
+                && matches!(
+                    command,
+                    ID_DIAGNOSTIC_DISPLAY_LIMIT | ID_DIAGNOSTIC_SEARCH | ID_DIAGNOSTIC_RANGE
+                );
+            if edit_notification && (*app).diagnostic_controls_initializing {
+                return 0;
+            }
             if command == ID_DIAGNOSTIC_DISPLAY_LIMIT && notification == EN_CHANGE {
                 diagnostic_display_changed(&mut *app);
                 return 0;
@@ -3594,6 +3644,50 @@ mod tests {
         assert!(tsv.contains("line break"));
     }
     #[test]
+    fn display_limit_input_decision_preserves_blank_and_rejects_malformed() {
+        assert_eq!(
+            display_limit_input_decision(""),
+            DisplayLimitInputDecision::PreserveEmpty
+        );
+        assert_eq!(
+            display_limit_input_decision("   "),
+            DisplayLimitInputDecision::PreserveEmpty
+        );
+        assert_eq!(
+            display_limit_input_decision("\t\r\n"),
+            DisplayLimitInputDecision::PreserveEmpty
+        );
+        assert_eq!(
+            display_limit_input_decision("abc"),
+            DisplayLimitInputDecision::Invalid
+        );
+        assert_eq!(
+            display_limit_input_decision("12.5"),
+            DisplayLimitInputDecision::Invalid
+        );
+        assert_eq!(
+            display_limit_input_decision("-1"),
+            DisplayLimitInputDecision::Invalid
+        );
+        assert_eq!(
+            display_limit_input_decision("0"),
+            DisplayLimitInputDecision::Invalid
+        );
+        assert_eq!(
+            display_limit_input_decision("all"),
+            DisplayLimitInputDecision::Invalid
+        );
+        assert_eq!(
+            display_limit_input_decision("250"),
+            DisplayLimitInputDecision::Apply(250)
+        );
+        assert_eq!(
+            display_limit_input_decision(" 200 "),
+            DisplayLimitInputDecision::Apply(200)
+        );
+    }
+
+    #[test]
     fn diagnostic_toolbar_contract_uses_explicit_controls_and_tsv_events() {
         assert_ne!(ID_DIAGNOSTIC_RANGE, ID_DIAGNOSTIC_COPY);
         assert_ne!(ID_DIAGNOSTIC_COPY, ID_DIAGNOSTIC_EXPORT);
@@ -3745,6 +3839,10 @@ mod tests {
         assert_eq!(toolbar.message.width, 140);
         assert_eq!(diagnostic_toolbar_min_width(96), 1_190);
         assert!(toolbar.message.width >= DIAGNOSTIC_TOOLBAR_MIN_MESSAGE_WIDTH);
+        let tight = diagnostic_toolbar_layout(400, 0, 36, 96);
+        assert_eq!(tight.message.width, DIAGNOSTIC_TOOLBAR_MIN_MESSAGE_WIDTH);
+        let tighter = diagnostic_toolbar_layout(0, 0, 36, 96);
+        assert_eq!(tighter.message.width, DIAGNOSTIC_TOOLBAR_MIN_MESSAGE_WIDTH);
     }
 
     #[test]

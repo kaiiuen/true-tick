@@ -91,7 +91,10 @@ activation. Start remains yellow through query, request, and verification, then
 turns green only after a verified request. The tray tooltip uses actual concise
 values such as `True™ Tick: Running · 0.4966 ms`, `True™ Tick: Stopped · 0.9966 ms`,
 `True™ Tick: Starting · 0.9966 ms`, `True™ Tick: Stopping · 0.4966 ms`,
-`True™ Tick: Warning`, and `True™ Tick: Error`. Scheduled and paused states use
+`True™ Tick: Warning`, and `True™ Tick: Error`. A policy block that records a
+power reason renders as `True™ Tick: Blocked (Battery)`,
+`True™ Tick: Blocked (Battery Saver)`, or `True™ Tick: Blocked (Power unknown)`.
+A blocked state without a labeled reason keeps `True™ Tick: Warning`. Scheduled and paused states use
 `True™ Tick: Starting in 5m 0s · 0.9966 ms`, `True™ Tick: Stopping in 5m 0s · 0.4966 ms`, and
 `True™ Tick: Paused for 5m 0s · 0.9966 ms`. Countdowns explicitly include seconds. Invalid evidence uses `Timing unknown`. The diagnostic HUD state row shows a plain state word without a parenthetical timing value. After a successful request, the returned verified effective
 observation replaces the preflight current value in the controller and app snapshot.
@@ -249,7 +252,7 @@ hand testing, and it is not published.
 
 ## Tray tooltip and ownership contract
 
-The tooltip and icon consume the same derived lifecycle state. Verified Running is green. Stopped is red. Scheduled, paused, transitioning, handoff, and unverified states are yellow. Warning, Error, and policy-blocked states retain the existing safety mapping. Timing comes from the authoritative current effective snapshot. Requested and selected values never appear in the compact tooltip. Positive remaining schedule and pause durations round upward from the monotonic deadline, and countdowns always include seconds (`5m 0s`). A plain Paused state has no countdown. The tooltip always uses `True™ Tick: <state> · <timing>`, and parenthetical stopped forms are never rendered. Popup Status rows use the same state and timing source, with more detail in the running duration, next action, and ownership rows. The context-menu status row does not repeat the brand.
+The tooltip and icon consume the same derived lifecycle state. Verified Running is green. Stopped is red. Scheduled, paused, transitioning, handoff, and unverified states are yellow. Warning, Error, and policy-blocked states retain the existing safety mapping. Timing comes from the authoritative current effective snapshot. Requested and selected values never appear in the compact tooltip. Positive remaining schedule and pause durations round upward from the monotonic deadline, and countdowns always include seconds (`5m 0s`). A plain Paused state has no countdown. The tooltip always uses `True™ Tick: <state> · <timing>`, and parenthetical stopped forms are never rendered. The one parenthetical form is the policy block reason, rendered as `Blocked (Battery)`, `Blocked (Battery Saver)`, or `Blocked (Power unknown)` from the recorded power reason, and it keeps the same ` · <timing>` suffix as any other state. Popup Status rows use the same state and timing source, with more detail in the running duration, next action, and ownership rows. The context-menu status row does not repeat the brand.
 
 Displayed timing uses exact four-decimal millisecond formatting. The shared `Hns` formatter renders `{}.{:04}` over the native unit count, so one HNS is exactly one ten-thousandth of a millisecond and the last decimal digit is the physical 100-nanosecond Windows kernel boundary rather than a rounded approximation. No rounding is applied at any magnitude, and a boundary of 5000 HNS is written `0.5000 ms` instead of a shortened or rounded form. The context menu Status Timing row and the diagnostic HUD Effective field use the detailed form `{}.{:04} ms ({} HNS)`, for example `0.4966 ms (4966 HNS)`. The tray tooltip uses the compact form `{}.{:04} ms`, for example `0.4966 ms`, and keeps raw units out of the shell tooltip. Every surface therefore reports the same unrounded value and only the raw unit suffix distinguishes the compact and detailed views.
 

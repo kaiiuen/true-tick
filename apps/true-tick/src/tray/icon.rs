@@ -4,6 +4,7 @@ use std::mem::size_of;
 use crate::tray_surface::{
     dpi_to_icon_canvas, icon_pixel_color, tooltip_at, TimingValues, TrayStatus,
 };
+use tick_policy::PolicyReason;
 
 pub const NIF_MESSAGE: u32 = 0x0001;
 pub const NIF_ICON: u32 = 0x0002;
@@ -46,6 +47,7 @@ impl NotifyIconData {
         status: TrayStatus,
         timing: TimingValues,
         scheduled: Option<crate::pause::ScheduledAction>,
+        block_reason: Option<PolicyReason>,
     ) -> Result<Self, u32> {
         let mut value = Self {
             cb_size: size_of::<Self>() as u32,
@@ -64,11 +66,16 @@ impl NotifyIconData {
             guid: [0; 16],
             h_balloon_icon: std::ptr::null_mut(),
         };
-        for (target, source) in value
-            .sz_tip
-            .iter_mut()
-            .zip(tooltip_at(status, timing, scheduled, std::time::Instant::now()).encode_utf16())
-        {
+        for (target, source) in value.sz_tip.iter_mut().zip(
+            tooltip_at(
+                status,
+                timing,
+                scheduled,
+                std::time::Instant::now(),
+                block_reason,
+            )
+            .encode_utf16(),
+        ) {
             *target = source;
         }
         Ok(value)
@@ -134,17 +141,23 @@ pub(crate) fn update_icon(
     status: TrayStatus,
     timing: TimingValues,
     scheduled: Option<crate::pause::ScheduledAction>,
+    block_reason: Option<PolicyReason>,
 ) -> Result<(), u32> {
     let replacement = unsafe { status_icon(status, dpi_for_window(icon.h_wnd)) }?;
     let old_icon = icon.h_icon;
     let old_tip = icon.sz_tip;
     icon.h_icon = replacement;
     icon.sz_tip = [0; 128];
-    for (target, source) in icon
-        .sz_tip
-        .iter_mut()
-        .zip(tooltip_at(status, timing, scheduled, std::time::Instant::now()).encode_utf16())
-    {
+    for (target, source) in icon.sz_tip.iter_mut().zip(
+        tooltip_at(
+            status,
+            timing,
+            scheduled,
+            std::time::Instant::now(),
+            block_reason,
+        )
+        .encode_utf16(),
+    ) {
         *target = source;
     }
     let result = unsafe { Shell_NotifyIconW(NIM_MODIFY, icon) };

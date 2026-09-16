@@ -2,7 +2,7 @@ use crate::pause::{DurationAction, DurationChoice, DurationPreset, ScheduledActi
 use std::time::{Duration, Instant};
 use tick_core::Hns;
 use tick_ownership::{OwnershipState, TimingSnapshot};
-use tick_policy::PowerState;
+use tick_policy::{PolicyReason, PowerState};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TrayStatus {
@@ -232,11 +232,25 @@ fn effective_timing_suffix(timing: TimingValues) -> String {
     }
 }
 
+/// Short label naming the power state that blocked timing ownership.
+///
+/// Reasons that are not power restrictions return an empty label so the
+/// tooltip can fall back to its generic warning text.
+pub(crate) const fn block_reason_label(reason: Option<PolicyReason>) -> &'static str {
+    match reason {
+        Some(PolicyReason::BatteryRestricted) => "Battery",
+        Some(PolicyReason::BatterySaverRestricted) => "Battery Saver",
+        Some(PolicyReason::PowerUnknown) => "Power unknown",
+        _ => "",
+    }
+}
+
 fn state_summary(
     status: TrayStatus,
     timing: TimingValues,
     scheduled: Option<ScheduledAction>,
     now: Instant,
+    block_reason: Option<PolicyReason>,
 ) -> String {
     let timing_suffix = effective_timing_suffix(timing);
     let action_summary = match (status, scheduled) {
@@ -269,10 +283,16 @@ fn state_summary(
             TrayStatus::Paused => "Paused".to_owned(),
             TrayStatus::Stopped => "Stopped".to_owned(),
             TrayStatus::Error => return "True™ Tick: Error".to_owned(),
-            TrayStatus::Pending
-            | TrayStatus::Degraded
-            | TrayStatus::Blocked
-            | TrayStatus::Unsupported => return "True™ Tick: Warning".to_owned(),
+            TrayStatus::Blocked => {
+                let label = block_reason_label(block_reason);
+                if label.is_empty() {
+                    return "True™ Tick: Warning".to_owned();
+                }
+                format!("Blocked ({label})")
+            }
+            TrayStatus::Pending | TrayStatus::Degraded | TrayStatus::Unsupported => {
+                return "True™ Tick: Warning".to_owned()
+            }
             TrayStatus::Unverified => return "True™ Tick: Timing unknown".to_owned(),
         },
     };
@@ -280,8 +300,12 @@ fn state_summary(
 }
 
 #[cfg(test)]
-pub(crate) fn tooltip(status: TrayStatus, timing: TimingValues) -> String {
-    tooltip_at(status, timing, None, Instant::now())
+pub(crate) fn tooltip(
+    status: TrayStatus,
+    timing: TimingValues,
+    block_reason: Option<PolicyReason>,
+) -> String {
+    tooltip_at(status, timing, None, Instant::now(), block_reason)
 }
 
 pub(crate) fn tooltip_at(
@@ -289,8 +313,9 @@ pub(crate) fn tooltip_at(
     timing: TimingValues,
     scheduled: Option<ScheduledAction>,
     now: Instant,
+    block_reason: Option<PolicyReason>,
 ) -> String {
-    state_summary(status, timing, scheduled, now)
+    state_summary(status, timing, scheduled, now, block_reason)
 }
 
 pub(crate) const LOGS_COMMAND_ID: usize = 1009;
@@ -1031,7 +1056,7 @@ mod tests {
             true
         ));
         assert_eq!(
-            tooltip(TrayStatus::Paused, TimingValues::default()),
+            tooltip(TrayStatus::Paused, TimingValues::default(), None),
             "True™ Tick: Paused · Timing unknown"
         );
     }
@@ -1065,7 +1090,7 @@ mod tests {
         };
         let timing = TimingValues::from_snapshot(snapshot, false, false, false, true);
         assert_eq!(
-            tooltip(TrayStatus::Running, timing),
+            tooltip(TrayStatus::Running, timing, None),
             "True™ Tick: Running · 0.4966 ms"
         );
         let status = status_menu_items(
@@ -1319,7 +1344,7 @@ mod tests {
     #[test]
     fn stopped_status_omits_unknown_timing_from_the_hover_text() {
         assert_eq!(
-            tooltip(TrayStatus::Stopped, TimingValues::default()),
+            tooltip(TrayStatus::Stopped, TimingValues::default(), None),
             "True™ Tick: Stopped · Timing unknown"
         );
     }
@@ -1337,6 +1362,7 @@ mod tests {
                     invalid_interval: false,
                     valid: true,
                 },
+                None,
             ),
             "True™ Tick: Stopped · 0.4966 ms"
         );
@@ -1372,7 +1398,10 @@ mod tests {
             valid: true,
             ..TimingValues::default()
         };
-        assert_eq!(tooltip(status, timing), "True™ Tick: Stopped · 0.4966 ms");
+        assert_eq!(
+            tooltip(status, timing, None),
+            "True™ Tick: Stopped · 0.4966 ms"
+        );
     }
 
     #[test]
@@ -1659,15 +1688,15 @@ mod tests {
             valid: true,
         };
         assert_eq!(
-            tooltip(TrayStatus::Running, exact),
+            tooltip(TrayStatus::Running, exact, None),
             "True™ Tick: Running · 0.5000 ms"
         );
         assert_eq!(
-            tooltip(TrayStatus::Running, finer),
+            tooltip(TrayStatus::Running, finer, None),
             "True™ Tick: Running · 0.4966 ms"
         );
         assert_eq!(
-            tooltip(TrayStatus::Stopped, finer),
+            tooltip(TrayStatus::Stopped, finer, None),
             "True™ Tick: Stopped · 0.4966 ms"
         );
         assert_eq!(
@@ -1676,12 +1705,13 @@ mod tests {
                 TimingValues {
                     requested: Some(Hns::new(5_000)),
                     ..TimingValues::default()
-                }
+                },
+                None,
             ),
             "True™ Tick: Starting · Timing unknown"
         );
         assert_eq!(
-            tooltip(TrayStatus::Stopping, finer),
+            tooltip(TrayStatus::Stopping, finer, None),
             "True™ Tick: Stopping · 0.4966 ms"
         );
         assert_eq!(
@@ -1692,7 +1722,8 @@ mod tests {
                     handoff_pending: true,
                     valid: true,
                     ..TimingValues::default()
-                }
+                },
+                None,
             ),
             "True™ Tick: Stopping, handoff · 0.4966 ms"
         );
@@ -1704,7 +1735,8 @@ mod tests {
                     effective: Some(Hns::new(4_966)),
                     valid: true,
                     ..TimingValues::default()
-                }
+                },
+                None,
             ),
             "True™ Tick: Stopped · 0.4966 ms"
         );
@@ -1714,7 +1746,8 @@ mod tests {
                 TimingValues {
                     invalid_interval: true,
                     ..TimingValues::default()
-                }
+                },
+                None,
             ),
             "True™ Tick: Error"
         );
@@ -1729,19 +1762,19 @@ mod tests {
             ..TimingValues::default()
         };
         assert_eq!(
-            tooltip_at(TrayStatus::Running, timing, None, now),
+            tooltip_at(TrayStatus::Running, timing, None, now, None),
             "True™ Tick: Running · 0.4966 ms"
         );
         assert_eq!(
-            tooltip_at(TrayStatus::Stopped, timing, None, now),
+            tooltip_at(TrayStatus::Stopped, timing, None, now, None),
             "True™ Tick: Stopped · 0.4966 ms"
         );
         assert_eq!(
-            tooltip_at(TrayStatus::Starting, timing, None, now),
+            tooltip_at(TrayStatus::Starting, timing, None, now, None),
             "True™ Tick: Starting · 0.4966 ms"
         );
         assert_eq!(
-            tooltip_at(TrayStatus::Stopping, timing, None, now),
+            tooltip_at(TrayStatus::Stopping, timing, None, now, None),
             "True™ Tick: Stopping · 0.4966 ms"
         );
         assert_eq!(
@@ -1753,6 +1786,7 @@ mod tests {
                 },
                 None,
                 now,
+                None,
             ),
             "True™ Tick: Stopping, handoff · 0.4966 ms"
         );
@@ -1781,19 +1815,19 @@ mod tests {
             ..start
         };
         assert_eq!(
-            tooltip_at(TrayStatus::ScheduledStart, timing, Some(start), now),
+            tooltip_at(TrayStatus::ScheduledStart, timing, Some(start), now, None),
             "True™ Tick: Starting in 5m 0s · 0.9966 ms"
         );
         assert_eq!(
-            tooltip_at(TrayStatus::ScheduledStop, timing, Some(stop), now),
+            tooltip_at(TrayStatus::ScheduledStop, timing, Some(stop), now, None),
             "True™ Tick: Stopping in 5m 0s · 0.9966 ms"
         );
         assert_eq!(
-            tooltip_at(TrayStatus::Paused, timing, Some(pause), now),
+            tooltip_at(TrayStatus::Paused, timing, Some(pause), now, None),
             "True™ Tick: Paused for 5m 0s · 0.9966 ms"
         );
         assert_eq!(
-            tooltip_at(TrayStatus::Paused, timing, None, now),
+            tooltip_at(TrayStatus::Paused, timing, None, now, None),
             "True™ Tick: Paused · 0.9966 ms"
         );
     }
@@ -1845,11 +1879,18 @@ mod tests {
                 },
                 None,
                 now,
+                None,
             ),
             "True™ Tick: Stopped · Timing unknown"
         );
         assert_eq!(
-            tooltip_at(TrayStatus::Unverified, TimingValues::default(), None, now),
+            tooltip_at(
+                TrayStatus::Unverified,
+                TimingValues::default(),
+                None,
+                now,
+                None
+            ),
             "True™ Tick: Timing unknown"
         );
         assert_eq!(
@@ -1864,15 +1905,22 @@ mod tests {
                 },
                 None,
                 now,
+                None,
             ),
             "True™ Tick: Stopped · 0.4966 ms"
         );
         assert_eq!(
-            tooltip_at(TrayStatus::Error, TimingValues::default(), None, now),
+            tooltip_at(TrayStatus::Error, TimingValues::default(), None, now, None),
             "True™ Tick: Error"
         );
         assert_eq!(
-            tooltip_at(TrayStatus::Degraded, TimingValues::default(), None, now),
+            tooltip_at(
+                TrayStatus::Degraded,
+                TimingValues::default(),
+                None,
+                now,
+                None
+            ),
             "True™ Tick: Warning"
         );
     }
@@ -1905,14 +1953,14 @@ mod tests {
             TrayStatus::Pending,
             TrayStatus::Error,
         ] {
-            let text = tooltip(status, TimingValues::default());
+            let text = tooltip(status, TimingValues::default(), None);
             assert!(text.starts_with("True™ Tick: "));
             assert!(!text.contains("HNS"));
             assert!(!text.contains('\\'));
             assert!(text.len() < 64);
         }
         assert_eq!(
-            tooltip(TrayStatus::Pending, TimingValues::default()),
+            tooltip(TrayStatus::Pending, TimingValues::default(), None),
             "True™ Tick: Warning"
         );
     }
@@ -2021,5 +2069,85 @@ mod tests {
         ] {
             assert_eq!(status.icon_color(), IconColor::Red);
         }
+    }
+
+    #[test]
+    fn block_reason_labels_name_the_restricting_power_state() {
+        assert_eq!(
+            block_reason_label(Some(PolicyReason::BatteryRestricted)),
+            "Battery"
+        );
+        assert_eq!(
+            block_reason_label(Some(PolicyReason::BatterySaverRestricted)),
+            "Battery Saver"
+        );
+        assert_eq!(
+            block_reason_label(Some(PolicyReason::PowerUnknown)),
+            "Power unknown"
+        );
+    }
+
+    #[test]
+    fn block_reason_labels_stay_empty_for_unlabeled_reasons() {
+        for reason in [
+            None,
+            Some(PolicyReason::NoEligibleProfile),
+            Some(PolicyReason::EligibleProfile),
+            Some(PolicyReason::GloballyDisabled),
+        ] {
+            assert_eq!(block_reason_label(reason), "");
+        }
+    }
+
+    #[test]
+    fn blocked_tooltips_name_the_blocking_reason() {
+        let cases = [
+            (PolicyReason::BatteryRestricted, "Battery"),
+            (PolicyReason::BatterySaverRestricted, "Battery Saver"),
+            (PolicyReason::PowerUnknown, "Power unknown"),
+        ];
+        for (reason, label) in cases {
+            let text = tooltip(TrayStatus::Blocked, TimingValues::default(), Some(reason));
+            assert_eq!(
+                text,
+                format!("True™ Tick: Blocked ({label}) · Timing unknown")
+            );
+            assert!(text.len() < 64);
+        }
+    }
+
+    #[test]
+    fn blocked_tooltip_without_a_label_keeps_the_generic_warning() {
+        assert_eq!(
+            tooltip(TrayStatus::Blocked, TimingValues::default(), None),
+            "True™ Tick: Warning"
+        );
+        assert_eq!(
+            tooltip(
+                TrayStatus::Blocked,
+                TimingValues::default(),
+                Some(PolicyReason::GloballyDisabled)
+            ),
+            "True™ Tick: Warning"
+        );
+    }
+
+    #[test]
+    fn blocked_tooltip_keeps_the_effective_timing_suffix() {
+        let timing = TimingValues {
+            effective: Some(Hns::new(4_966)),
+            valid: true,
+            ..TimingValues::default()
+        };
+        assert_eq!(
+            tooltip_at(
+                TrayStatus::Blocked,
+                timing,
+                None,
+                Instant::now(),
+                Some(PolicyReason::BatterySaverRestricted),
+            ),
+            "True™ Tick: Blocked (Battery Saver) · 0.4966 ms"
+        );
     }
 }
