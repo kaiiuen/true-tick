@@ -18,7 +18,10 @@ apps/true-tick/src/
   pause.rs                 Duration presets, scheduling state, and coordinator
   portable.rs              A/B slot detection and launcher resolution
   shutdown.rs              Guarded shutdown and cleanup gate
-  tray.rs                  Tray icon, shell notifications, menu construction, and message loop
+  tray/mod.rs              Tray module root with scheduling and policy helpers
+  tray/controller.rs       App controller, message loop, single instance guard, class registration
+  tray/menu.rs             Popup menu construction and command dispatch
+  tray/icon.rs             Dynamic tray icon generation and DPI canvas mapping
   tray_surface.rs          Pure tray menu model, tooltip contract, and status rows
   win32/mod.rs             Native Win32 types, constants, and FFI declarations
   ui/mod.rs                UI module root
