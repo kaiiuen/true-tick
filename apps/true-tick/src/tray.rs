@@ -41,6 +41,9 @@ mod list_view_native {
     pub const LVM_GETITEMCOUNT: u32 = LVM_FIRST + 4;
     pub const LVM_GETNEXTITEM: u32 = LVM_FIRST + 12;
     pub const LVM_GETCOLUMNWIDTH: u32 = LVM_FIRST + 29;
+    pub const LVM_GETTOPINDEX: u32 = LVM_FIRST + 39;
+    pub const LVM_GETCOUNTPERPAGE: u32 = LVM_FIRST + 40;
+    pub const LVM_ENSUREVISIBLE: u32 = LVM_FIRST + 19;
     pub const LVM_SETITEMSTATE: u32 = LVM_FIRST + 43;
     pub const LVM_INSERTITEMW: u32 = LVM_FIRST + 77;
     pub const LVM_SETITEMTEXTW: u32 = LVM_FIRST + 116;
@@ -5770,6 +5773,17 @@ unsafe fn refresh_diagnostic_window(
         finish_diagnostic_refresh(app, false);
         return;
     };
+    // Capture the scroll position before the rebuild so we can decide whether the
+    // viewport was already pinned to the newest row. An empty list defaults to
+    // bottom tracking so a fresh window starts auto scrolling.
+    let count_before = SendMessageW(list, LVM_GETITEMCOUNT, 0, 0);
+    let was_at_bottom = if count_before > 0 {
+        let top = SendMessageW(list, LVM_GETTOPINDEX, 0, 0).max(0);
+        let page = SendMessageW(list, LVM_GETCOUNTPERPAGE, 0, 0).max(0);
+        top.saturating_add(page) >= count_before
+    } else {
+        true
+    };
     let snapshot_rows = events.len();
     let _ = SendMessageW(list, LVM_DELETEALLITEMS, 0, 0);
     let visible_events = diagnostic_filtered_visible_events(app, &events);
@@ -5885,6 +5899,15 @@ unsafe fn refresh_diagnostic_window(
                 (client.right - client.left).max(0),
                 GetDpiForWindow(window).max(96),
             );
+        }
+    }
+    // If the user was already watching the newest rows, keep the tail of the
+    // log in view after the rebuild. When they scrolled up to inspect history
+    // we leave the viewport untouched so their reading position is preserved.
+    if was_at_bottom {
+        let count_after = SendMessageW(list, LVM_GETITEMCOUNT, 0, 0);
+        if count_after > 0 {
+            let _ = SendMessageW(list, LVM_ENSUREVISIBLE, (count_after - 1) as usize, 0);
         }
     }
     if let Some(position) = horizontal_scroll {
