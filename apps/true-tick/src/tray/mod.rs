@@ -23,6 +23,8 @@ use tick_startup_windows::{
     startup_operation, StartupOperation, StartupRegistration, WindowsUserStartup,
 };
 
+pub mod menu;
+
 pub(crate) mod list_view_native {
     use super::{c_void, Point};
 
@@ -131,18 +133,10 @@ use crate::shutdown::{
     message_loop_exit, shutdown_disposition, MessageLoopExit, ShutdownDisposition, ShutdownGate,
 };
 use crate::tray_surface::{
-    dpi_to_icon_canvas, duration_command, duration_menu_items, icon_pixel_color,
-    menu_action_keeps_open, menu_command_dispatch_allowed, menu_command_is_enabled_with_pause,
-    menu_description, menu_items_with_duration, power_reconciliation, preset_command,
-    preset_command_base, preset_menu_items, release_needs_handoff, scheduled_display_key,
-    status_menu_items, tooltip_at, tray_notification_opens_menu, HandoffProgress, HandoffTracker,
-    PowerReconciliation, TimingValues, TrayStatus, CANCEL_PAUSE_COMMAND_ID,
-    CANCEL_SCHEDULED_COMMAND_ID, GITHUB_COMMAND_ID, GITHUB_URL, HANDOFF_POLL_INTERVAL_MS,
-    LOGS_COMMAND_ID, PAUSE_FOR_15_COMMAND_ID, PAUSE_FOR_30_COMMAND_ID, PAUSE_FOR_5_COMMAND_ID,
-    PAUSE_FOR_60_COMMAND_ID, SCHEDULE_PRESETS_COMMAND_ID, START_IN_15_COMMAND_ID,
-    START_IN_1_COMMAND_ID, START_IN_30_COMMAND_ID, START_IN_5_COMMAND_ID, START_IN_60_COMMAND_ID,
-    STOP_IN_15_COMMAND_ID, STOP_IN_1_COMMAND_ID, STOP_IN_30_COMMAND_ID, STOP_IN_5_COMMAND_ID,
-    STOP_IN_60_COMMAND_ID,
+    dpi_to_icon_canvas, icon_pixel_color, menu_command_dispatch_allowed, power_reconciliation,
+    release_needs_handoff, scheduled_display_key, tooltip_at, tray_notification_opens_menu,
+    HandoffProgress, HandoffTracker, PowerReconciliation, TimingValues, TrayStatus, GITHUB_URL,
+    HANDOFF_POLL_INTERVAL_MS,
 };
 
 const WM_APP: u32 = 0x8000;
@@ -210,22 +204,6 @@ const ICC_LISTVIEW_CLASSES: u32 = 0x0000_0001;
 const ICC_BAR_CLASSES: u32 = 0x0000_0004;
 const REQUIRED_COMMON_CONTROL_CLASSES: u32 = ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES;
 
-const TPM_RIGHTBUTTON: u32 = 0x0002;
-const TPM_RETURNCMD: u32 = 0x0100;
-const MF_STRING: u32 = 0x0000;
-const MF_SEPARATOR: u32 = 0x0800;
-const MF_GRAYED: u32 = 0x0001;
-const MF_POPUP: u32 = 0x0010;
-const MF_BYPOSITION: u32 = 0x0400;
-const ROOT_MENU_START_POSITION: usize = 2;
-const ROOT_MENU_STOP_POSITION: usize = 3;
-const ROOT_MENU_AUTO_START_POSITION: usize = 6;
-const ROOT_MENU_AUTO_TIME_POSITION: usize = 7;
-#[allow(dead_code)]
-const SCHEDULE_MENU_PRESETS_POSITION: usize = 4;
-const SCHEDULE_MENU_CANCEL_POSITION: usize = 6;
-const SCHEDULE_MENU_RESUME_POSITION: usize = 7;
-
 const NIF_MESSAGE: u32 = 0x0001;
 const NIF_ICON: u32 = 0x0002;
 const NIF_TIP: u32 = 0x0004;
@@ -236,7 +214,7 @@ pub(crate) const GWLP_WNDPROC: i32 = -4;
 pub(crate) const GWLP_USERDATA: i32 = -21;
 
 const IDI_APPLICATION: usize = 32512;
-const MB_ICONWARNING: u32 = 0x0000_0030;
+pub(crate) const MB_ICONWARNING: u32 = 0x0000_0030;
 const MB_YESNO: u32 = 0x0000_0004;
 const MB_DEFBUTTON2: u32 = 0x0000_0100;
 const IDYES: i32 = 6;
@@ -245,18 +223,18 @@ const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 const ERROR_ALREADY_EXISTS: u32 = 183;
 const SINGLE_INSTANCE_MUTEX_NAME: &str = "Local\\TrueTickSingleInstance";
 const TASKBAR_CREATED_MESSAGE_NAME: &str = "TaskbarCreated";
-const WS_POPUP: u32 = 0x8000_0000;
-const WS_EX_TOPMOST: u32 = 0x0000_0008;
-const TTS_ALWAYSTIP: u32 = 0x0001;
-const TTS_NOPREFIX: u32 = 0x0002;
-const TTF_IDISHWND: u32 = 0x0001;
-const TTF_TRACK: u32 = 0x0020;
-const TTF_ABSOLUTE: u32 = 0x0080;
+pub(crate) const WS_POPUP: u32 = 0x8000_0000;
+pub(crate) const WS_EX_TOPMOST: u32 = 0x0000_0008;
+pub(crate) const TTS_ALWAYSTIP: u32 = 0x0001;
+pub(crate) const TTS_NOPREFIX: u32 = 0x0002;
+pub(crate) const TTF_IDISHWND: u32 = 0x0001;
+pub(crate) const TTF_TRACK: u32 = 0x0020;
+pub(crate) const TTF_ABSOLUTE: u32 = 0x0080;
 const WM_USER: u32 = 0x0400;
-const TTM_TRACKACTIVATE: u32 = WM_USER + 17;
-const TTM_TRACKPOSITION: u32 = WM_USER + 18;
-const TTM_ADDTOOLW: u32 = WM_USER + 50;
-const TTM_UPDATETIPTEXTW: u32 = WM_USER + 57;
+pub(crate) const TTM_TRACKACTIVATE: u32 = WM_USER + 17;
+pub(crate) const TTM_TRACKPOSITION: u32 = WM_USER + 18;
+pub(crate) const TTM_ADDTOOLW: u32 = WM_USER + 50;
+pub(crate) const TTM_UPDATETIPTEXTW: u32 = WM_USER + 57;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NativeResult {
@@ -419,7 +397,7 @@ fn common_controls_initialization_contract() -> InitCommonControlsEx {
 }
 
 #[repr(C)]
-struct ToolInfo {
+pub(crate) struct ToolInfo {
     cb_size: u32,
     flags: u32,
     hwnd: *mut c_void,
@@ -519,10 +497,10 @@ fn register_startup_target(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PopupMenuHandles {
-    root: *mut c_void,
-    schedule: Option<*mut c_void>,
-    status: Option<*mut c_void>,
+pub(crate) struct PopupMenuHandles {
+    pub(crate) root: *mut c_void,
+    pub(crate) schedule: Option<*mut c_void>,
+    pub(crate) status: Option<*mut c_void>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -593,13 +571,13 @@ pub(crate) struct App {
     pub(crate) diagnostic_snapshot_key: Option<(usize, u64)>,
     pub(crate) diagnostic_snapshot_generation: u64,
     pub(crate) diagnostic_auto_fit_generation: Option<u64>,
-    menu_active: bool,
-    popup_menus: Option<PopupMenuHandles>,
-    popup_refresh_timer_active: bool,
+    pub(crate) menu_active: bool,
+    pub(crate) popup_menus: Option<PopupMenuHandles>,
+    pub(crate) popup_refresh_timer_active: bool,
     schedule_display_timer_active: bool,
-    handoff: Option<HandoffTracker>,
-    menu_help: Option<*mut c_void>,
-    menu_help_text: Vec<u16>,
+    pub(crate) handoff: Option<HandoffTracker>,
+    pub(crate) menu_help: Option<*mut c_void>,
+    pub(crate) menu_help_text: Vec<u16>,
     pub(crate) pause: DurationCoordinator,
     pub(crate) presets_manager: PresetsManager,
     pub(crate) presets_window: Option<*mut c_void>,
@@ -3023,7 +3001,7 @@ unsafe extern "system" fn window_proc(
                 handle_menu_command(hwnd, app, w_param & 0xffff);
             }
             WM_MENUSELECT => {
-                update_menu_help(
+                menu::update_menu_help(
                     app,
                     w_param & 0xffff,
                     (w_param >> 16) as u32,
@@ -3031,7 +3009,7 @@ unsafe extern "system" fn window_proc(
                 );
             }
             WM_TIMER if w_param == POPUP_REFRESH_TIMER_ID => {
-                refresh_popup_menu(app);
+                menu::refresh_popup_menu(app);
             }
             WM_TIMER if w_param == SCHEDULE_DISPLAY_TIMER_ID => {
                 handle_schedule_display_timer(app);
@@ -3074,975 +3052,15 @@ unsafe extern "system" fn window_proc(
 }
 
 unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
-    if app.menu_active {
-        return;
-    }
-    app.menu_active = true;
-    let mut anchor = Point { x: 0, y: 0 };
-    if GetCursorPos(&mut anchor) == 0 {
-        app.record(
-            "native.GetCursorPos.error",
-            format!("raw_status={}", GetLastError()),
-        );
-        app.menu_active = false;
-        return;
-    }
-    loop {
-        let menu = CreatePopupMenu();
-        if menu.is_null() {
-            app.record(
-                "native.CreatePopupMenu.error",
-                format!("raw_status={}", GetLastError()),
-            );
-            break;
-        }
-        app.popup_menus = Some(PopupMenuHandles {
-            root: menu,
-            schedule: None,
-            status: None,
-        });
-        let items = menu_items_with_duration(
-            app.lifecycle_status(),
-            app.config.startup_enabled,
-            app.config.automatic,
-            app.timing_values(),
-            app.pause.pause_active(),
-        );
-        let header_flags = if items[0].enabled {
-            MF_STRING
-        } else {
-            MF_STRING | MF_GRAYED
-        };
-        let start_flags = if items[1].enabled {
-            MF_STRING
-        } else {
-            MF_STRING | MF_GRAYED
-        };
-        let stop_flags = if items[2].enabled {
-            MF_STRING
-        } else {
-            MF_STRING | MF_GRAYED
-        };
-        let startup_id = if app.config.startup_enabled {
-            ID_STARTUP_OFF
-        } else {
-            ID_STARTUP_ON
-        };
-        let automatic_id = if app.config.automatic {
-            ID_AUTOMATIC_OFF
-        } else {
-            ID_AUTOMATIC_ON
-        };
-        let menu_ok = append_menu_checked(
-            app,
-            menu,
-            header_flags,
-            GITHUB_COMMAND_ID,
-            wide(&items[0].label).as_ptr(),
-        ) && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
-            && append_menu_checked(
-                app,
-                menu,
-                start_flags,
-                ID_START,
-                wide(&items[1].label).as_ptr(),
-            )
-            && append_menu_checked(
-                app,
-                menu,
-                stop_flags,
-                ID_STOP,
-                wide(&items[2].label).as_ptr(),
-            )
-            && append_schedule_submenu(app, menu, &items[3].label)
-            && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
-            && append_menu_checked(
-                app,
-                menu,
-                MF_STRING,
-                startup_id,
-                wide(&items[4].label).as_ptr(),
-            )
-            && append_menu_checked(
-                app,
-                menu,
-                MF_STRING,
-                automatic_id,
-                wide(&items[5].label).as_ptr(),
-            )
-            && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
-            && append_status_submenu(app, menu)
-            && append_menu_checked(
-                app,
-                menu,
-                MF_STRING,
-                LOGS_COMMAND_ID,
-                wide(&items[7].label).as_ptr(),
-            )
-            && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
-            && append_menu_checked(
-                app,
-                menu,
-                MF_STRING,
-                ID_QUIT,
-                wide(&items[8].label).as_ptr(),
-            );
-        if !menu_ok {
-            app.popup_menus = None;
-            if DestroyMenu(menu) == 0 {
-                app.record(
-                    "native.DestroyMenu.error",
-                    format!("raw_status={}", GetLastError()),
-                );
-            }
-            break;
-        }
-        let _ = create_menu_help(hwnd, app);
-        begin_popup_refresh_timer(app);
-        if SetForegroundWindow(hwnd) == 0 {
-            app.record(
-                "native.SetForegroundWindow.error",
-                format!("raw_status={}", GetLastError()),
-            );
-        }
-        let command = TrackPopupMenu(
-            menu,
-            TPM_RIGHTBUTTON | TPM_RETURNCMD,
-            anchor.x,
-            anchor.y,
-            0,
-            hwnd,
-            std::ptr::null(),
-        );
-        destroy_menu_help(app);
-        kill_popup_refresh_timer(app);
-        app.popup_menus = None;
-        if DestroyMenu(menu) == 0 {
-            app.record(
-                "native.DestroyMenu.error",
-                format!("raw_status={}", GetLastError()),
-            );
-        }
-        if command == 0 {
-            app.record(
-                "native.TrackPopupMenu.result",
-                format!("result=empty raw_status={}", GetLastError()),
-            );
-        }
-        let Some(command) = returned_menu_command(command) else {
-            break;
-        };
-        app.record(
-            "tray.command.dispatch",
-            format!("source=TPM_RETURNCMD id={command}"),
-        );
-        if !menu_command_dispatch_allowed(app.menu_active, true)
-            || !handle_menu_command(hwnd, app, command)
-        {
-            break;
-        }
-    }
-    destroy_menu_help(app);
-    kill_popup_refresh_timer(app);
-    app.popup_menus = None;
-    app.menu_active = false;
-}
-
-fn begin_popup_refresh_timer(app: &mut App) {
-    if app.popup_refresh_timer_active {
-        return;
-    }
-    let Some(hwnd) = app.tray_icon.as_ref().map(|icon| icon.h_wnd) else {
-        return;
-    };
-    let result = unsafe {
-        SetTimer(
-            hwnd,
-            POPUP_REFRESH_TIMER_ID,
-            POPUP_REFRESH_INTERVAL_MS,
-            std::ptr::null_mut(),
-        )
-    };
-    if result == 0 {
-        app.record(
-            "native.SetTimer.popup_refresh.error",
-            format!("raw_status={}", unsafe { GetLastError() }),
-        );
-    } else {
-        app.popup_refresh_timer_active = true;
-    }
-}
-
-fn kill_popup_refresh_timer(app: &mut App) {
-    if !app.popup_refresh_timer_active {
-        return;
-    }
-    app.popup_refresh_timer_active = false;
-    if let Some(hwnd) = app.tray_icon.as_ref().map(|icon| icon.h_wnd) {
-        unsafe {
-            let _ = KillTimer(hwnd, POPUP_REFRESH_TIMER_ID);
-        }
-    }
+    menu::show_menu(hwnd, app);
 }
 
 unsafe fn refresh_popup_menu(app: &mut App) {
-    let Some(handles) = app.popup_menus else {
-        return;
-    };
-    let timing = app.timing_values();
-    let start_enabled = menu_command_is_enabled_with_pause(
-        ID_START,
-        app.lifecycle_status(),
-        app.config.startup_enabled,
-        app.config.automatic,
-        app.pause.active(),
-    );
-    let stop_enabled = menu_command_is_enabled_with_pause(
-        ID_STOP,
-        app.lifecycle_status(),
-        app.config.startup_enabled,
-        app.config.automatic,
-        app.pause.active(),
-    );
-    let _ = ModifyMenuW(
-        handles.root,
-        ROOT_MENU_START_POSITION,
-        MF_BYPOSITION | MF_STRING | if start_enabled { 0 } else { MF_GRAYED },
-        ID_START,
-        wide("Start").as_ptr(),
-    );
-    let _ = ModifyMenuW(
-        handles.root,
-        ROOT_MENU_STOP_POSITION,
-        MF_BYPOSITION | MF_STRING | if stop_enabled { 0 } else { MF_GRAYED },
-        ID_STOP,
-        wide("Stop").as_ptr(),
-    );
-    let startup_id = if app.config.startup_enabled {
-        ID_STARTUP_OFF
-    } else {
-        ID_STARTUP_ON
-    };
-    let automatic_id = if app.config.automatic {
-        ID_AUTOMATIC_OFF
-    } else {
-        ID_AUTOMATIC_ON
-    };
-    let _ = ModifyMenuW(
-        handles.root,
-        ROOT_MENU_AUTO_START_POSITION,
-        MF_BYPOSITION | MF_STRING,
-        startup_id,
-        wide(crate::tray_surface::auto_start_label(
-            app.config.startup_enabled,
-        ))
-        .as_ptr(),
-    );
-    let _ = ModifyMenuW(
-        handles.root,
-        ROOT_MENU_AUTO_TIME_POSITION,
-        MF_BYPOSITION | MF_STRING,
-        automatic_id,
-        wide(crate::tray_surface::automatic_label(app.config.automatic)).as_ptr(),
-    );
-    if let Some(schedule) = handles.schedule {
-        let cancel_enabled = app
-            .pause
-            .current()
-            .is_some_and(|action| action.action != DurationAction::Pause);
-        let _ = ModifyMenuW(
-            schedule,
-            SCHEDULE_MENU_CANCEL_POSITION,
-            MF_BYPOSITION | MF_STRING | if cancel_enabled { 0 } else { MF_GRAYED },
-            CANCEL_SCHEDULED_COMMAND_ID,
-            wide("Cancel scheduled action").as_ptr(),
-        );
-        let pause_active = app.pause.pause_active();
-        let _ = ModifyMenuW(
-            schedule,
-            SCHEDULE_MENU_RESUME_POSITION,
-            MF_BYPOSITION | MF_STRING | if pause_active { 0 } else { MF_GRAYED },
-            CANCEL_PAUSE_COMMAND_ID,
-            wide("Resume now").as_ptr(),
-        );
-    }
-    if let Some(status_menu) = handles.status {
-        let items = status_menu_items(
-            app.lifecycle_status(),
-            timing,
-            app.controller.ownership(),
-            app.pause.current(),
-            app.running_duration(),
-            std::time::Instant::now(),
-        );
-        for (index, item) in items.iter().enumerate() {
-            let _ = ModifyMenuW(
-                status_menu,
-                index,
-                MF_BYPOSITION | MF_STRING | MF_GRAYED,
-                item.command_id.unwrap_or(0),
-                wide(&item.label).as_ptr(),
-            );
-        }
-    }
-}
-
-unsafe fn append_duration_choice_submenu(
-    app: &mut App,
-    parent: *mut c_void,
-    action: DurationAction,
-    label: &str,
-) -> bool {
-    let submenu = CreatePopupMenu();
-    if submenu.is_null() {
-        app.record(
-            "native.CreatePopupMenu.duration_choice.error",
-            format!("action={} raw_status={}", action.label(), GetLastError()),
-        );
-        return false;
-    }
-    let items = preset_menu_items(action, app.presets_manager.presets());
-    let base = preset_command_base(action);
-    let mut ok = true;
-    for item in items.iter() {
-        let enabled = match action {
-            DurationAction::Start => !app.pause.pause_active(),
-            DurationAction::Stop | DurationAction::Pause => true,
-        };
-        let flags = if enabled {
-            MF_STRING
-        } else {
-            MF_STRING | MF_GRAYED
-        };
-        ok &= append_menu_checked(
-            app,
-            submenu,
-            flags,
-            item.command_id.unwrap_or(base),
-            wide(&item.label).as_ptr(),
-        );
-    }
-    if !ok {
-        DestroyMenu(submenu);
-        return false;
-    }
-    if !append_menu_checked(
-        app,
-        parent,
-        MF_STRING | MF_POPUP,
-        submenu as usize,
-        wide(label).as_ptr(),
-    ) {
-        DestroyMenu(submenu);
-        return false;
-    }
-    true
-}
-
-unsafe fn append_schedule_submenu(app: &mut App, menu: *mut c_void, parent_caption: &str) -> bool {
-    let submenu = CreatePopupMenu();
-    if submenu.is_null() {
-        app.record(
-            "native.CreatePopupMenu.schedule.error",
-            format!("raw_status={}", GetLastError()),
-        );
-        return false;
-    }
-    let items = duration_menu_items(app.pause.current());
-    let mut ok =
-        append_duration_choice_submenu(app, submenu, DurationAction::Start, &items[0].label);
-    ok &= append_duration_choice_submenu(app, submenu, DurationAction::Stop, &items[1].label);
-    ok &= append_duration_choice_submenu(app, submenu, DurationAction::Pause, &items[2].label);
-    ok &= append_menu_checked(app, submenu, MF_SEPARATOR, 0, std::ptr::null());
-    let presets = items[3].clone();
-    let presets_flags = if presets.enabled {
-        MF_STRING
-    } else {
-        MF_STRING | MF_GRAYED
-    };
-    ok &= append_menu_checked(
-        app,
-        submenu,
-        presets_flags,
-        SCHEDULE_PRESETS_COMMAND_ID,
-        wide(&presets.label).as_ptr(),
-    );
-    ok &= append_menu_checked(app, submenu, MF_SEPARATOR, 0, std::ptr::null());
-    let cancel = items[4].clone();
-    let cancel_flags = if cancel.enabled {
-        MF_STRING
-    } else {
-        MF_STRING | MF_GRAYED
-    };
-    ok &= append_menu_checked(
-        app,
-        submenu,
-        cancel_flags,
-        CANCEL_SCHEDULED_COMMAND_ID,
-        wide(&cancel.label).as_ptr(),
-    );
-    let resume = items[5].clone();
-    let resume_flags = if resume.enabled {
-        MF_STRING
-    } else {
-        MF_STRING | MF_GRAYED
-    };
-    ok &= append_menu_checked(
-        app,
-        submenu,
-        resume_flags,
-        CANCEL_PAUSE_COMMAND_ID,
-        wide(&resume.label).as_ptr(),
-    );
-    if !ok {
-        DestroyMenu(submenu);
-        return false;
-    }
-    if !append_menu_checked(
-        app,
-        menu,
-        MF_STRING | MF_POPUP,
-        submenu as usize,
-        wide(parent_caption).as_ptr(),
-    ) {
-        DestroyMenu(submenu);
-        return false;
-    }
-    if let Some(handles) = app.popup_menus.as_mut() {
-        handles.schedule = Some(submenu);
-    }
-    true
-}
-
-unsafe fn append_status_submenu(app: &mut App, menu: *mut c_void) -> bool {
-    let submenu = CreatePopupMenu();
-    if submenu.is_null() {
-        app.record(
-            "native.CreatePopupMenu.status.error",
-            format!("raw_status={}", GetLastError()),
-        );
-        return false;
-    }
-    let items = status_menu_items(
-        app.lifecycle_status(),
-        app.timing_values(),
-        app.controller.ownership(),
-        app.pause.current(),
-        app.running_duration(),
-        std::time::Instant::now(),
-    );
-    let mut ok = true;
-    for (index, item) in items.iter().enumerate() {
-        let flags = if item.enabled {
-            MF_STRING
-        } else {
-            MF_STRING | MF_GRAYED
-        };
-        ok &= append_menu_checked(
-            app,
-            submenu,
-            flags,
-            item.command_id.unwrap_or(0),
-            wide(&item.label).as_ptr(),
-        );
-        if index == 4 {
-            app.record(
-                "status.submenu.render",
-                format!(
-                    "rows=state,timing,running_for,next_action,ownership state={:?} ownership={:?} next_action={}",
-                    app.lifecycle_status(),
-                    app.controller.ownership(),
-                    app.pause.current().map_or_else(
-                        || "none".to_owned(),
-                        |action| format!(
-                            "{} remaining_ms={}",
-                            action.action.label(),
-                            action.remaining(std::time::Instant::now()).as_millis()
-                        )
-                    )
-                ),
-            );
-            app.record("status.submenu.timing", app.timing_snapshot_details());
-        }
-    }
-    if !ok {
-        DestroyMenu(submenu);
-        return false;
-    }
-    if !append_menu_checked(
-        app,
-        menu,
-        MF_STRING | MF_POPUP,
-        submenu as usize,
-        wide("Status >").as_ptr(),
-    ) {
-        DestroyMenu(submenu);
-        return false;
-    }
-    if let Some(handles) = app.popup_menus.as_mut() {
-        handles.status = Some(submenu);
-    }
-    true
-}
-
-unsafe fn create_menu_help(hwnd: *mut c_void, app: &mut App) -> bool {
-    let class_name = wide("tooltips_class32");
-    let tooltip = CreateWindowExW(
-        WS_EX_TOPMOST,
-        class_name.as_ptr(),
-        std::ptr::null(),
-        WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
-        0,
-        0,
-        0,
-        0,
-        hwnd,
-        std::ptr::null_mut(),
-        GetModuleHandleW(std::ptr::null()),
-        std::ptr::null_mut(),
-    );
-    if tooltip.is_null() {
-        app.record(
-            "native.CreateWindowExW.menu_help.error",
-            format!("raw_status={}", GetLastError()),
-        );
-        return false;
-    }
-    app.menu_help_text = wide("");
-    let tool = menu_tool_info(hwnd, app);
-    if SendMessageW(
-        tooltip,
-        TTM_ADDTOOLW,
-        0,
-        (&tool as *const ToolInfo).cast::<c_void>() as isize,
-    ) == 0
-    {
-        app.record(
-            "native.SendMessageW.menu_help_add.error",
-            format!("raw_status={}", GetLastError()),
-        );
-        DestroyWindow(tooltip);
-        return false;
-    }
-    app.menu_help = Some(tooltip);
-    true
-}
-
-fn menu_tool_info(hwnd: *mut c_void, app: &App) -> ToolInfo {
-    ToolInfo {
-        cb_size: size_of::<ToolInfo>() as u32,
-        flags: TTF_IDISHWND | TTF_TRACK | TTF_ABSOLUTE,
-        hwnd,
-        id: hwnd as usize,
-        rect: Rect {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        },
-        instance: std::ptr::null_mut(),
-        text: app.menu_help_text.as_ptr(),
-        l_param: 0,
-        reserved: std::ptr::null_mut(),
-    }
-}
-
-fn track_position_lparam(x: i32, y: i32) -> isize {
-    let packed = (x as u32 & 0xffff) | ((y as u32 & 0xffff) << 16);
-    packed as usize as isize
-}
-
-fn submenu_description(menu: *mut c_void) -> Option<&'static str> {
-    if menu.is_null() {
-        return None;
-    }
-    let count = unsafe { GetMenuItemCount(menu) };
-    if count < 0 {
-        return None;
-    }
-    for position in 0..count {
-        let mut buffer = [0u16; 64];
-        let length = unsafe {
-            GetMenuStringW(
-                menu,
-                position as usize,
-                buffer.as_mut_ptr(),
-                buffer.len() as i32,
-                MF_BYPOSITION,
-            )
-        };
-        if length <= 0 {
-            continue;
-        }
-        let label = String::from_utf16_lossy(&buffer[..length as usize]);
-        let label = label.trim_end_matches('&');
-        let description = match label {
-            "Schedule >" => Some("Schedule a bounded timing action"),
-            "Start in >" => Some("Schedule a future guarded acquire"),
-            "Stop in >" => Some("Schedule a future guarded release"),
-            "Pause for >" => Some("Suppress acquisition for a fixed duration"),
-            "Resume now" => Some("Resume timing and cancel the pause"),
-            "Status >" => Some("View read-only lifecycle details"),
-            _ => None,
-        };
-        if description.is_some() {
-            return description;
-        }
-    }
-    None
-}
-
-fn update_menu_help(app: &mut App, command: usize, flags: u32, menu: *mut c_void) {
-    let Some(tooltip) = app.menu_help else {
-        return;
-    };
-    let description = menu_description(command).or_else(|| {
-        if flags & MF_POPUP != 0 {
-            submenu_description(menu)
-        } else {
-            None
-        }
-    });
-    let Some(description) = description else {
-        unsafe {
-            let tool = menu_tool_info(
-                app.tray_icon
-                    .as_ref()
-                    .map_or(std::ptr::null_mut(), |icon| icon.h_wnd),
-                app,
-            );
-            SendMessageW(
-                tooltip,
-                TTM_TRACKACTIVATE,
-                0,
-                (&tool as *const ToolInfo).cast::<c_void>() as isize,
-            );
-        }
-        return;
-    };
-    app.menu_help_text = wide(description);
-    let tool = menu_tool_info(
-        app.tray_icon
-            .as_ref()
-            .map_or(std::ptr::null_mut(), |icon| icon.h_wnd),
-        app,
-    );
-    unsafe {
-        SendMessageW(
-            tooltip,
-            TTM_UPDATETIPTEXTW,
-            0,
-            (&tool as *const ToolInfo).cast::<c_void>() as isize,
-        );
-        let mut cursor = Point::default();
-        if GetCursorPos(&mut cursor) == 0 {
-            app.record(
-                "native.GetCursorPos.menu_help.error",
-                format!("raw_status={}", GetLastError()),
-            );
-            SendMessageW(
-                tooltip,
-                TTM_TRACKACTIVATE,
-                0,
-                (&tool as *const ToolInfo).cast::<c_void>() as isize,
-            );
-            return;
-        }
-        SendMessageW(
-            tooltip,
-            TTM_TRACKPOSITION,
-            0,
-            track_position_lparam(cursor.x, cursor.y),
-        );
-        SendMessageW(
-            tooltip,
-            TTM_TRACKACTIVATE,
-            1,
-            (&tool as *const ToolInfo).cast::<c_void>() as isize,
-        );
-    }
-}
-
-fn destroy_menu_help(app: &mut App) {
-    if let Some(tooltip) = app.menu_help.take() {
-        unsafe {
-            let tool = menu_tool_info(
-                app.tray_icon
-                    .as_ref()
-                    .map_or(std::ptr::null_mut(), |icon| icon.h_wnd),
-                app,
-            );
-            SendMessageW(
-                tooltip,
-                TTM_TRACKACTIVATE,
-                0,
-                (&tool as *const ToolInfo).cast::<c_void>() as isize,
-            );
-            if DestroyWindow(tooltip) == 0 {
-                app.record(
-                    "native.DestroyWindow.menu_help.error",
-                    format!("raw_status={}", GetLastError()),
-                );
-            }
-        }
-    }
-    app.menu_help_text.clear();
-}
-
-unsafe fn append_menu_checked(
-    app: &mut App,
-    menu: *mut c_void,
-    flags: u32,
-    command: usize,
-    text: *const u16,
-) -> bool {
-    let result = AppendMenuW(menu, flags, command, text);
-    let raw_error = if result == 0 { GetLastError() } else { 0 };
-    if matches!(
-        native_bool_result(result, raw_error),
-        NativeResult::Succeeded
-    ) {
-        true
-    } else {
-        app.record(
-            "native.AppendMenuW.error",
-            format!("command={command} raw_status={raw_error}"),
-        );
-        false
-    }
+    menu::refresh_popup_menu(app);
 }
 
 unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) -> bool {
-    if !menu_command_is_enabled_with_pause(
-        command,
-        app.lifecycle_status(),
-        app.config.startup_enabled,
-        app.config.automatic,
-        app.pause.active(),
-    ) {
-        let reason = if command == ID_START && app.pause.pause_active() {
-            "start_disabled_while_paused"
-        } else {
-            "disabled_or_unknown"
-        };
-        app.record(
-            "tray.command.rejected",
-            format!("id={command} reason={reason}"),
-        );
-        return false;
-    }
-    app.begin_operation(DiagnosticSource::TrayCommand);
-    app.record("tray.command.id", format!("id={command}"));
-    let action_name = match command {
-        ID_START => "start",
-        ID_STOP => "stop",
-        LOGS_COMMAND_ID => "logs",
-        GITHUB_COMMAND_ID => "github",
-        SCHEDULE_PRESETS_COMMAND_ID => "schedule_presets",
-        CANCEL_SCHEDULED_COMMAND_ID => "cancel_scheduled",
-        CANCEL_PAUSE_COMMAND_ID => "cancel_pause",
-        START_IN_1_COMMAND_ID => "start_in_1m",
-        START_IN_5_COMMAND_ID => "start_in_5m",
-        START_IN_15_COMMAND_ID => "start_in_15m",
-        START_IN_30_COMMAND_ID => "start_in_30m",
-        START_IN_60_COMMAND_ID => "start_in_60m",
-        STOP_IN_1_COMMAND_ID => "stop_in_1m",
-        STOP_IN_5_COMMAND_ID => "stop_in_5m",
-        STOP_IN_15_COMMAND_ID => "stop_in_15m",
-        STOP_IN_30_COMMAND_ID => "stop_in_30m",
-        STOP_IN_60_COMMAND_ID => "stop_in_60m",
-        PAUSE_FOR_5_COMMAND_ID => "pause_for_5m",
-        PAUSE_FOR_15_COMMAND_ID => "pause_for_15m",
-        PAUSE_FOR_30_COMMAND_ID => "pause_for_30m",
-        PAUSE_FOR_60_COMMAND_ID => "pause_for_60m",
-        ID_STARTUP_ON => "startup_on",
-        ID_STARTUP_OFF => "startup_off",
-        ID_AUTOMATIC_ON => "automatic_on",
-        ID_AUTOMATIC_OFF => "automatic_off",
-        ID_QUIT => "quit",
-        _ => {
-            if preset_command(command).is_some() {
-                "schedule_preset"
-            } else {
-                "unknown"
-            }
-        }
-    };
-    let command_valid = action_name != "unknown";
-    let dispatch_outcome = if command_valid {
-        DiagnosticOutcome::Completed
-    } else {
-        DiagnosticOutcome::Failed
-    };
-    let dispatch_context = app.operation.map_or_else(
-        || {
-            app.diagnostics
-                .begin_operation(DiagnosticSource::TrayCommand)
-        },
-        |root| {
-            app.diagnostics
-                .child_operation(root, DiagnosticSource::TrayCommand)
-        },
-    );
-    app.diagnostics.record_verification(
-        dispatch_context,
-        DiagnosticSource::TrayCommand,
-        dispatch_outcome,
-        "command.dispatch.verify",
-        format!("command_id={command} action={action_name} valid={command_valid}"),
-    );
-    let mut operation_outcome = DiagnosticOutcome::Completed;
-    match command {
-        ID_START => manual_start(app),
-        ID_STOP => manual_stop(app),
-        LOGS_COMMAND_ID => {
-            app.record("tray.command", "command=logs");
-            operation_outcome = crate::ui::diagnostic_window::diagnostic_open_operation_outcome(
-                crate::ui::open_diagnostic_window(app),
-            );
-        }
-        GITHUB_COMMAND_ID => open_github_page(hwnd, app),
-        SCHEDULE_PRESETS_COMMAND_ID => {
-            crate::ui::open_presets_window(app);
-        }
-        CANCEL_SCHEDULED_COMMAND_ID | CANCEL_PAUSE_COMMAND_ID => cancel_scheduled_action(app),
-        START_IN_1_COMMAND_ID
-        | START_IN_5_COMMAND_ID
-        | START_IN_15_COMMAND_ID
-        | START_IN_30_COMMAND_ID
-        | START_IN_60_COMMAND_ID
-        | STOP_IN_1_COMMAND_ID
-        | STOP_IN_5_COMMAND_ID
-        | STOP_IN_15_COMMAND_ID
-        | STOP_IN_30_COMMAND_ID
-        | STOP_IN_60_COMMAND_ID
-        | PAUSE_FOR_5_COMMAND_ID
-        | PAUSE_FOR_15_COMMAND_ID
-        | PAUSE_FOR_30_COMMAND_ID
-        | PAUSE_FOR_60_COMMAND_ID => {
-            if let Some((action, duration)) = duration_command(command) {
-                schedule_duration_action(app, action, duration.to_preset());
-            }
-        }
-        ID_STARTUP_ON => set_startup(app, true),
-        ID_STARTUP_OFF => set_startup(app, false),
-        ID_AUTOMATIC_ON => set_automatic(app, true),
-        ID_AUTOMATIC_OFF => set_automatic(app, false),
-        ID_QUIT => {
-            app.record("tray.command", "command=quit");
-            app.record("lifecycle.shutdown_request", "source=tray");
-            app.record("quit.requested", "source=tray");
-            let decision = quit_decision(app);
-            app.record(
-                "quit.active_state",
-                format!(
-                    "decision={decision:?} status={:?} ownership={:?} verification={:?}",
-                    app.tray_status,
-                    app.controller.ownership(),
-                    app.controller.verification()
-                ),
-            );
-            match decision {
-                QuitDecision::ExitNormally => {
-                    app.record("quit.dialog.result", "result=not_shown");
-                    match app.cleanup_normal_shutdown() {
-                        Ok(()) => {
-                            app.record("quit.cleanup.result", "result=verified");
-                            app.record(
-                                "quit.exit.allowed",
-                                "result=allowed reason=already_stopped",
-                            );
-                            PostQuitMessage(0);
-                            return false;
-                        }
-                        Err(error) => {
-                            app.record(
-                                "quit.cleanup.result",
-                                format!("result=unverified error={error}"),
-                            );
-                            app.record("quit.blocked.uncertain_cleanup", format!("error={error}"));
-                            app.record("quit.exit.allowed", "result=denied");
-                            show_shutdown_warning(
-                                hwnd,
-                                &format!(
-                                    "True™ Tick could not verify a safe stop. The app remains open.\n\n{error}"
-                                ),
-                            );
-                            return true;
-                        }
-                    }
-                }
-                QuitDecision::RequireSafetyDialog { reason } => {
-                    app.record("quit.warning.shown", format!("reason={reason:?}"));
-                    let warning = show_quit_warning(hwnd, reason);
-                    app.record(
-                        "quit.dialog.result",
-                        format!(
-                            "dialog_path=message_box reason={reason:?} message_box_result={:?} final_decision={:?} dialog_shown={}",
-                            warning.message_box_result,
-                            warning.decision,
-                            warning.dialog_shown
-                        ),
-                    );
-                    match warning.decision {
-                        QuitDialogDecision::StopAndQuit => {
-                            app.record("quit.dialog.result", "result=stop_and_quit");
-                            app.record("quit.stop_and_quit.selected", "result=selected");
-                            match app.cleanup_normal_shutdown() {
-                                Ok(()) => {
-                                    app.record("quit.cleanup.result", "result=verified");
-                                    app.record("quit.release.result", "result=verified");
-                                    app.record("quit.exit.allowed", "result=allowed");
-                                    PostQuitMessage(0);
-                                    return false;
-                                }
-                                Err(error) => {
-                                    app.record(
-                                        "quit.cleanup.result",
-                                        format!("result=unverified error={error}"),
-                                    );
-                                    app.record(
-                                        "quit.blocked.uncertain_cleanup",
-                                        format!("error={error}"),
-                                    );
-                                    app.record("quit.exit.allowed", "result=denied");
-                                    let message = format!(
-                                        "True™ Tick could not verify a safe stop. The app remains open.\n\n{error}"
-                                    );
-                                    MessageBoxW(
-                                        hwnd,
-                                        wide(&message).as_ptr(),
-                                        wide("True™ Tick quit warning").as_ptr(),
-                                        MB_ICONWARNING,
-                                    );
-                                    return true;
-                                }
-                            }
-                        }
-                        QuitDialogDecision::Cancel => {
-                            app.record(
-                                "quit.cancel.selected",
-                                format!("result=cancelled dialog_shown={}", warning.dialog_shown),
-                            );
-                            app.record("quit.cleanup.result", "result=not_attempted");
-                            app.record("quit.exit.allowed", "result=denied");
-                            return warning.dialog_shown;
-                        }
-                    }
-                }
-            }
-        }
-        _ => {
-            if let Some((action, preset_index)) = preset_command(command) {
-                schedule_preset_action(app, action, preset_index);
-            }
-        }
-    }
-    let keeps_open = menu_action_keeps_open(command);
-    if command != ID_QUIT {
-        app.finish_operation(operation_outcome);
-    }
-    keeps_open
+    menu::handle_menu_command(hwnd, app, command)
 }
 
 unsafe fn open_github_page(hwnd: *mut c_void, app: &mut App) {
@@ -4397,10 +3415,6 @@ fn message_box_decision(result: i32) -> QuitDialogDecision {
     }
 }
 
-fn returned_menu_command(result: i32) -> Option<usize> {
-    (result > 0).then_some(result as usize)
-}
-
 pub(crate) fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -4497,26 +3511,31 @@ extern "system" {
     pub(crate) fn SetWindowLongPtrW(hwnd: *mut c_void, index: i32, value: isize) -> isize;
     pub(crate) fn IsWindow(window: *mut c_void) -> i32;
     pub(crate) fn IsIconic(window: *mut c_void) -> i32;
-    fn PostQuitMessage(code: i32);
-    fn SetTimer(
+    pub(crate) fn PostQuitMessage(code: i32);
+    pub(crate) fn SetTimer(
         hwnd: *mut c_void,
         event_id: usize,
         interval_ms: u32,
         callback: *mut c_void,
     ) -> usize;
-    fn KillTimer(hwnd: *mut c_void, event_id: usize) -> i32;
-    fn MessageBoxW(hwnd: *mut c_void, text: *const u16, title: *const u16, flags: u32) -> i32;
-    fn CreatePopupMenu() -> *mut c_void;
-    fn GetMenuItemCount(menu: *mut c_void) -> i32;
-    fn GetMenuStringW(
+    pub(crate) fn KillTimer(hwnd: *mut c_void, event_id: usize) -> i32;
+    pub(crate) fn MessageBoxW(
+        hwnd: *mut c_void,
+        text: *const u16,
+        title: *const u16,
+        flags: u32,
+    ) -> i32;
+    pub(crate) fn CreatePopupMenu() -> *mut c_void;
+    pub(crate) fn GetMenuItemCount(menu: *mut c_void) -> i32;
+    pub(crate) fn GetMenuStringW(
         menu: *mut c_void,
         item: usize,
         text: *mut u16,
         maximum: i32,
         flags: u32,
     ) -> i32;
-    fn AppendMenuW(menu: *mut c_void, flags: u32, id: usize, text: *const u16) -> i32;
-    fn ModifyMenuW(
+    pub(crate) fn AppendMenuW(menu: *mut c_void, flags: u32, id: usize, text: *const u16) -> i32;
+    pub(crate) fn ModifyMenuW(
         menu: *mut c_void,
         item: usize,
         flags: u32,
@@ -4524,7 +3543,7 @@ extern "system" {
         text: *const u16,
     ) -> i32;
     pub(crate) fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
-    fn TrackPopupMenu(
+    pub(crate) fn TrackPopupMenu(
         menu: *mut c_void,
         flags: u32,
         x: i32,
@@ -4533,7 +3552,7 @@ extern "system" {
         hwnd: *mut c_void,
         rect: *const c_void,
     ) -> i32;
-    fn DestroyMenu(menu: *mut c_void) -> i32;
+    pub(crate) fn DestroyMenu(menu: *mut c_void) -> i32;
     pub(crate) fn DestroyWindow(window: *mut c_void) -> i32;
     pub(crate) fn ShowWindow(window: *mut c_void, command: i32) -> i32;
     pub(crate) fn UpdateWindow(window: *mut c_void) -> i32;
@@ -4560,7 +3579,7 @@ extern "system" {
         flags: u32,
     ) -> i32;
     pub(crate) fn InvalidateRect(window: *mut c_void, rect: *const Rect, erase: i32) -> i32;
-    fn GetCursorPos(point: *mut Point) -> i32;
+    pub(crate) fn GetCursorPos(point: *mut Point) -> i32;
     fn LoadIconW(instance: *mut c_void, name: *const u16) -> *mut c_void;
     pub(crate) fn GetModuleHandleW(name: *const u16) -> *mut c_void;
     pub(crate) fn GetDpiForWindow(window: *mut c_void) -> u32;
@@ -4585,7 +3604,7 @@ extern "system" {
 #[link(name = "shell32")]
 extern "system" {
     fn Shell_NotifyIconW(message: u32, data: *mut NotifyIconData) -> i32;
-    fn ShellExecuteW(
+    pub(crate) fn ShellExecuteW(
         hwnd: *mut c_void,
         operation: *const u16,
         file: *const u16,
@@ -4722,30 +3741,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn schedule_menu_positions_match_the_single_label_source() {
-        let items = crate::tray_surface::duration_menu_items(None);
-        assert_eq!(items.len(), 6);
-        for item in &items[..3] {
-            assert_eq!(item.command_id, None);
-        }
-        assert_eq!(SCHEDULE_MENU_PRESETS_POSITION, 4);
-        assert_eq!(SCHEDULE_MENU_CANCEL_POSITION, 6);
-        assert_eq!(SCHEDULE_MENU_RESUME_POSITION, 7);
-        assert_eq!(
-            items[SCHEDULE_MENU_PRESETS_POSITION - 1].command_id,
-            Some(crate::tray_surface::SCHEDULE_PRESETS_COMMAND_ID)
-        );
-        assert_eq!(
-            items[SCHEDULE_MENU_CANCEL_POSITION - 2].command_id,
-            Some(crate::tray_surface::CANCEL_SCHEDULED_COMMAND_ID)
-        );
-        assert_eq!(
-            items[SCHEDULE_MENU_RESUME_POSITION - 2].command_id,
-            Some(crate::tray_surface::CANCEL_PAUSE_COMMAND_ID)
-        );
-    }
-
-    #[test]
     fn startup_rollback_never_deletes_a_value_after_an_enable() {
         assert_eq!(
             startup_rollback(true),
@@ -4790,23 +3785,6 @@ mod tests {
         assert_eq!(
             class_registration_result(0, 5),
             NativeResult::Failed { raw_error: 5 }
-        );
-    }
-
-    #[test]
-    fn signed_screen_coordinates_keep_their_low_32_bits() {
-        assert_eq!(track_position_lparam(-1, -2) as u32, 0xfffe_ffff);
-        assert_eq!(track_position_lparam(-1920, 1080) as u32, 0x0438_f880);
-    }
-
-    #[test]
-    fn returned_popup_command_is_dispatched_once_as_an_optional_id() {
-        assert_eq!(returned_menu_command(0), None);
-        assert_eq!(returned_menu_command(-1), None);
-        assert_eq!(returned_menu_command(ID_START as i32), Some(ID_START));
-        assert_eq!(
-            returned_menu_command(ID_AUTOMATIC_OFF as i32),
-            Some(ID_AUTOMATIC_OFF)
         );
     }
 
