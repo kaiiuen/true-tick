@@ -410,7 +410,7 @@ pub(crate) unsafe fn restore_tray_icon(hwnd: *mut c_void, app: &mut App) {
     publish_tray_icon(app);
 }
 
-pub(crate) fn publish_tray_icon(app: &mut App) {
+fn publish_tray_icon(app: &mut App) {
     app.publish();
 }
 
@@ -2140,9 +2140,6 @@ extern "system" {
 extern "system" {
     pub(crate) fn GetLastError() -> u32;
 }
-
-#[link(name = "comdlg32")]
-extern "system" {}
 
 #[cfg(test)]
 mod tests {

@@ -5,11 +5,8 @@ use tick_policy::{decide, PolicyInput, PowerState};
 pub const MAX_DURATION: Duration = Duration::from_secs(MAX_PRESET_SECONDS as u64);
 pub const MAX_TIMER_INTERVAL_MS: u32 = 60 * 60 * 1_000;
 
-#[allow(dead_code)]
 pub const MIN_PRESET_SECONDS: u32 = 10;
-#[allow(dead_code)]
 pub const MAX_PRESET_SECONDS: u32 = 86_400;
-#[allow(dead_code)]
 pub const MAX_PRESETS: usize = 12;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,7 +19,6 @@ pub(crate) enum DurationChoice {
 }
 
 impl DurationChoice {
-    #[allow(dead_code)]
     pub(crate) const fn minutes(self) -> u32 {
         match self {
             Self::OneMinute => 1,
@@ -38,7 +34,6 @@ impl DurationChoice {
         Duration::from_secs(self.minutes() as u64 * 60)
     }
 
-    #[allow(dead_code)]
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::OneMinute => "1 minute",
@@ -49,7 +44,6 @@ impl DurationChoice {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) const fn all() -> [Self; 5] {
         [
             Self::OneMinute,
@@ -60,7 +54,6 @@ impl DurationChoice {
         ]
     }
 
-    #[allow(dead_code)]
     pub(crate) const fn pause_choices() -> [Self; 4] {
         [
             Self::FiveMinutes,
@@ -75,13 +68,11 @@ impl DurationChoice {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct DurationPreset {
     seconds: u32,
 }
 
-#[allow(dead_code)]
 impl DurationPreset {
     pub fn new(seconds: u32) -> Result<Self, &'static str> {
         if seconds < MIN_PRESET_SECONDS {
@@ -211,7 +202,6 @@ impl DurationPreset {
     }
 }
 
-#[allow(dead_code)]
 fn unit_label(value: u32, unit: &str) -> String {
     if value == 1 {
         format!("{} {}", value, unit)
@@ -220,12 +210,10 @@ fn unit_label(value: u32, unit: &str) -> String {
     }
 }
 
-#[allow(dead_code)]
 pub struct PresetsManager {
     presets: Vec<DurationPreset>,
 }
 
-#[allow(dead_code)]
 impl PresetsManager {
     pub fn new() -> Self {
         Self {
