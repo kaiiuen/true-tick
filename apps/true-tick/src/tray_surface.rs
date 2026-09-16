@@ -1,4 +1,4 @@
-use crate::pause::{DurationAction, DurationChoice, ScheduledAction};
+use crate::pause::{DurationAction, DurationChoice, DurationPreset, ScheduledAction};
 use std::time::{Duration, Instant};
 use tick_core::Hns;
 use tick_ownership::{OwnershipState, TimingSnapshot};
@@ -321,6 +321,11 @@ pub(crate) const START_IN_MENU_COMMAND_ID: usize = 1102;
 pub(crate) const STOP_IN_MENU_COMMAND_ID: usize = 1103;
 pub(crate) const PAUSE_FOR_MENU_COMMAND_ID: usize = 1104;
 pub(crate) const STATUS_MENU_COMMAND_ID: usize = 1105;
+pub(crate) const SCHEDULE_PRESETS_COMMAND_ID: usize = 1106;
+pub(crate) const START_PRESET_BASE_COMMAND_ID: usize = 1120;
+pub(crate) const STOP_PRESET_BASE_COMMAND_ID: usize = 1140;
+pub(crate) const PAUSE_PRESET_BASE_COMMAND_ID: usize = 1160;
+pub(crate) const MAX_DYNAMIC_PRESETS: usize = 12;
 pub(crate) const GITHUB_URL: &str = "https://github.com/kaiiuen/true-tick";
 
 pub(crate) const fn duration_command(
@@ -345,6 +350,59 @@ pub(crate) const fn duration_command(
     }
 }
 
+pub(crate) const fn preset_command(command_id: usize) -> Option<(DurationAction, usize)> {
+    if command_id >= START_PRESET_BASE_COMMAND_ID
+        && command_id < START_PRESET_BASE_COMMAND_ID + MAX_DYNAMIC_PRESETS
+    {
+        return Some((
+            DurationAction::Start,
+            command_id - START_PRESET_BASE_COMMAND_ID,
+        ));
+    }
+    if command_id >= STOP_PRESET_BASE_COMMAND_ID
+        && command_id < STOP_PRESET_BASE_COMMAND_ID + MAX_DYNAMIC_PRESETS
+    {
+        return Some((
+            DurationAction::Stop,
+            command_id - STOP_PRESET_BASE_COMMAND_ID,
+        ));
+    }
+    if command_id >= PAUSE_PRESET_BASE_COMMAND_ID
+        && command_id < PAUSE_PRESET_BASE_COMMAND_ID + MAX_DYNAMIC_PRESETS
+    {
+        return Some((
+            DurationAction::Pause,
+            command_id - PAUSE_PRESET_BASE_COMMAND_ID,
+        ));
+    }
+    None
+}
+
+pub(crate) const fn preset_command_base(action: DurationAction) -> usize {
+    match action {
+        DurationAction::Start => START_PRESET_BASE_COMMAND_ID,
+        DurationAction::Stop => STOP_PRESET_BASE_COMMAND_ID,
+        DurationAction::Pause => PAUSE_PRESET_BASE_COMMAND_ID,
+    }
+}
+
+pub(crate) fn preset_menu_items(
+    action: DurationAction,
+    presets: &[DurationPreset],
+) -> Vec<MenuItem> {
+    let base = preset_command_base(action);
+    presets
+        .iter()
+        .enumerate()
+        .map(|(index, preset)| MenuItem {
+            label: preset.format_label(),
+            enabled: true,
+            command_id: Some(base + index),
+        })
+        .collect()
+}
+
+#[allow(dead_code)]
 pub(crate) fn duration_choices(action: DurationAction) -> Vec<MenuItem> {
     let choices = match action {
         DurationAction::Start | DurationAction::Stop => DurationChoice::all().to_vec(),
@@ -378,6 +436,11 @@ pub(crate) fn duration_menu_items(scheduled: Option<ScheduledAction>) -> Vec<Men
             command_id: None,
         },
         MenuItem {
+            label: "Interval presets...".to_owned(),
+            enabled: true,
+            command_id: Some(SCHEDULE_PRESETS_COMMAND_ID),
+        },
+        MenuItem {
             label: "Cancel scheduled action".to_owned(),
             enabled: scheduled.is_some_and(|action| action.action != DurationAction::Pause),
             command_id: Some(CANCEL_SCHEDULED_COMMAND_ID),
@@ -402,6 +465,7 @@ pub(crate) const fn menu_description(command_id: usize) -> Option<&'static str> 
         START_IN_MENU_COMMAND_ID => Some("Schedule a future guarded acquire"),
         STOP_IN_MENU_COMMAND_ID => Some("Schedule a future guarded release"),
         PAUSE_FOR_MENU_COMMAND_ID => Some("Suppress acquisition for a fixed duration"),
+        SCHEDULE_PRESETS_COMMAND_ID => Some("Manage interval presets"),
         CANCEL_SCHEDULED_COMMAND_ID => Some("Clear the current scheduled action"),
         CANCEL_PAUSE_COMMAND_ID => Some("Resume timing and cancel the pause"),
         STATUS_MENU_COMMAND_ID => Some("View read-only lifecycle details"),
@@ -485,7 +549,8 @@ pub(crate) const fn menu_action_keeps_open(command_id: usize) -> bool {
                 | PAUSE_FOR_60_COMMAND_ID
                 | CANCEL_SCHEDULED_COMMAND_ID
                 | CANCEL_PAUSE_COMMAND_ID
-    )
+                | SCHEDULE_PRESETS_COMMAND_ID
+    ) || preset_command(command_id).is_some()
 }
 
 pub(crate) const fn tray_notification_opens_menu(notification: usize, menu_active: bool) -> bool {
@@ -533,7 +598,7 @@ pub(crate) const fn menu_command_is_enabled_with_pause(
         1006 => startup_enabled,
         1007 => !automatic,
         1008 => automatic,
-        LOGS_COMMAND_ID | GITHUB_COMMAND_ID | 1004 => true,
+        LOGS_COMMAND_ID | GITHUB_COMMAND_ID | SCHEDULE_PRESETS_COMMAND_ID | 1004 => true,
         START_IN_1_COMMAND_ID
         | START_IN_5_COMMAND_ID
         | START_IN_15_COMMAND_ID
@@ -549,7 +614,7 @@ pub(crate) const fn menu_command_is_enabled_with_pause(
         | PAUSE_FOR_30_COMMAND_ID
         | PAUSE_FOR_60_COMMAND_ID => true,
         CANCEL_SCHEDULED_COMMAND_ID | CANCEL_PAUSE_COMMAND_ID => schedule_active,
-        _ => false,
+        _ => preset_command(command_id).is_some(),
     }
 }
 
@@ -798,12 +863,13 @@ mod tests {
                 "Start in >",
                 "Stop in >",
                 "Pause for >",
+                "Interval presets...",
                 "Cancel scheduled action",
                 "Resume now"
             ]
         );
-        assert!(!duration[3].enabled);
         assert!(!duration[4].enabled);
+        assert!(!duration[5].enabled);
         assert_eq!(
             duration_choices(DurationAction::Start)
                 .iter()
@@ -840,13 +906,13 @@ mod tests {
         let now = Instant::now();
         let paused = ScheduledAction {
             action: DurationAction::Pause,
-            duration: DurationChoice::FiveMinutes,
+            duration: DurationChoice::FiveMinutes.to_preset(),
             deadline: now,
             generation: 1,
         };
         let paused_items = duration_menu_items(Some(paused));
-        assert!(!paused_items[3].enabled);
-        assert!(paused_items[4].enabled);
+        assert!(!paused_items[4].enabled);
+        assert!(paused_items[5].enabled);
     }
 
     #[test]
@@ -905,9 +971,9 @@ mod tests {
     }
 
     #[test]
-    fn schedule_menu_orders_five_entries_with_pause_before_cancel() {
+    fn schedule_menu_orders_six_entries_with_pause_before_cancel() {
         let items = duration_menu_items(None);
-        assert_eq!(items.len(), 5);
+        assert_eq!(items.len(), 6);
         let labels = items
             .iter()
             .map(|item| item.label.as_str())
@@ -918,6 +984,7 @@ mod tests {
                 "Start in >",
                 "Stop in >",
                 "Pause for >",
+                "Interval presets...",
                 "Cancel scheduled action",
                 "Resume now"
             ]
@@ -925,8 +992,9 @@ mod tests {
         assert!(items[0].enabled);
         assert!(items[1].enabled);
         assert!(items[2].enabled);
-        assert!(!items[3].enabled);
+        assert!(items[3].enabled);
         assert!(!items[4].enabled);
+        assert!(!items[5].enabled);
     }
 
     #[test]
@@ -1031,7 +1099,7 @@ mod tests {
         let now = Instant::now();
         let action = ScheduledAction {
             action: DurationAction::Start,
-            duration: DurationChoice::FiveMinutes,
+            duration: DurationChoice::FiveMinutes.to_preset(),
             deadline: now + Duration::from_millis(2_001),
             generation: 4,
         };
@@ -1070,7 +1138,7 @@ mod tests {
         let now = Instant::now();
         let scheduled = ScheduledAction {
             action: DurationAction::Pause,
-            duration: DurationChoice::FiveMinutes,
+            duration: DurationChoice::FiveMinutes.to_preset(),
             deadline: now + Duration::from_millis(299_999),
             generation: 4,
         };
@@ -1102,7 +1170,7 @@ mod tests {
         let now = Instant::now();
         let scheduled = ScheduledAction {
             action: DurationAction::Stop,
-            duration: DurationChoice::FiveMinutes,
+            duration: DurationChoice::FiveMinutes.to_preset(),
             deadline: now + Duration::from_secs(252),
             generation: 7,
         };
@@ -1675,7 +1743,7 @@ mod tests {
         };
         let start = ScheduledAction {
             action: DurationAction::Start,
-            duration: DurationChoice::FiveMinutes,
+            duration: DurationChoice::FiveMinutes.to_preset(),
             deadline: now + Duration::from_millis(299_999),
             generation: 3,
         };
@@ -1709,7 +1777,11 @@ mod tests {
     fn schedule_replacement_and_expiration_derive_the_same_lifecycle_state() {
         let now = Instant::now();
         let mut coordinator = DurationCoordinator::new();
-        let first = coordinator.schedule(DurationAction::Start, DurationChoice::FiveMinutes, now);
+        let first = coordinator.schedule(
+            DurationAction::Start,
+            DurationChoice::FiveMinutes.to_preset(),
+            now,
+        );
         assert!(matches!(first, ScheduleRequest::Started(_)));
         assert_eq!(
             scheduled_lifecycle_status(TrayStatus::Stopped, false, Some(DurationAction::Start)),
@@ -1717,7 +1789,7 @@ mod tests {
         );
         let replaced = coordinator.schedule(
             DurationAction::Pause,
-            DurationChoice::FiveMinutes,
+            DurationChoice::FiveMinutes.to_preset(),
             now + Duration::from_secs(1),
         );
         assert!(matches!(replaced, ScheduleRequest::Replaced { .. }));

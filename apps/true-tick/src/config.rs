@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tick_core::Hns;
 
+use crate::pause::{MAX_PRESETS, MAX_PRESET_SECONDS, MIN_PRESET_SECONDS};
+
 pub const MAX_CONFIG_FILE_BYTES: usize = 64 * 1024;
 const MAX_CONFIG_LINE_BYTES: usize = 4 * 1024;
 const MAX_CONFIG_KEY_BYTES: usize = 64;
@@ -16,11 +18,15 @@ pub const AUTOMATIC_REQUEST_INTERVAL: Hns = Hns::ZERO;
 /// Legacy one-millisecond config value accepted only during migration.
 pub const LEGACY_ONE_MILLISECOND_REQUEST_INTERVAL: Hns = Hns::new(10_000);
 
+/// Factory interval presets offered by the pause and resume menus.
+pub const FACTORY_SCHEDULE_PRESETS_SECONDS: [u32; 5] = [60, 300, 900, 1800, 3600];
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     pub automatic: bool,
     pub startup_enabled: bool,
     pub request_interval: Hns,
+    pub schedule_presets_seconds: Vec<u32>,
 }
 
 impl Default for Config {
@@ -29,6 +35,7 @@ impl Default for Config {
             automatic: false,
             startup_enabled: true,
             request_interval: AUTOMATIC_REQUEST_INTERVAL,
+            schedule_presets_seconds: FACTORY_SCHEDULE_PRESETS_SECONDS.to_vec(),
         }
     }
 }
@@ -104,11 +111,18 @@ fn temporary_path_for(path: &Path) -> PathBuf {
 
 pub fn save_atomic(path: &Path, config: &Config) -> Result<(), ConfigError> {
     let temporary = temporary_path_for(path);
+    let presets = config
+        .schedule_presets_seconds
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
     let text = format!(
-        "automatic = {}\nstartup_enabled = {}\nrequest_interval_hns = {}\n",
+        "automatic = {}\nstartup_enabled = {}\nrequest_interval_hns = {}\nschedule_presets_seconds = [{}]\n",
         config.automatic,
         config.startup_enabled,
-        config.request_interval.value()
+        config.request_interval.value(),
+        presets
     );
     let result = (|| {
         let mut file = fs::File::create(&temporary).map_err(ConfigError::Write)?;
@@ -238,10 +252,42 @@ fn parse_with_migration(text: &str) -> Result<(Config, bool), ConfigError> {
                         Hns::new(value)
                     };
             }
+            "schedule_presets_seconds" => {
+                config.schedule_presets_seconds = parse_schedule_presets(value, line_number + 1)?;
+            }
             other => return Err(invalid_reason(format!("unknown configuration key {other}"))),
         }
     }
     Ok((config, migrated))
+}
+
+fn parse_schedule_presets(value: &str, line_number: usize) -> Result<Vec<u32>, ConfigError> {
+    let invalid_line = |reason: &str| invalid_reason(format!("line {line_number}: {reason}"));
+    let inner = value
+        .strip_prefix('[')
+        .and_then(|text| text.strip_suffix(']'))
+        .ok_or_else(|| invalid_line("schedule_presets_seconds must be an integer array"))?;
+    let mut presets = Vec::new();
+    for element in inner.split(',') {
+        let element = element.trim();
+        if element.is_empty() {
+            continue;
+        }
+        let seconds = element
+            .parse::<u32>()
+            .map_err(|_| invalid_line("schedule preset must be an integer"))?;
+        if !(MIN_PRESET_SECONDS..=MAX_PRESET_SECONDS).contains(&seconds) {
+            return Err(invalid_line("schedule preset out of bounds"));
+        }
+        if presets.len() >= MAX_PRESETS {
+            return Err(invalid_line("schedule presets exceed maximum count"));
+        }
+        presets.push(seconds);
+    }
+    if presets.is_empty() {
+        return Err(invalid_line("schedule_presets_seconds must not be empty"));
+    }
+    Ok(presets)
 }
 
 fn invalid_reason(reason: impl Into<String>) -> ConfigError {
@@ -262,7 +308,8 @@ mod tests {
             Config {
                 automatic: false,
                 startup_enabled: true,
-                request_interval: AUTOMATIC_REQUEST_INTERVAL
+                request_interval: AUTOMATIC_REQUEST_INTERVAL,
+                schedule_presets_seconds: vec![60, 300, 900, 1800, 3600]
             }
         );
     }
@@ -277,8 +324,92 @@ mod tests {
             Config {
                 automatic: true,
                 startup_enabled: true,
-                request_interval: AUTOMATIC_REQUEST_INTERVAL
+                request_interval: AUTOMATIC_REQUEST_INTERVAL,
+                schedule_presets_seconds: FACTORY_SCHEDULE_PRESETS_SECONDS.to_vec()
             }
+        );
+    }
+
+    #[test]
+    fn parses_explicit_schedule_presets() {
+        let config =
+            parse("automatic = false\nschedule_presets_seconds = [30, 120, 600, 7200]\n").unwrap();
+        assert_eq!(config.schedule_presets_seconds, vec![30, 120, 600, 7200]);
+        assert_eq!(
+            config,
+            Config {
+                schedule_presets_seconds: vec![30, 120, 600, 7200],
+                ..Config::default()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_schedule_presets_with_whitespace_and_single_entry() {
+        let config = parse("schedule_presets_seconds = [ 15 ]\n").unwrap();
+        assert_eq!(config.schedule_presets_seconds, vec![15]);
+        let padded = parse("schedule_presets_seconds = [10,  20 ,30]\n").unwrap();
+        assert_eq!(padded.schedule_presets_seconds, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn missing_schedule_presets_fall_back_to_factory_defaults() {
+        let config = parse("automatic = true\nstartup_enabled = false\n").unwrap();
+        assert_eq!(
+            config.schedule_presets_seconds,
+            vec![60, 300, 900, 1800, 3600]
+        );
+        assert_eq!(
+            config.schedule_presets_seconds,
+            FACTORY_SCHEDULE_PRESETS_SECONDS.to_vec()
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_bounds_schedule_presets() {
+        assert!(parse("schedule_presets_seconds = [9]\n").is_err());
+        assert!(parse("schedule_presets_seconds = [10]\n").is_ok());
+        assert!(parse("schedule_presets_seconds = [86400]\n").is_ok());
+        assert!(parse("schedule_presets_seconds = [86401]\n").is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_schedule_presets() {
+        assert!(parse("schedule_presets_seconds = 60\n").is_err());
+        assert!(parse("schedule_presets_seconds = [60\n").is_err());
+        assert!(parse("schedule_presets_seconds = []\n").is_err());
+        assert!(parse("schedule_presets_seconds = [60, abc]\n").is_err());
+        assert!(parse("schedule_presets_seconds = [-60]\n").is_err());
+    }
+
+    #[test]
+    fn caps_schedule_presets_at_twelve_items() {
+        let twelve: Vec<u32> = (1..=12).map(|step| step * 10).collect();
+        let text = format!(
+            "schedule_presets_seconds = [{}]\n",
+            twelve
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        assert_eq!(parse(&text).unwrap().schedule_presets_seconds, twelve);
+        let thirteen: Vec<u32> = (1..=13).map(|step| step * 10).collect();
+        let text = format!(
+            "schedule_presets_seconds = [{}]\n",
+            thirteen
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        assert!(parse(&text).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_schedule_presets_key() {
+        assert!(
+            parse("schedule_presets_seconds = [60]\nschedule_presets_seconds = [120]\n").is_err()
         );
     }
 
@@ -347,11 +478,13 @@ mod tests {
             automatic: false,
             startup_enabled: true,
             request_interval: AUTOMATIC_REQUEST_INTERVAL,
+            schedule_presets_seconds: FACTORY_SCHEDULE_PRESETS_SECONDS.to_vec(),
         };
         let second = Config {
             automatic: true,
             startup_enabled: false,
             request_interval: Hns::new(2_000_000),
+            schedule_presets_seconds: vec![15, 45, 7200],
         };
         save_atomic(&path, &first).unwrap();
         save_atomic(&path, &second).unwrap();
@@ -409,8 +542,53 @@ mod tests {
             automatic: true,
             startup_enabled: true,
             request_interval: AUTOMATIC_REQUEST_INTERVAL,
+            schedule_presets_seconds: FACTORY_SCHEDULE_PRESETS_SECONDS.to_vec(),
         };
         save_atomic(&path, &config).unwrap();
+        assert_eq!(load(&path).unwrap(), config);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn serializes_schedule_presets_for_persistence() {
+        let root =
+            std::env::temp_dir().join(format!("true-tick-config-presets-{}", std::process::id()));
+        let path = root.join("true-tick.toml");
+        fs::create_dir_all(&root).unwrap();
+        let config = Config {
+            automatic: false,
+            startup_enabled: true,
+            request_interval: AUTOMATIC_REQUEST_INTERVAL,
+            schedule_presets_seconds: vec![45, 600, 7200],
+        };
+        save_atomic(&path, &config).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("schedule_presets_seconds = [45, 600, 7200]"),
+            "unexpected serialized text {text}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn schedule_presets_round_trip_through_persistence() {
+        let root = std::env::temp_dir().join(format!(
+            "true-tick-config-presets-round-trip-{}",
+            std::process::id()
+        ));
+        let path = root.join("true-tick.toml");
+        fs::create_dir_all(&root).unwrap();
+        let config = Config {
+            automatic: true,
+            startup_enabled: false,
+            request_interval: Hns::new(5_000_000),
+            schedule_presets_seconds: vec![10, 60, 900, 86400],
+        };
+        save_atomic(&path, &config).unwrap();
+        let reloaded = load(&path).unwrap();
+        assert_eq!(reloaded, config);
+        assert_eq!(reloaded.schedule_presets_seconds, vec![10, 60, 900, 86400]);
+        save_atomic(&path, &reloaded).unwrap();
         assert_eq!(load(&path).unwrap(), config);
         fs::remove_dir_all(root).unwrap();
     }

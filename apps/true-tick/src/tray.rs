@@ -1,7 +1,7 @@
 use crate::config;
 use crate::pause::{
     acquisition_is_allowed, timer_interval_ms, CoordinatorTimerEvent, DurationAction,
-    DurationChoice, DurationCoordinator, ScheduleRequest,
+    DurationCoordinator, DurationPreset, PresetsManager, ScheduleRequest,
 };
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -142,16 +142,18 @@ use crate::shutdown::{
     message_loop_exit, shutdown_disposition, MessageLoopExit, ShutdownDisposition, ShutdownGate,
 };
 use crate::tray_surface::{
-    dpi_to_icon_canvas, duration_choices, duration_command, duration_menu_items, icon_pixel_color,
+    dpi_to_icon_canvas, duration_command, duration_menu_items, icon_pixel_color,
     menu_action_keeps_open, menu_command_dispatch_allowed, menu_command_is_enabled_with_pause,
-    menu_description, menu_items_with_duration, power_reconciliation, release_needs_handoff,
-    scheduled_display_key, status_menu_items, tooltip_at, tray_notification_opens_menu,
-    HandoffProgress, HandoffTracker, PowerReconciliation, TimingValues, TrayStatus,
-    CANCEL_PAUSE_COMMAND_ID, CANCEL_SCHEDULED_COMMAND_ID, GITHUB_COMMAND_ID, GITHUB_URL,
-    HANDOFF_POLL_INTERVAL_MS, LOGS_COMMAND_ID, PAUSE_FOR_15_COMMAND_ID, PAUSE_FOR_30_COMMAND_ID,
-    PAUSE_FOR_5_COMMAND_ID, PAUSE_FOR_60_COMMAND_ID, START_IN_15_COMMAND_ID, START_IN_1_COMMAND_ID,
-    START_IN_30_COMMAND_ID, START_IN_5_COMMAND_ID, START_IN_60_COMMAND_ID, STOP_IN_15_COMMAND_ID,
-    STOP_IN_1_COMMAND_ID, STOP_IN_30_COMMAND_ID, STOP_IN_5_COMMAND_ID, STOP_IN_60_COMMAND_ID,
+    menu_description, menu_items_with_duration, power_reconciliation, preset_command,
+    preset_command_base, preset_menu_items, release_needs_handoff, scheduled_display_key,
+    status_menu_items, tooltip_at, tray_notification_opens_menu, HandoffProgress, HandoffTracker,
+    PowerReconciliation, TimingValues, TrayStatus, CANCEL_PAUSE_COMMAND_ID,
+    CANCEL_SCHEDULED_COMMAND_ID, GITHUB_COMMAND_ID, GITHUB_URL, HANDOFF_POLL_INTERVAL_MS,
+    LOGS_COMMAND_ID, PAUSE_FOR_15_COMMAND_ID, PAUSE_FOR_30_COMMAND_ID, PAUSE_FOR_5_COMMAND_ID,
+    PAUSE_FOR_60_COMMAND_ID, SCHEDULE_PRESETS_COMMAND_ID, START_IN_15_COMMAND_ID,
+    START_IN_1_COMMAND_ID, START_IN_30_COMMAND_ID, START_IN_5_COMMAND_ID, START_IN_60_COMMAND_ID,
+    STOP_IN_15_COMMAND_ID, STOP_IN_1_COMMAND_ID, STOP_IN_30_COMMAND_ID, STOP_IN_5_COMMAND_ID,
+    STOP_IN_60_COMMAND_ID,
 };
 
 const WM_APP: u32 = 0x8000;
@@ -186,6 +188,26 @@ const ID_DIAGNOSTIC_DISPLAY_LIMIT: usize = 1204;
 const ID_DIAGNOSTIC_SHOW_ALL: usize = 1205;
 const ID_DIAGNOSTIC_CATEGORY_FILTER: usize = 1206;
 const ID_DIAGNOSTIC_EXPORT_ALL: usize = 1207;
+const ID_PRESETS_LISTBOX: usize = 1301;
+const ID_PRESETS_LABEL: usize = 1302;
+const ID_PRESETS_INPUT: usize = 1303;
+const ID_PRESETS_ADD: usize = 1304;
+const ID_PRESETS_DELETE: usize = 1305;
+const ID_PRESETS_RESET: usize = 1306;
+const ID_PRESETS_CLOSE: usize = 1307;
+const LBS_NOTIFY: u32 = 0x0001;
+const LBN_SELCHANGE: usize = 1;
+const LB_ADDSTRING: u32 = 0x0180;
+const LB_RESETCONTENT: u32 = 0x0184;
+const LB_GETCURSEL: u32 = 0x0188;
+const LB_ERR: isize = -1;
+const WS_OVERLAPPED: u32 = 0x00000000;
+const WS_CAPTION: u32 = 0x00C00000;
+const WS_SYSMENU: u32 = 0x00080000;
+const PRESETS_WINDOW_TITLE: &str = "True™ Tick Interval Presets";
+const PRESETS_WINDOW_WIDTH: i32 = 380;
+const PRESETS_WINDOW_HEIGHT: i32 = 360;
+const PRESETS_WINDOW_CLASS: &str = "TrueTickPresetsClass";
 const EN_CHANGE: usize = 0x0300;
 const BN_CLICKED: usize = 0;
 const CBN_SELCHANGE: usize = 1;
@@ -283,8 +305,10 @@ const ROOT_MENU_START_POSITION: usize = 2;
 const ROOT_MENU_STOP_POSITION: usize = 3;
 const ROOT_MENU_AUTO_START_POSITION: usize = 6;
 const ROOT_MENU_AUTO_TIME_POSITION: usize = 7;
-const SCHEDULE_MENU_CANCEL_POSITION: usize = 4;
-const SCHEDULE_MENU_RESUME_POSITION: usize = 5;
+#[allow(dead_code)]
+const SCHEDULE_MENU_PRESETS_POSITION: usize = 4;
+const SCHEDULE_MENU_CANCEL_POSITION: usize = 6;
+const SCHEDULE_MENU_RESUME_POSITION: usize = 7;
 
 const NIF_MESSAGE: u32 = 0x0001;
 const NIF_ICON: u32 = 0x0002;
@@ -736,6 +760,10 @@ struct App {
     menu_help: Option<*mut c_void>,
     menu_help_text: Vec<u16>,
     pause: DurationCoordinator,
+    presets_manager: PresetsManager,
+    presets_window: Option<*mut c_void>,
+    presets_listbox: Option<*mut c_void>,
+    presets_input: Option<*mut c_void>,
     duration_timer_id: Option<usize>,
     duration_timer_generation: Option<u64>,
     scheduled_operation: Option<OperationContext>,
@@ -1091,6 +1119,7 @@ pub fn run() {
             "native.RegisterWindowMessageW.TaskbarCreated",
             format!("message_id={taskbar_created_message} raw_status={taskbar_created_error}"),
         );
+        let presets_manager = PresetsManager::from_seconds_list(&loaded.schedule_presets_seconds);
         let app = Box::new(App {
             controller: TimerController::new(
                 WindowsTimerPlatform::with_diagnostics(diagnostics.clone()),
@@ -1163,6 +1192,10 @@ pub fn run() {
             menu_help: None,
             menu_help_text: Vec::new(),
             pause: DurationCoordinator::new(),
+            presets_manager,
+            presets_window: None,
+            presets_listbox: None,
+            presets_input: None,
             duration_timer_id: None,
             duration_timer_generation: None,
             scheduled_operation: None,
@@ -1306,6 +1339,39 @@ pub fn run() {
             abort_startup(
                 app_ptr,
                 "True™ Tick could not create its diagnostic window class.",
+            );
+            return;
+        }
+        let presets_class_name = wide(PRESETS_WINDOW_CLASS);
+        let presets_class = WndClass {
+            style: 0,
+            wnd_proc: Some(presets_window_proc),
+            cls_extra: 0,
+            wnd_extra: 0,
+            instance: wnd_class.instance,
+            icon: wnd_class.icon,
+            cursor: std::ptr::null_mut(),
+            background: GetSysColorBrush(COLOR_WINDOW),
+            menu_name: std::ptr::null(),
+            class_name: presets_class_name.as_ptr(),
+        };
+        let presets_class_atom = RegisterClassW(&presets_class);
+        let presets_class_error = if presets_class_atom == 0 {
+            GetLastError()
+        } else {
+            0
+        };
+        if !matches!(
+            class_registration_result(presets_class_atom, presets_class_error),
+            NativeResult::Succeeded
+        ) {
+            app.record(
+                "native.RegisterClassW.presets.error",
+                format!("raw_status={presets_class_error}"),
+            );
+            abort_startup(
+                app_ptr,
+                "True™ Tick could not create its presets window class.",
             );
             return;
         }
@@ -2013,7 +2079,7 @@ fn manual_stop(app: &mut App) {
     queue_intent(app, DesiredIntent::Release, "manual");
 }
 
-fn schedule_duration_action(app: &mut App, action: DurationAction, duration: DurationChoice) {
+fn schedule_duration_action(app: &mut App, action: DurationAction, duration: DurationPreset) {
     let now = std::time::Instant::now();
     let replacing_pause = app.pause.pause_active();
     if let Some(previous) = app.pause.current() {
@@ -2041,9 +2107,9 @@ fn schedule_duration_action(app: &mut App, action: DurationAction, duration: Dur
     app.record(
         "duration.schedule",
         format!(
-            "action={} duration_minutes={} generation={} deadline_monotonic_ms={} remaining_ms={}",
+            "action={} duration_seconds={} generation={} deadline_monotonic_ms={} remaining_ms={}",
             action.label(),
-            duration.minutes(),
+            duration.seconds(),
             current.generation,
             duration.duration().as_millis(),
             current.remaining(now).as_millis()
@@ -2069,9 +2135,9 @@ fn schedule_duration_action(app: &mut App, action: DurationAction, duration: Dur
     app.record(
         "duration.schedule.result",
         format!(
-            "outcome=scheduled action={} duration_minutes={} generation={} remaining_ms={}",
+            "outcome=scheduled action={} duration_seconds={} generation={} remaining_ms={}",
             action.label(),
-            duration.minutes(),
+            duration.seconds(),
             current.generation,
             current.remaining(std::time::Instant::now()).as_millis()
         ),
@@ -2089,6 +2155,20 @@ fn schedule_duration_action(app: &mut App, action: DurationAction, duration: Dur
     if app.menu_active {
         unsafe { refresh_popup_menu(app) };
     }
+}
+
+fn schedule_preset_action(app: &mut App, action: DurationAction, preset_index: usize) {
+    let Some(preset) = app.presets_manager.presets().get(preset_index).copied() else {
+        app.record(
+            "duration.schedule.preset",
+            format!(
+                "result=missing action={} index={preset_index}",
+                action.label()
+            ),
+        );
+        return;
+    };
+    schedule_duration_action(app, action, preset);
 }
 
 fn cancel_scheduled_action(app: &mut App) {
@@ -3686,31 +3766,10 @@ unsafe fn append_duration_choice_submenu(
         );
         return false;
     }
-    let command_ids: &[usize] = match action {
-        DurationAction::Start => &[
-            crate::tray_surface::START_IN_1_COMMAND_ID,
-            crate::tray_surface::START_IN_5_COMMAND_ID,
-            crate::tray_surface::START_IN_15_COMMAND_ID,
-            crate::tray_surface::START_IN_30_COMMAND_ID,
-            crate::tray_surface::START_IN_60_COMMAND_ID,
-        ],
-        DurationAction::Stop => &[
-            crate::tray_surface::STOP_IN_1_COMMAND_ID,
-            crate::tray_surface::STOP_IN_5_COMMAND_ID,
-            crate::tray_surface::STOP_IN_15_COMMAND_ID,
-            crate::tray_surface::STOP_IN_30_COMMAND_ID,
-            crate::tray_surface::STOP_IN_60_COMMAND_ID,
-        ],
-        DurationAction::Pause => &[
-            PAUSE_FOR_5_COMMAND_ID,
-            PAUSE_FOR_15_COMMAND_ID,
-            PAUSE_FOR_30_COMMAND_ID,
-            PAUSE_FOR_60_COMMAND_ID,
-        ],
-    };
-    let choices = duration_choices(action);
+    let items = preset_menu_items(action, app.presets_manager.presets());
+    let base = preset_command_base(action);
     let mut ok = true;
-    for (command, item) in command_ids.iter().zip(choices.iter()) {
+    for item in items.iter() {
         let enabled = match action {
             DurationAction::Start => !app.pause.pause_active(),
             DurationAction::Stop | DurationAction::Pause => true,
@@ -3720,7 +3779,13 @@ unsafe fn append_duration_choice_submenu(
         } else {
             MF_STRING | MF_GRAYED
         };
-        ok &= append_menu_checked(app, submenu, flags, *command, wide(&item.label).as_ptr());
+        ok &= append_menu_checked(
+            app,
+            submenu,
+            flags,
+            item.command_id.unwrap_or(base),
+            wide(&item.label).as_ptr(),
+        );
     }
     if !ok {
         DestroyMenu(submenu);
@@ -3754,7 +3819,21 @@ unsafe fn append_schedule_submenu(app: &mut App, menu: *mut c_void, parent_capti
     ok &= append_duration_choice_submenu(app, submenu, DurationAction::Stop, &items[1].label);
     ok &= append_duration_choice_submenu(app, submenu, DurationAction::Pause, &items[2].label);
     ok &= append_menu_checked(app, submenu, MF_SEPARATOR, 0, std::ptr::null());
-    let cancel = items[3].clone();
+    let presets = items[3].clone();
+    let presets_flags = if presets.enabled {
+        MF_STRING
+    } else {
+        MF_STRING | MF_GRAYED
+    };
+    ok &= append_menu_checked(
+        app,
+        submenu,
+        presets_flags,
+        SCHEDULE_PRESETS_COMMAND_ID,
+        wide(&presets.label).as_ptr(),
+    );
+    ok &= append_menu_checked(app, submenu, MF_SEPARATOR, 0, std::ptr::null());
+    let cancel = items[4].clone();
     let cancel_flags = if cancel.enabled {
         MF_STRING
     } else {
@@ -3767,7 +3846,7 @@ unsafe fn append_schedule_submenu(app: &mut App, menu: *mut c_void, parent_capti
         CANCEL_SCHEDULED_COMMAND_ID,
         wide(&cancel.label).as_ptr(),
     );
-    let resume = items[4].clone();
+    let resume = items[5].clone();
     let resume_flags = if resume.enabled {
         MF_STRING
     } else {
@@ -4124,6 +4203,7 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
         ID_STOP => "stop",
         LOGS_COMMAND_ID => "logs",
         GITHUB_COMMAND_ID => "github",
+        SCHEDULE_PRESETS_COMMAND_ID => "schedule_presets",
         CANCEL_SCHEDULED_COMMAND_ID => "cancel_scheduled",
         CANCEL_PAUSE_COMMAND_ID => "cancel_pause",
         START_IN_1_COMMAND_ID => "start_in_1m",
@@ -4145,7 +4225,13 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
         ID_AUTOMATIC_ON => "automatic_on",
         ID_AUTOMATIC_OFF => "automatic_off",
         ID_QUIT => "quit",
-        _ => "unknown",
+        _ => {
+            if preset_command(command).is_some() {
+                "schedule_preset"
+            } else {
+                "unknown"
+            }
+        }
     };
     let command_valid = action_name != "unknown";
     let dispatch_outcome = if command_valid {
@@ -4179,6 +4265,9 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
             operation_outcome = diagnostic_open_operation_outcome(open_diagnostic_window(app));
         }
         GITHUB_COMMAND_ID => open_github_page(hwnd, app),
+        SCHEDULE_PRESETS_COMMAND_ID => {
+            open_presets_window(app);
+        }
         CANCEL_SCHEDULED_COMMAND_ID | CANCEL_PAUSE_COMMAND_ID => cancel_scheduled_action(app),
         START_IN_1_COMMAND_ID
         | START_IN_5_COMMAND_ID
@@ -4195,7 +4284,7 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
         | PAUSE_FOR_30_COMMAND_ID
         | PAUSE_FOR_60_COMMAND_ID => {
             if let Some((action, duration)) = duration_command(command) {
-                schedule_duration_action(app, action, duration);
+                schedule_duration_action(app, action, duration.to_preset());
             }
         }
         ID_STARTUP_ON => set_startup(app, true),
@@ -4306,7 +4395,11 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
                 }
             }
         }
-        _ => {}
+        _ => {
+            if let Some((action, preset_index)) = preset_command(command) {
+                schedule_preset_action(app, action, preset_index);
+            }
+        }
     }
     let keeps_open = menu_action_keeps_open(command);
     if command != ID_QUIT {
@@ -4510,6 +4603,499 @@ unsafe fn open_diagnostic_window(app: &mut App) -> bool {
         request_diagnostic_refresh(app);
         true
     }
+}
+
+const PRESETS_MARGIN: i32 = 10;
+const PRESETS_LIST_HEIGHT: i32 = 168;
+const PRESETS_LABEL_HEIGHT: i32 = 18;
+const PRESETS_INPUT_HEIGHT: i32 = 24;
+const PRESETS_BUTTON_HEIGHT: i32 = 26;
+const PRESETS_ROW_GAP: i32 = 8;
+const PRESETS_BUTTON_GAP: i32 = 8;
+const PRESETS_INPUT_LIMIT: usize = 64;
+
+fn persist_presets(app: &mut App) -> bool {
+    let mut next = app.config.clone();
+    next.schedule_presets_seconds = app.presets_manager.to_seconds_list();
+    if let Err(error) = config::save_atomic(&app.config_path, &next) {
+        app.record(
+            "config.save.result",
+            format!("result=error setting=schedule_presets_seconds error={error}"),
+        );
+        return false;
+    }
+    app.record(
+        "config.save.result",
+        "result=success setting=schedule_presets_seconds",
+    );
+    app.config = next;
+    true
+}
+
+unsafe fn populate_presets_list(app: &App) {
+    let Some(listbox) = app.presets_listbox else {
+        return;
+    };
+    let _ = SendMessageW(listbox, LB_RESETCONTENT, 0, 0);
+    for preset in app.presets_manager.presets() {
+        let label = wide(&preset.format_label());
+        let _ = SendMessageW(listbox, LB_ADDSTRING, 0, label.as_ptr() as isize);
+    }
+}
+
+unsafe fn presets_input_text(input: *mut c_void) -> String {
+    let length = GetWindowTextLengthW(input);
+    if length <= 0 {
+        return String::new();
+    }
+    let mut buffer = vec![0u16; length as usize + 1];
+    let copied = GetWindowTextW(input, buffer.as_mut_ptr(), buffer.len() as i32);
+    if copied <= 0 {
+        return String::new();
+    }
+    buffer.truncate(copied as usize);
+    String::from_utf16_lossy(&buffer)
+}
+
+unsafe fn presets_add(app: &mut App) {
+    let Some(input) = app.presets_input else {
+        app.record("presets.add", "result=failed reason=input_missing");
+        return;
+    };
+    let text = presets_input_text(input);
+    match DurationPreset::parse(&text) {
+        Ok(preset) => match app.presets_manager.add(preset) {
+            Ok(()) => {
+                app.record(
+                    "presets.add",
+                    format!("result=added seconds={}", preset.seconds()),
+                );
+                persist_presets(app);
+                populate_presets_list(app);
+                let empty = wide("");
+                let _ = SetWindowTextW(input, empty.as_ptr());
+            }
+            Err(error) => {
+                app.record("presets.add", format!("result=rejected error={error}"));
+            }
+        },
+        Err(error) => {
+            app.record("presets.add", format!("result=invalid error={error}"));
+        }
+    }
+}
+
+unsafe fn presets_delete_selected(app: &mut App) {
+    let Some(listbox) = app.presets_listbox else {
+        app.record("presets.delete", "result=failed reason=listbox_missing");
+        return;
+    };
+    let selection = SendMessageW(listbox, LB_GETCURSEL, 0, 0);
+    if selection == LB_ERR || selection < 0 {
+        app.record("presets.delete", "result=rejected reason=no_selection");
+        return;
+    }
+    match app.presets_manager.remove(selection as usize) {
+        Ok(()) => {
+            app.record(
+                "presets.delete",
+                format!("result=removed index={selection}"),
+            );
+            persist_presets(app);
+            populate_presets_list(app);
+        }
+        Err(error) => {
+            app.record("presets.delete", format!("result=rejected error={error}"));
+        }
+    }
+}
+
+unsafe fn presets_reset(app: &mut App) {
+    app.presets_manager.reset_defaults();
+    app.record("presets.reset", "result=restored defaults=factory");
+    persist_presets(app);
+    populate_presets_list(app);
+}
+
+unsafe fn presets_children_ready(app: &App) -> bool {
+    [app.presets_listbox, app.presets_input]
+        .iter()
+        .all(|control| control.is_some_and(|hwnd| !hwnd.is_null() && IsWindow(hwnd) != 0))
+}
+
+unsafe fn open_presets_window(app: &mut App) -> bool {
+    if let Some(window) = app.presets_window {
+        if IsWindow(window) == 0 {
+            app.record(
+                "presets.window.invalid",
+                "result=cleared reason=not_a_window",
+            );
+            app.presets_window = None;
+            app.presets_listbox = None;
+            app.presets_input = None;
+        } else {
+            if IsIconic(window) != 0 {
+                ShowWindow(window, SW_RESTORE);
+            } else {
+                ShowWindow(window, SW_SHOWNORMAL);
+            }
+            UpdateWindow(window);
+            SetForegroundWindow(window);
+            app.record("presets.window.result", "result=focused_existing");
+            return true;
+        }
+    }
+    let class_name = wide(PRESETS_WINDOW_CLASS);
+    let title = wide(PRESETS_WINDOW_TITLE);
+    let dpi = GetDpiForSystem().max(96);
+    let window = CreateWindowExW(
+        0,
+        class_name.as_ptr(),
+        title.as_ptr(),
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+        140,
+        140,
+        scale_logical(PRESETS_WINDOW_WIDTH, dpi),
+        scale_logical(PRESETS_WINDOW_HEIGHT, dpi),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        GetModuleHandleW(std::ptr::null()),
+        app as *mut App as *mut c_void,
+    );
+    if window.is_null() {
+        app.record(
+            "presets.window.result",
+            format!("result=create_failed raw_status={}", GetLastError()),
+        );
+        return false;
+    }
+    app.presets_window = Some(window);
+    if !presets_children_ready(app) {
+        app.record(
+            "presets.window.invalid",
+            "result=destroyed reason=create_returned_without_required_children",
+        );
+        let _ = DestroyWindow(window);
+        app.presets_window = None;
+        app.presets_listbox = None;
+        app.presets_input = None;
+        return false;
+    }
+    ShowWindow(window, SW_SHOWNORMAL);
+    UpdateWindow(window);
+    SetForegroundWindow(window);
+    app.record("presets.window.result", "result=opened");
+    true
+}
+
+unsafe extern "system" fn presets_window_proc(
+    hwnd: *mut c_void,
+    message: u32,
+    w_param: usize,
+    l_param: isize,
+) -> isize {
+    let app = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;
+    if message == WM_CREATE {
+        let create = l_param as *const CreateStruct;
+        let app_ptr = app_create_params(create);
+        if app_ptr.is_null() {
+            return diagnostic_create_failure_result();
+        }
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, app_ptr as isize);
+        let app = app_ptr as *mut App;
+        let dpi = GetDpiForWindow(hwnd).max(96);
+        let margin = scale_logical(PRESETS_MARGIN, dpi);
+        let row_gap = scale_logical(PRESETS_ROW_GAP, dpi);
+        let list_height = scale_logical(PRESETS_LIST_HEIGHT, dpi);
+        let label_height = scale_logical(PRESETS_LABEL_HEIGHT, dpi);
+        let input_height = scale_logical(PRESETS_INPUT_HEIGHT, dpi);
+        let button_height = scale_logical(PRESETS_BUTTON_HEIGHT, dpi);
+        let button_gap = scale_logical(PRESETS_BUTTON_GAP, dpi);
+        let mut client = Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        let client_width = if GetClientRect(hwnd, &mut client) != 0 {
+            (client.right - client.left).max(margin * 2 + button_gap * 3 + 4)
+        } else {
+            scale_logical(PRESETS_WINDOW_WIDTH - 16, dpi)
+        };
+        let content_width = client_width - margin * 2;
+        let instance = GetModuleHandleW(std::ptr::null());
+        let mut top = margin;
+        let listbox = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            wide("LISTBOX").as_ptr(),
+            std::ptr::null(),
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | LBS_NOTIFY,
+            margin,
+            top,
+            content_width,
+            list_height,
+            hwnd,
+            ID_PRESETS_LISTBOX as *mut c_void,
+            instance,
+            std::ptr::null_mut(),
+        );
+        top += list_height + row_gap;
+        let label = CreateWindowExW(
+            0,
+            wide("STATIC").as_ptr(),
+            wide("New interval, for example 15m or 1h 30m").as_ptr(),
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            margin,
+            top,
+            content_width,
+            label_height,
+            hwnd,
+            ID_PRESETS_LABEL as *mut c_void,
+            instance,
+            std::ptr::null_mut(),
+        );
+        top += label_height + 2;
+        let input = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            wide("EDIT").as_ptr(),
+            std::ptr::null(),
+            WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
+            margin,
+            top,
+            content_width,
+            input_height,
+            hwnd,
+            ID_PRESETS_INPUT as *mut c_void,
+            instance,
+            std::ptr::null_mut(),
+        );
+        if !input.is_null() {
+            SendMessageW(input, EM_LIMITTEXT, PRESETS_INPUT_LIMIT, 0);
+        }
+        top += input_height + row_gap;
+        let button_width = (content_width - button_gap * 3).max(4) / 4;
+        let button_class = wide("BUTTON");
+        let button_style = WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON;
+        let add = CreateWindowExW(
+            0,
+            button_class.as_ptr(),
+            wide("Add").as_ptr(),
+            button_style,
+            margin,
+            top,
+            button_width,
+            button_height,
+            hwnd,
+            ID_PRESETS_ADD as *mut c_void,
+            instance,
+            std::ptr::null_mut(),
+        );
+        let delete = CreateWindowExW(
+            0,
+            button_class.as_ptr(),
+            wide("Delete").as_ptr(),
+            button_style,
+            margin + button_width + button_gap,
+            top,
+            button_width,
+            button_height,
+            hwnd,
+            ID_PRESETS_DELETE as *mut c_void,
+            instance,
+            std::ptr::null_mut(),
+        );
+        let reset = CreateWindowExW(
+            0,
+            button_class.as_ptr(),
+            wide("Reset").as_ptr(),
+            button_style,
+            margin + (button_width + button_gap) * 2,
+            top,
+            button_width,
+            button_height,
+            hwnd,
+            ID_PRESETS_RESET as *mut c_void,
+            instance,
+            std::ptr::null_mut(),
+        );
+        let close = CreateWindowExW(
+            0,
+            button_class.as_ptr(),
+            wide("Close").as_ptr(),
+            button_style,
+            margin + (button_width + button_gap) * 3,
+            top,
+            button_width,
+            button_height,
+            hwnd,
+            ID_PRESETS_CLOSE as *mut c_void,
+            instance,
+            std::ptr::null_mut(),
+        );
+        if listbox.is_null()
+            || label.is_null()
+            || input.is_null()
+            || add.is_null()
+            || delete.is_null()
+            || reset.is_null()
+            || close.is_null()
+        {
+            if !app_ptr.is_null() {
+                (*app).diagnostics.record(
+                    "native.CreateWindowExW.presets_control.error",
+                    format!(
+                        "listbox_null={} label_null={} input_null={} add_null={} delete_null={} reset_null={} close_null={} raw_status={}",
+                        listbox.is_null(),
+                        label.is_null(),
+                        input.is_null(),
+                        add.is_null(),
+                        delete.is_null(),
+                        reset.is_null(),
+                        close.is_null(),
+                        GetLastError()
+                    ),
+                );
+            }
+            destroy_created_diagnostic_controls([
+                listbox,
+                label,
+                input,
+                add,
+                delete,
+                reset,
+                close,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ]);
+            return diagnostic_create_failure_result();
+        }
+        for control in [listbox, label, input, add, delete, reset, close] {
+            set_diagnostic_control_font(control);
+        }
+        (*app).presets_listbox = Some(listbox);
+        (*app).presets_input = Some(input);
+        populate_presets_list(&*app);
+        return 0;
+    }
+    if app.is_null() {
+        return DefWindowProcW(hwnd, message, w_param, l_param);
+    }
+    if message == WM_ERASEBKGND {
+        let brush = GetSysColorBrush(COLOR_WINDOW);
+        let mut rect = Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if !brush.is_null() && GetClientRect(hwnd, &mut rect) != 0 {
+            let _ = FillRect(w_param as *mut c_void, &rect, brush);
+        }
+        return 1;
+    }
+    if message == WM_PAINT {
+        let mut paint = PaintStruct {
+            hdc: std::ptr::null_mut(),
+            erase: 0,
+            paint: Rect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            restore: 0,
+            inc_update: 0,
+            reserved: [0; 32],
+        };
+        let hdc = BeginPaint(hwnd, &mut paint);
+        if !hdc.is_null() {
+            let brush = GetSysColorBrush(COLOR_WINDOW);
+            let _ = FillRect(hdc, &paint.paint, brush);
+        }
+        let _ = EndPaint(hwnd, &paint);
+        return 0;
+    }
+    if message == WM_CTLCOLOREDIT || message == WM_CTLCOLORSTATIC {
+        let hdc = w_param as *mut c_void;
+        let brush = GetSysColorBrush(COLOR_WINDOW);
+        let _ = SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
+        let _ = SetBkColor(hdc, GetSysColor(COLOR_WINDOW));
+        return brush as isize;
+    }
+    if message == WM_COMMAND {
+        let command = w_param & 0xffff;
+        let notification = (w_param >> 16) & 0xffff;
+        if notification == BN_CLICKED {
+            match command {
+                ID_PRESETS_ADD => {
+                    presets_add(&mut *app);
+                    return 0;
+                }
+                ID_PRESETS_DELETE => {
+                    presets_delete_selected(&mut *app);
+                    return 0;
+                }
+                ID_PRESETS_RESET => {
+                    presets_reset(&mut *app);
+                    return 0;
+                }
+                ID_PRESETS_CLOSE => {
+                    let _ = DestroyWindow(hwnd);
+                    return 0;
+                }
+                _ => {}
+            }
+        }
+        if command == ID_PRESETS_LISTBOX && notification == LBN_SELCHANGE {
+            let selection = app
+                .as_ref()
+                .and_then(|app| app.presets_listbox)
+                .map_or(LB_ERR, |listbox| SendMessageW(listbox, LB_GETCURSEL, 0, 0));
+            (*app).record("presets.selection", format!("index={selection}"));
+            return 0;
+        }
+        if command == ID_PRESETS_INPUT && notification == EN_CHANGE {
+            return 0;
+        }
+    }
+    if message == WM_SIZE {
+        return 0;
+    }
+    if message == WM_DPICHANGED {
+        let suggested = l_param as *const Rect;
+        if !suggested.is_null() {
+            let width = ((*suggested).right - (*suggested).left).max(0);
+            let height = ((*suggested).bottom - (*suggested).top).max(0);
+            let _ = SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                (*suggested).left,
+                (*suggested).top,
+                width,
+                height,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+        return 0;
+    }
+    if message == WM_CLOSE {
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    if message == WM_NCDESTROY {
+        (*app).presets_window = None;
+        (*app).presets_listbox = None;
+        (*app).presets_input = None;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+    }
+    DefWindowProcW(hwnd, message, w_param, l_param)
 }
 
 fn power_state_label(power: PowerState) -> &'static str {
@@ -8935,18 +9521,23 @@ mod tests {
     #[test]
     fn schedule_menu_positions_match_the_single_label_source() {
         let items = crate::tray_surface::duration_menu_items(None);
-        assert_eq!(items.len(), 5);
+        assert_eq!(items.len(), 6);
         for item in &items[..3] {
             assert_eq!(item.command_id, None);
         }
-        assert_eq!(SCHEDULE_MENU_CANCEL_POSITION, 4);
-        assert_eq!(SCHEDULE_MENU_RESUME_POSITION, 5);
+        assert_eq!(SCHEDULE_MENU_PRESETS_POSITION, 4);
+        assert_eq!(SCHEDULE_MENU_CANCEL_POSITION, 6);
+        assert_eq!(SCHEDULE_MENU_RESUME_POSITION, 7);
         assert_eq!(
-            items[SCHEDULE_MENU_CANCEL_POSITION - 1].command_id,
+            items[SCHEDULE_MENU_PRESETS_POSITION - 1].command_id,
+            Some(crate::tray_surface::SCHEDULE_PRESETS_COMMAND_ID)
+        );
+        assert_eq!(
+            items[SCHEDULE_MENU_CANCEL_POSITION - 2].command_id,
             Some(crate::tray_surface::CANCEL_SCHEDULED_COMMAND_ID)
         );
         assert_eq!(
-            items[SCHEDULE_MENU_RESUME_POSITION - 1].command_id,
+            items[SCHEDULE_MENU_RESUME_POSITION - 2].command_id,
             Some(crate::tray_surface::CANCEL_PAUSE_COMMAND_ID)
         );
     }

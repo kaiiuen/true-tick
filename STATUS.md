@@ -33,12 +33,32 @@ package metadata. Root menu order is `True™ Tick v<version>`, a separator,
 separator, and `Quit`. Start and stop are primary and stay at the top. Scheduling
 and pausing are secondary and now share one submenu instead of two, so there is
 a single duration surface. `Schedule >` contents, in order, are `Start in >`,
-`Stop in >`, `Pause for >`, a separator, `Cancel scheduled action`, and `Resume
-now`. The declared menu vector in `tray_surface.rs` and the rendered menu both use
-`Pause for >`. Pause has fixed 5 minute, 15 minute, 30 minute, and 1 hour
-choices. Schedule has Start in, Stop in, Pause for, Cancel scheduled action, and
-`Resume now` when a pause is active. There are no two scheduling surfaces, custom
-duration, persistence, stacking, or indefinite pause. Start is explicitly disabled
+`Stop in >`, `Pause for >`, `Interval presets...`, a separator, `Cancel scheduled
+action`, and `Resume now`. The declared menu vector in `tray_surface.rs` and the
+rendered menu both use `Pause for >`. Pause presets are 5 minutes, 15 minutes,
+30 minutes, and 1 hour by default. Schedule has Start in, Stop in, Pause for,
+`Interval presets...`, Cancel scheduled action, and `Resume now` when a pause is
+active. Each duration submenu is generated dynamically from the active preset
+list rather than a fixed command table, so custom intervals appear in Start in,
+Stop in, and Pause for without rebuilding the root menu. Dynamic preset command
+identifiers occupy bounded per-action ranges, so preset identity is stable while
+the menu is open. `Interval presets...` opens a compact native window registered
+under the `TrueTickPresetsClass` class and titled `True™ Tick Interval Presets`.
+The window provides a ListBox showing the active presets in ascending order, a
+hinted input line for adding or editing an interval, and Add, Delete, Reset, and
+Close buttons. The input accepts natural unit text such as `45m`, `2h`, `10`,
+`30s`, and `1h30m`, where a bare number is interpreted as minutes. Every preset
+is a whole-second value from 10 seconds to 24 hours. The preset list is capped
+at 12 entries, deduplicated, and kept sorted. Delete requires a selection and
+always leaves at least one preset. Reset restores the factory list of 1 minute,
+5 minutes, 15 minutes, 30 minutes, and 1 hour. Add, Delete, and Reset persist
+the resulting preset list to `schedule_presets_seconds` in `true-tick.toml`
+through the same atomic temporary-file replacement used by other settings, so
+custom presets survive restarts. A `ScheduledAction` stores its
+`DurationPreset` directly, so custom intervals participate in scheduling with
+their exact seconds value and no clamping to a fixed choice table. Pause
+stacking, an indefinite pause, and overlapping scheduled actions remain absent.
+Start is explicitly disabled
 while a pause is active. Auto-start launches the app at Windows login. Auto-time
 controls automatic timing acquisition and defaults to off. Both tray release
 notifications open the same compact menu. Button-down and double-click
@@ -235,7 +255,7 @@ Displayed timing uses exact four-decimal millisecond formatting. The shared `Hns
 
 ## Audited v1 UX and diagnostics update
 
-The current menu hierarchy is `True™ Tick v<version>`, a separator, `Start`, `Stop`, `Schedule >`, a separator, `Auto-start`, `Auto-time`, a separator, `Status >`, `Logs`, a separator, and `Quit`. Start and stop are primary and stay at the top. Scheduling and pausing are secondary and now share one submenu instead of two, so there is a single duration surface. Inside `Schedule >`, contents are, in order, `Start in >`, `Stop in >`, `Pause for >`, a separator, `Cancel scheduled action`, and `Resume now`. The declared label vector in `tray_surface.rs` and the rendered menu both use `Pause for >`. Pause contains fixed 5 minute, 15 minute, 30 minute, and 1 hour choices. Schedule has Start in, Stop in, Pause for, Cancel scheduled action, and `Resume now` when a pause is active. There are no two scheduling surfaces, custom duration, persistence, stacking, or indefinite pause. Start is disabled while paused. Status contains only read-only State, Timing, Running for, Next action, and Ownership rows. Logs is a separate clickable action below `Status >`, not an entry inside Status.
+The current menu hierarchy is `True™ Tick v<version>`, a separator, `Start`, `Stop`, `Schedule >`, a separator, `Auto-start`, `Auto-time`, a separator, `Status >`, `Logs`, a separator, and `Quit`. Start and stop are primary and stay at the top. Scheduling and pausing are secondary and now share one submenu instead of two, so there is a single duration surface. Inside `Schedule >`, contents are, in order, `Start in >`, `Stop in >`, `Pause for >`, `Interval presets...`, a separator, `Cancel scheduled action`, and `Resume now`. The declared label vector in `tray_surface.rs` and the rendered menu both use `Pause for >`. Pause presets are 5 minutes, 15 minutes, 30 minutes, and 1 hour by default and come from the same dynamic preset list as Start in and Stop in. There are no two scheduling surfaces, stacking, or indefinite pause. `Interval presets...` opens the compact native `TrueTickPresetsClass` window titled `True™ Tick Interval Presets` with a sorted ListBox of active presets, an interval input line, and Add, Delete, Reset, and Close buttons. The input accepts natural duration text such as `45m`, `2h`, `10`, `30s`, and `1h30m`. Custom presets update all three duration submenus dynamically and persist across restarts in `schedule_presets_seconds` in `true-tick.toml`. A `ScheduledAction` stores its `DurationPreset` directly, so custom intervals from 10 seconds to 24 hours schedule with their exact seconds value and no clamping to a fixed table. Start is disabled while paused. Status contains only read-only State, Timing, Running for, Next action, and Ownership rows. Logs is a separate clickable action below `Status >`, not an entry inside Status.
 
 An open popup retains its native menu handles and runs a popup-only 500 ms refresh timer for live Status values, ownership, Next action, Start and Stop enabled state, and cancellation state. A separate one-second UI timer runs only while a schedule or pause is active. Its publication key includes the schedule generation and rounded remaining-second bucket, so the shell tooltip receives `Shell_NotifyIconW(NIM_MODIFY)` for each displayed countdown change. These timers never change policy, acquire timing, release timing, or replace the authoritative deadline or handoff timer. A five-minute pause initially displays `5m 0s`. Elapsed durations remain floored.
 

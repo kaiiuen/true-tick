@@ -2,8 +2,15 @@ use std::time::{Duration, Instant};
 use tick_core::Status;
 use tick_policy::{decide, PolicyInput, PowerState};
 
-pub const MAX_DURATION: Duration = Duration::from_secs(60 * 60);
+pub const MAX_DURATION: Duration = Duration::from_secs(MAX_PRESET_SECONDS as u64);
 pub const MAX_TIMER_INTERVAL_MS: u32 = 60 * 60 * 1_000;
+
+#[allow(dead_code)]
+pub const MIN_PRESET_SECONDS: u32 = 10;
+#[allow(dead_code)]
+pub const MAX_PRESET_SECONDS: u32 = 86_400;
+#[allow(dead_code)]
+pub const MAX_PRESETS: usize = 12;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DurationChoice {
@@ -15,6 +22,7 @@ pub(crate) enum DurationChoice {
 }
 
 impl DurationChoice {
+    #[allow(dead_code)]
     pub(crate) const fn minutes(self) -> u32 {
         match self {
             Self::OneMinute => 1,
@@ -25,10 +33,12 @@ impl DurationChoice {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) const fn duration(self) -> Duration {
         Duration::from_secs(self.minutes() as u64 * 60)
     }
 
+    #[allow(dead_code)]
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::OneMinute => "1 minute",
@@ -39,6 +49,7 @@ impl DurationChoice {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) const fn all() -> [Self; 5] {
         [
             Self::OneMinute,
@@ -49,6 +60,7 @@ impl DurationChoice {
         ]
     }
 
+    #[allow(dead_code)]
     pub(crate) const fn pause_choices() -> [Self; 4] {
         [
             Self::FiveMinutes,
@@ -56,6 +68,231 @@ impl DurationChoice {
             Self::ThirtyMinutes,
             Self::OneHour,
         ]
+    }
+
+    pub(crate) fn to_preset(self) -> DurationPreset {
+        DurationPreset::new(self.minutes() * 60).unwrap()
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct DurationPreset {
+    seconds: u32,
+}
+
+#[allow(dead_code)]
+impl DurationPreset {
+    pub fn new(seconds: u32) -> Result<Self, &'static str> {
+        if seconds < MIN_PRESET_SECONDS {
+            return Err("preset must be at least 10 seconds");
+        }
+        if seconds > MAX_PRESET_SECONDS {
+            return Err("preset must be at most 24 hours");
+        }
+        Ok(Self { seconds })
+    }
+
+    pub const fn seconds(self) -> u32 {
+        self.seconds
+    }
+
+    pub const fn minutes(self) -> u32 {
+        self.seconds / 60
+    }
+
+    pub const fn duration(self) -> Duration {
+        Duration::from_secs(self.seconds as u64)
+    }
+
+    pub fn format_label(&self) -> String {
+        let seconds = self.seconds;
+        if seconds < 60 {
+            return unit_label(seconds, "second");
+        }
+        if seconds.is_multiple_of(3600) {
+            return unit_label(seconds / 3600, "hour");
+        }
+        if seconds < 3600 && seconds.is_multiple_of(60) {
+            return unit_label(seconds / 60, "minute");
+        }
+        let hours = seconds / 3600;
+        let minutes = (seconds % 3600) / 60;
+        let remainder = seconds % 60;
+        let mut parts = Vec::new();
+        if hours > 0 {
+            parts.push(format!("{}h", hours));
+        }
+        if minutes > 0 {
+            parts.push(format!("{}m", minutes));
+        }
+        if remainder > 0 {
+            parts.push(format!("{}s", remainder));
+        }
+        parts.join(" ")
+    }
+
+    pub fn parse(text: &str) -> Result<Self, &'static str> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Err("duration text is empty");
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower
+            .chars()
+            .all(|character| character.is_ascii_digit() || character == '.')
+        {
+            let minutes: f64 = lower.parse().map_err(|_| "invalid duration number")?;
+            return Self::from_seconds_f64(minutes * 60.0);
+        }
+        let mut chars = lower.chars().peekable();
+        let mut total_seconds = 0.0f64;
+        let mut consumed_segment = false;
+        loop {
+            while matches!(chars.peek(), Some(character) if character.is_whitespace()) {
+                chars.next();
+            }
+            if chars.peek().is_none() {
+                break;
+            }
+            let mut number_text = String::new();
+            let mut seen_digit = false;
+            let mut seen_dot = false;
+            while let Some(character) = chars.peek().copied() {
+                if character.is_ascii_digit() {
+                    seen_digit = true;
+                    number_text.push(character);
+                    chars.next();
+                } else if character == '.' && !seen_dot {
+                    seen_dot = true;
+                    number_text.push(character);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if !seen_digit {
+                return Err("expected a number in duration text");
+            }
+            let value: f64 = number_text.parse().map_err(|_| "invalid duration number")?;
+            let mut unit = String::new();
+            while let Some(character) = chars.peek().copied() {
+                if character.is_ascii_alphabetic() {
+                    unit.push(character);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            let multiplier = match unit.as_str() {
+                "s" | "sec" | "secs" | "second" | "seconds" => 1.0,
+                "m" | "min" | "mins" | "minute" | "minutes" => 60.0,
+                "h" | "hr" | "hrs" | "hour" | "hours" => 3600.0,
+                "" => return Err("expected a unit after the number"),
+                _ => return Err("unknown duration unit"),
+            };
+            total_seconds += value * multiplier;
+            consumed_segment = true;
+        }
+        if !consumed_segment {
+            return Err("duration text is empty");
+        }
+        Self::from_seconds_f64(total_seconds)
+    }
+
+    fn from_seconds_f64(total_seconds: f64) -> Result<Self, &'static str> {
+        if !(total_seconds.is_finite()
+            && total_seconds >= MIN_PRESET_SECONDS as f64
+            && total_seconds <= MAX_PRESET_SECONDS as f64)
+        {
+            return Err("preset must be between 10 seconds and 24 hours");
+        }
+        Self::new(total_seconds.round() as u32)
+    }
+}
+
+#[allow(dead_code)]
+fn unit_label(value: u32, unit: &str) -> String {
+    if value == 1 {
+        format!("{} {}", value, unit)
+    } else {
+        format!("{} {}s", value, unit)
+    }
+}
+
+#[allow(dead_code)]
+pub struct PresetsManager {
+    presets: Vec<DurationPreset>,
+}
+
+#[allow(dead_code)]
+impl PresetsManager {
+    pub fn new() -> Self {
+        Self {
+            presets: Self::default_presets(),
+        }
+    }
+
+    pub fn default_presets() -> Vec<DurationPreset> {
+        [60, 300, 900, 1800, 3600]
+            .into_iter()
+            .filter_map(|seconds| DurationPreset::new(seconds).ok())
+            .collect()
+    }
+
+    pub fn presets(&self) -> &[DurationPreset] {
+        &self.presets
+    }
+
+    pub fn add(&mut self, preset: DurationPreset) -> Result<(), &'static str> {
+        if self.presets.contains(&preset) {
+            return Err("preset already exists");
+        }
+        if self.presets.len() >= MAX_PRESETS {
+            return Err("maximum of 12 presets reached");
+        }
+        self.presets.push(preset);
+        self.presets.sort();
+        Ok(())
+    }
+
+    pub fn remove(&mut self, index: usize) -> Result<(), &'static str> {
+        if index >= self.presets.len() {
+            return Err("preset index out of range");
+        }
+        if self.presets.len() <= 1 {
+            return Err("at least one preset must remain");
+        }
+        self.presets.remove(index);
+        Ok(())
+    }
+
+    pub fn reset_defaults(&mut self) {
+        self.presets = Self::default_presets();
+    }
+
+    pub fn to_seconds_list(&self) -> Vec<u32> {
+        self.presets.iter().map(|preset| preset.seconds()).collect()
+    }
+
+    pub fn from_seconds_list(list: &[u32]) -> Self {
+        let mut presets: Vec<DurationPreset> = list
+            .iter()
+            .filter_map(|seconds| DurationPreset::new(*seconds).ok())
+            .collect();
+        presets.sort();
+        presets.dedup();
+        presets.truncate(MAX_PRESETS);
+        if presets.is_empty() {
+            presets = Self::default_presets();
+        }
+        Self { presets }
+    }
+}
+
+impl Default for PresetsManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -79,7 +316,7 @@ impl DurationAction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ScheduledAction {
     pub(crate) action: DurationAction,
-    pub(crate) duration: DurationChoice,
+    pub(crate) duration: DurationPreset,
     pub(crate) deadline: Instant,
     pub(crate) generation: u64,
 }
@@ -150,7 +387,7 @@ impl DurationCoordinator {
     pub(crate) fn schedule(
         &mut self,
         action: DurationAction,
-        duration: DurationChoice,
+        duration: DurationPreset,
         now: Instant,
     ) -> ScheduleRequest {
         self.generation = self.generation.saturating_add(1);
@@ -238,7 +475,7 @@ mod tests {
             DurationChoice::pause_choices().map(DurationChoice::minutes),
             [5, 15, 30, 60]
         );
-        assert_eq!(DurationChoice::OneHour.duration(), MAX_DURATION);
+        assert_eq!(DurationChoice::OneHour.to_preset().minutes(), 60);
         assert_eq!(DurationChoice::OneMinute.label(), "1 minute");
     }
 
@@ -252,7 +489,7 @@ mod tests {
         ] {
             let mut coordinator = DurationCoordinator::new();
             let ScheduleRequest::Started(scheduled) =
-                coordinator.schedule(action, DurationChoice::FifteenMinutes, now)
+                coordinator.schedule(action, DurationChoice::FifteenMinutes.to_preset(), now)
             else {
                 panic!("first schedule must start");
             };
@@ -269,7 +506,7 @@ mod tests {
             for duration in DurationChoice::all() {
                 let mut coordinator = DurationCoordinator::new();
                 let ScheduleRequest::Started(scheduled) =
-                    coordinator.schedule(action, duration, now)
+                    coordinator.schedule(action, duration.to_preset(), now)
                 else {
                     panic!("first schedule must start");
                 };
@@ -283,14 +520,16 @@ mod tests {
     fn replacement_is_latest_wins_and_only_one_action_remains() {
         let now = start();
         let mut coordinator = DurationCoordinator::new();
-        let ScheduleRequest::Started(first) =
-            coordinator.schedule(DurationAction::Start, DurationChoice::FiveMinutes, now)
-        else {
+        let ScheduleRequest::Started(first) = coordinator.schedule(
+            DurationAction::Start,
+            DurationChoice::FiveMinutes.to_preset(),
+            now,
+        ) else {
             panic!("first schedule must start");
         };
         let ScheduleRequest::Replaced { previous, current } = coordinator.schedule(
             DurationAction::Stop,
-            DurationChoice::OneHour,
+            DurationChoice::OneHour.to_preset(),
             now + Duration::from_secs(1),
         ) else {
             panic!("second schedule must replace");
@@ -305,7 +544,11 @@ mod tests {
     fn pause_is_active_immediately_and_pause_choice_is_bounded() {
         let now = start();
         let mut coordinator = DurationCoordinator::new();
-        coordinator.schedule(DurationAction::Pause, DurationChoice::FiveMinutes, now);
+        coordinator.schedule(
+            DurationAction::Pause,
+            DurationChoice::FiveMinutes.to_preset(),
+            now,
+        );
         assert!(coordinator.active());
         assert!(coordinator.pause_active());
         assert_eq!(
@@ -318,7 +561,11 @@ mod tests {
     fn cancellation_invalidates_the_old_generation() {
         let now = start();
         let mut coordinator = DurationCoordinator::new();
-        coordinator.schedule(DurationAction::Start, DurationChoice::FiveMinutes, now);
+        coordinator.schedule(
+            DurationAction::Start,
+            DurationChoice::FiveMinutes.to_preset(),
+            now,
+        );
         let old_generation = coordinator.generation();
         assert!(coordinator.cancel().is_some());
         assert!(!coordinator.active());
@@ -338,10 +585,10 @@ mod tests {
             DurationAction::Pause,
         ] {
             let mut coordinator = DurationCoordinator::new();
-            coordinator.schedule(action, DurationChoice::FiveMinutes, now);
+            coordinator.schedule(action, DurationChoice::FiveMinutes.to_preset(), now);
             let replaced = coordinator.schedule(
                 action,
-                DurationChoice::FifteenMinutes,
+                DurationChoice::FifteenMinutes.to_preset(),
                 now + Duration::from_secs(1),
             );
             let current = match replaced {
@@ -370,10 +617,14 @@ mod tests {
     fn stale_replacement_generation_cannot_fire_the_new_action() {
         let now = start();
         let mut coordinator = DurationCoordinator::new();
-        coordinator.schedule(DurationAction::Pause, DurationChoice::FiveMinutes, now);
+        coordinator.schedule(
+            DurationAction::Pause,
+            DurationChoice::FiveMinutes.to_preset(),
+            now,
+        );
         coordinator.schedule(
             DurationAction::Start,
-            DurationChoice::ThirtyMinutes,
+            DurationChoice::ThirtyMinutes.to_preset(),
             now + Duration::from_secs(1),
         );
         assert_eq!(
@@ -410,8 +661,122 @@ mod tests {
         assert_eq!(timer_interval_ms(Duration::ZERO), 1);
         assert_eq!(timer_interval_ms(MAX_DURATION), MAX_TIMER_INTERVAL_MS);
         assert_eq!(
-            timer_interval_ms(Duration::from_secs(60 * 60 + 1)),
+            timer_interval_ms(Duration::from_secs(86_401)),
             MAX_TIMER_INTERVAL_MS
         );
+    }
+
+    #[test]
+    fn default_presets_match_factory_intervals() {
+        let presets = PresetsManager::default_presets();
+        let seconds: Vec<u32> = presets.iter().map(|preset| preset.seconds()).collect();
+        assert_eq!(seconds, vec![60, 300, 900, 1800, 3600]);
+        let manager = PresetsManager::new();
+        assert_eq!(manager.to_seconds_list(), vec![60, 300, 900, 1800, 3600]);
+    }
+
+    #[test]
+    fn preset_bounds_are_enforced() {
+        assert!(DurationPreset::new(9).is_err());
+        assert_eq!(DurationPreset::new(10).unwrap().seconds(), 10);
+        assert_eq!(DurationPreset::new(86_400).unwrap().seconds(), 86_400);
+        assert!(DurationPreset::new(86_401).is_err());
+    }
+
+    #[test]
+    fn preset_labels_format_seconds_minutes_hours_and_mixed() {
+        assert_eq!(
+            DurationPreset::new(30).unwrap().format_label(),
+            "30 seconds"
+        );
+        assert_eq!(DurationPreset::new(60).unwrap().format_label(), "1 minute");
+        assert_eq!(
+            DurationPreset::new(300).unwrap().format_label(),
+            "5 minutes"
+        );
+        assert_eq!(
+            DurationPreset::new(2700).unwrap().format_label(),
+            "45 minutes"
+        );
+        assert_eq!(DurationPreset::new(3600).unwrap().format_label(), "1 hour");
+        assert_eq!(DurationPreset::new(5400).unwrap().format_label(), "1h 30m");
+    }
+
+    #[test]
+    fn preset_parse_handles_natural_strings() {
+        assert_eq!(DurationPreset::parse("10").unwrap().seconds(), 600);
+        assert_eq!(DurationPreset::parse("30s").unwrap().seconds(), 30);
+        assert_eq!(DurationPreset::parse("5m").unwrap().seconds(), 300);
+        assert_eq!(DurationPreset::parse("45min").unwrap().seconds(), 2700);
+        assert_eq!(DurationPreset::parse("2h").unwrap().seconds(), 7200);
+        assert_eq!(DurationPreset::parse("1.5h").unwrap().seconds(), 5400);
+        assert_eq!(DurationPreset::parse("1h30m").unwrap().seconds(), 5400);
+        assert_eq!(DurationPreset::parse("1h 30m").unwrap().seconds(), 5400);
+    }
+
+    #[test]
+    fn preset_parse_rejects_invalid_and_out_of_range_text() {
+        assert!(DurationPreset::parse("").is_err());
+        assert!(DurationPreset::parse("   ").is_err());
+        assert!(DurationPreset::parse("abc").is_err());
+        assert!(DurationPreset::parse("5x").is_err());
+        assert!(DurationPreset::parse("0").is_err());
+        assert!(DurationPreset::parse("0.1m").is_err());
+        assert!(DurationPreset::parse("25h").is_err());
+        assert!(DurationPreset::parse("9s").is_err());
+        assert!(DurationPreset::parse("m").is_err());
+    }
+
+    #[test]
+    fn manager_add_deduplicates_sorts_and_enforces_cap() {
+        let mut manager = PresetsManager::new();
+        assert!(manager.add(DurationPreset::new(120).unwrap()).is_ok());
+        assert_eq!(
+            manager.to_seconds_list(),
+            vec![60, 120, 300, 900, 1800, 3600]
+        );
+        assert!(manager.add(DurationPreset::new(120).unwrap()).is_err());
+        for seconds in [20, 30, 40, 50, 70, 80] {
+            let result = manager.add(DurationPreset::new(seconds).unwrap());
+            assert!(result.is_ok());
+        }
+        assert_eq!(manager.presets().len(), MAX_PRESETS);
+        assert!(manager.add(DurationPreset::new(100).unwrap()).is_err());
+        let list = manager.to_seconds_list();
+        let mut sorted = list.clone();
+        sorted.sort();
+        assert_eq!(list, sorted);
+    }
+
+    #[test]
+    fn manager_remove_rejects_invalid_index_and_last_item() {
+        let mut manager = PresetsManager::new();
+        assert!(manager.remove(999).is_err());
+        while manager.presets().len() > 1 {
+            assert!(manager.remove(0).is_ok());
+        }
+        assert!(manager.remove(0).is_err());
+        assert_eq!(manager.presets().len(), 1);
+    }
+
+    #[test]
+    fn manager_reset_defaults_restores_factory_list() {
+        let mut manager = PresetsManager::new();
+        while manager.presets().len() > 1 {
+            let _ = manager.remove(0);
+        }
+        manager.add(DurationPreset::new(120).unwrap()).unwrap();
+        manager.reset_defaults();
+        assert_eq!(manager.to_seconds_list(), vec![60, 300, 900, 1800, 3600]);
+    }
+
+    #[test]
+    fn manager_roundtrip_through_seconds_list_filters_invalid_values() {
+        let manager = PresetsManager::from_seconds_list(&[3600, 60, 300, 5, 200_000, 60]);
+        assert_eq!(manager.to_seconds_list(), vec![60, 300, 3600]);
+        let restored = PresetsManager::from_seconds_list(&manager.to_seconds_list());
+        assert_eq!(restored.to_seconds_list(), vec![60, 300, 3600]);
+        let empty = PresetsManager::from_seconds_list(&[]);
+        assert_eq!(empty.to_seconds_list(), vec![60, 300, 900, 1800, 3600]);
     }
 }
