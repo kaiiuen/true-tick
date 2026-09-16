@@ -3,6 +3,7 @@ use crate::pause::{
     acquisition_is_allowed, timer_interval_ms, CoordinatorTimerEvent, DurationAction,
     DurationCoordinator, DurationPreset, PresetsManager, ScheduleRequest,
 };
+use crate::ui::presets_window;
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
@@ -10,13 +11,13 @@ use std::sync::Arc;
 
 use tick_core::{DesiredIntent, DesiredIntentQueue};
 use tick_diagnostics::{
-    diagnostic_grid_row, diagnostic_grid_rows, diagnostic_grid_rows_for_sequences, format_csv,
-    format_tsv, latest_row_selection, parse_display_limit, parse_row_selection, retention_summary,
+    diagnostic_grid_rows, diagnostic_grid_rows_for_sequences, format_csv, format_tsv,
+    latest_row_selection, parse_display_limit, parse_row_selection, retention_summary,
     row_selection_for_sequences, selected_event_sequences, selected_event_sequences_for_sequences,
     snapshot_is_truncated, truncate_utf8, verify_event_chain, DiagnosticEvent, DiagnosticGridRow,
     DiagnosticOutcome, DiagnosticPhase, DiagnosticRecord, DiagnosticSource, DiagnosticStore,
     EventCategory, NativeOutcome, OperationContext, RowSelection, DEFAULT_MAX_EVENTS,
-    MAX_FIELD_LENGTH, REPORT_COLUMNS,
+    REPORT_COLUMNS,
 };
 use tick_observation_windows::{ObservationSource, WindowsObservation};
 use tick_ownership::{OwnershipState, TimerController, TimingSnapshot, Verification};
@@ -158,8 +159,8 @@ use crate::tray_surface::{
 
 const WM_APP: u32 = 0x8000;
 const WM_TRAY: u32 = WM_APP + 1;
-const WM_CREATE: u32 = 0x0001;
-const WM_COMMAND: u32 = 0x0111;
+pub(crate) const WM_CREATE: u32 = 0x0001;
+pub(crate) const WM_COMMAND: u32 = 0x0111;
 const WM_DESTROY: u32 = 0x0002;
 const WM_POWERBROADCAST: u32 = 0x0218;
 const WM_TIMER: u32 = 0x0113;
@@ -188,66 +189,46 @@ const ID_DIAGNOSTIC_DISPLAY_LIMIT: usize = 1204;
 const ID_DIAGNOSTIC_SHOW_ALL: usize = 1205;
 const ID_DIAGNOSTIC_CATEGORY_FILTER: usize = 1206;
 const ID_DIAGNOSTIC_EXPORT_ALL: usize = 1207;
-const ID_PRESETS_LISTBOX: usize = 1301;
-const ID_PRESETS_LABEL: usize = 1302;
-const ID_PRESETS_INPUT: usize = 1303;
-const ID_PRESETS_ADD: usize = 1304;
-const ID_PRESETS_DELETE: usize = 1305;
-const ID_PRESETS_RESET: usize = 1306;
-const ID_PRESETS_CLOSE: usize = 1307;
-const LBS_NOTIFY: u32 = 0x0001;
-const LBN_SELCHANGE: usize = 1;
-const LB_ADDSTRING: u32 = 0x0180;
-const LB_RESETCONTENT: u32 = 0x0184;
-const LB_GETCURSEL: u32 = 0x0188;
-const LB_ERR: isize = -1;
-const WS_OVERLAPPED: u32 = 0x00000000;
-const WS_CAPTION: u32 = 0x00C00000;
-const WS_SYSMENU: u32 = 0x00080000;
-const PRESETS_WINDOW_TITLE: &str = "True™ Tick Interval Presets";
-const PRESETS_WINDOW_WIDTH: i32 = 380;
-const PRESETS_WINDOW_HEIGHT: i32 = 360;
-const PRESETS_WINDOW_CLASS: &str = "TrueTickPresetsClass";
-const EN_CHANGE: usize = 0x0300;
-const BN_CLICKED: usize = 0;
+pub(crate) const EN_CHANGE: usize = 0x0300;
+pub(crate) const BN_CLICKED: usize = 0;
 const CBN_SELCHANGE: usize = 1;
 const CBS_DROPDOWNLIST: u32 = 0x0003;
 const CB_ADDSTRING: u32 = 0x0143;
 const CB_SETCURSEL: u32 = 0x014E;
 const CB_GETCURSEL: u32 = 0x0147;
-const WS_VSCROLL: u32 = 0x00200000;
-const EM_LIMITTEXT: u32 = WM_USER + 1;
-const WS_TABSTOP: u32 = 0x00010000;
-const ES_AUTOHSCROLL: u32 = 0x0080;
-const BS_PUSHBUTTON: u32 = 0x00000000;
-const SS_LEFT: u32 = 0x00000000;
+pub(crate) const WS_VSCROLL: u32 = 0x00200000;
+pub(crate) const EM_LIMITTEXT: u32 = WM_USER + 1;
+pub(crate) const WS_TABSTOP: u32 = 0x00010000;
+pub(crate) const ES_AUTOHSCROLL: u32 = 0x0080;
+pub(crate) const BS_PUSHBUTTON: u32 = 0x00000000;
+pub(crate) const SS_LEFT: u32 = 0x00000000;
 
-const WM_SIZE: u32 = 0x0005;
+pub(crate) const WM_SIZE: u32 = 0x0005;
 const WM_SYSCOLORCHANGE: u32 = 0x0015;
 const WM_SETTINGCHANGE: u32 = 0x001A;
-const WM_DPICHANGED: u32 = 0x02E0;
+pub(crate) const WM_DPICHANGED: u32 = 0x02E0;
 const WM_THEMECHANGED: u32 = 0x031A;
 const WM_SETREDRAW: u32 = 0x000B;
-const WM_PAINT: u32 = 0x000F;
-const WM_CLOSE: u32 = 0x0010;
-const WM_ERASEBKGND: u32 = 0x0014;
-const WM_NCDESTROY: u32 = 0x0082;
+pub(crate) const WM_PAINT: u32 = 0x000F;
+pub(crate) const WM_CLOSE: u32 = 0x0010;
+pub(crate) const WM_ERASEBKGND: u32 = 0x0014;
+pub(crate) const WM_NCDESTROY: u32 = 0x0082;
 const WM_SETFOCUS: u32 = 0x0007;
 const WM_GETMINMAXINFO: u32 = 0x0024;
-const WM_CTLCOLOREDIT: u32 = 0x0133;
-const WM_CTLCOLORSTATIC: u32 = 0x0138;
+pub(crate) const WM_CTLCOLOREDIT: u32 = 0x0133;
+pub(crate) const WM_CTLCOLORSTATIC: u32 = 0x0138;
 const WM_SETFONT: u32 = 0x0030;
 const GWL_STYLE: i32 = -16;
 const GWL_EXSTYLE: i32 = -20;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf0000;
-const WS_VISIBLE: u32 = 0x10000000;
-const WS_BORDER: u32 = 0x00800000;
-const WS_CLIPCHILDREN: u32 = 0x02000000;
-const WS_CLIPSIBLINGS: u32 = 0x04000000;
+pub(crate) const WS_VISIBLE: u32 = 0x10000000;
+pub(crate) const WS_BORDER: u32 = 0x00800000;
+pub(crate) const WS_CLIPCHILDREN: u32 = 0x02000000;
+pub(crate) const WS_CLIPSIBLINGS: u32 = 0x04000000;
 const WS_EX_TOOLWINDOW: u32 = 0x00000080;
 const WS_EX_APPWINDOW: u32 = 0x00040000;
-const SW_SHOWNORMAL: i32 = 1;
-const SW_RESTORE: i32 = 9;
+pub(crate) const SW_SHOWNORMAL: i32 = 1;
+pub(crate) const SW_RESTORE: i32 = 9;
 const DIAGNOSTIC_WINDOW_TITLE: &str = "True™ Tick Status and Diagnostics";
 const DIAGNOSTIC_LOADING_SUMMARY: &str = "Loading True™ Tick diagnostics...";
 const MAX_STARTUP_STATUS_BYTES: usize = 512;
@@ -270,15 +251,15 @@ const DIAGNOSTIC_COLUMN_MAX_WIDTHS: [i32; 11] =
 // Compact logical client default. The outer rectangle is DPI adjusted before creation.
 const DIAGNOSTIC_DEFAULT_WIDTH: i32 = 1_120;
 const DIAGNOSTIC_DEFAULT_HEIGHT: i32 = 520;
-const COLOR_WINDOW: i32 = 5;
-const COLOR_WINDOWTEXT: i32 = 8;
+pub(crate) const COLOR_WINDOW: i32 = 5;
+pub(crate) const COLOR_WINDOWTEXT: i32 = 8;
 const DEFAULT_GUI_FONT: i32 = 17;
 const DIAGNOSTIC_RANGE_INPUT_LIMIT: usize = 64;
-const WS_CHILD: u32 = 0x40000000;
+pub(crate) const WS_CHILD: u32 = 0x40000000;
 const WS_HSCROLL: u32 = 0x00100000;
-const WS_EX_CLIENTEDGE: u32 = 0x00000200;
-const SWP_NOZORDER: u32 = 0x0004;
-const SWP_NOACTIVATE: u32 = 0x0010;
+pub(crate) const WS_EX_CLIENTEDGE: u32 = 0x00000200;
+pub(crate) const SWP_NOZORDER: u32 = 0x0004;
+pub(crate) const SWP_NOACTIVATE: u32 = 0x0010;
 const SWP_NOSENDCHANGING: u32 = 0x0400;
 const SB_HORZ: i32 = 0;
 const SM_CXWORKAREA: i32 = 60;
@@ -316,8 +297,8 @@ const NIF_TIP: u32 = 0x0004;
 const NIM_ADD: u32 = 0x0000;
 const NIM_DELETE: u32 = 0x0002;
 const NIM_MODIFY: u32 = 0x0001;
-const GWLP_WNDPROC: i32 = -4;
-const GWLP_USERDATA: i32 = -21;
+pub(crate) const GWLP_WNDPROC: i32 = -4;
+pub(crate) const GWLP_USERDATA: i32 = -21;
 
 const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
@@ -331,12 +312,12 @@ const MB_DEFBUTTON2: u32 = 0x0000_0100;
 const IDYES: i32 = 6;
 const CF_UNICODETEXT: u32 = 13;
 const GMEM_MOVEABLE: u32 = 0x0002;
-const MOVEFILE_REPLACE_EXISTING: u32 = 0x00000001;
-const MOVEFILE_WRITE_THROUGH: u32 = 0x00000008;
-const OFN_OVERWRITEPROMPT: u32 = 0x00000002;
-const OFN_HIDEREADONLY: u32 = 0x00000004;
-const OFN_NOCHANGEDIR: u32 = 0x00000008;
-const OFN_PATHMUSTEXIST: u32 = 0x00000800;
+const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+const OFN_OVERWRITEPROMPT: u32 = 0x2;
+const OFN_HIDEREADONLY: u32 = 0x4;
+const OFN_NOCHANGEDIR: u32 = 0x8;
+const OFN_PATHMUSTEXIST: u32 = 0x800;
 const OFN_EXPLORER: u32 = 0x00080000;
 const MAX_EXPORT_PATH_UTF16: usize = 32_768;
 
@@ -529,11 +510,11 @@ struct NotifyIconData {
 }
 
 #[repr(C)]
-struct Rect {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
+pub(crate) struct Rect {
+    pub(crate) left: i32,
+    pub(crate) top: i32,
+    pub(crate) right: i32,
+    pub(crate) bottom: i32,
 }
 
 #[repr(C)]
@@ -564,7 +545,7 @@ struct ToolInfo {
 }
 
 #[repr(C)]
-struct CreateStruct {
+pub(crate) struct CreateStruct {
     create_params: *mut c_void,
     instance: *mut c_void,
     menu: *mut c_void,
@@ -579,7 +560,7 @@ struct CreateStruct {
     extended_style: u32,
 }
 
-fn app_create_params(create: *const CreateStruct) -> *mut c_void {
+pub(crate) fn app_create_params(create: *const CreateStruct) -> *mut c_void {
     if create.is_null() {
         std::ptr::null_mut()
     } else {
@@ -615,13 +596,13 @@ struct LogFontW {
 }
 
 #[repr(C)]
-struct PaintStruct {
-    hdc: *mut c_void,
-    erase: i32,
-    paint: Rect,
-    restore: i32,
-    inc_update: i32,
-    reserved: [u8; 32],
+pub(crate) struct PaintStruct {
+    pub(crate) hdc: *mut c_void,
+    pub(crate) erase: i32,
+    pub(crate) paint: Rect,
+    pub(crate) restore: i32,
+    pub(crate) inc_update: i32,
+    pub(crate) reserved: [u8; 32],
 }
 
 #[repr(C)]
@@ -694,12 +675,12 @@ struct PublicationKey {
     scheduled: Option<(DurationAction, u64, u64)>,
 }
 
-struct App {
+pub(crate) struct App {
     controller: TimerController<WindowsTimerPlatform>,
     observation: WindowsObservation,
-    config: config::Config,
+    pub(crate) config: config::Config,
     tray_status: TrayStatus,
-    config_path: PathBuf,
+    pub(crate) config_path: PathBuf,
     executable: PathBuf,
     startup_status: String,
     taskbar_created_message: u32,
@@ -709,7 +690,7 @@ struct App {
     invalid_interval: bool,
     external_timing: bool,
     desired_intent: DesiredIntentQueue,
-    diagnostics: Arc<DiagnosticStore>,
+    pub(crate) diagnostics: Arc<DiagnosticStore>,
     diagnostic_window: Option<*mut c_void>,
     diagnostic_state_font: Option<*mut c_void>,
     diagnostic_hud_state: Option<*mut c_void>,
@@ -760,10 +741,10 @@ struct App {
     menu_help: Option<*mut c_void>,
     menu_help_text: Vec<u16>,
     pause: DurationCoordinator,
-    presets_manager: PresetsManager,
-    presets_window: Option<*mut c_void>,
-    presets_listbox: Option<*mut c_void>,
-    presets_input: Option<*mut c_void>,
+    pub(crate) presets_manager: PresetsManager,
+    pub(crate) presets_window: Option<*mut c_void>,
+    pub(crate) presets_listbox: Option<*mut c_void>,
+    pub(crate) presets_input: Option<*mut c_void>,
     duration_timer_id: Option<usize>,
     duration_timer_generation: Option<u64>,
     scheduled_operation: Option<OperationContext>,
@@ -775,130 +756,6 @@ struct App {
     last_publication: Option<PublicationKey>,
     log_directory: PathBuf,
     last_persisted_event_sequence: u64,
-}
-
-fn resolve_log_directory(executable: &Path) -> PathBuf {
-    match crate::portable::portable_root_from_slot_executable(executable) {
-        Ok(root) => root.join("Data").join("logs"),
-        Err(_) => executable.parent().unwrap_or(Path::new(".")).join("logs"),
-    }
-}
-
-fn daily_log_filename(year: u16, month: u16, day: u16) -> String {
-    format!("true-tick-{year:04}-{month:02}-{day:02}.csv")
-}
-
-fn hex_hash_string(bytes: &[u8; 32]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(64);
-    for byte in bytes.iter() {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
-}
-
-fn utc_date_now() -> (u16, u16, u16) {
-    #[repr(C)]
-    struct SystemTimeParts {
-        year: u16,
-        month: u16,
-        day_of_week: u16,
-        day: u16,
-        hour: u16,
-        minute: u16,
-        second: u16,
-        milliseconds: u16,
-    }
-    unsafe {
-        let mut parts = SystemTimeParts {
-            year: 0,
-            month: 0,
-            day_of_week: 0,
-            day: 0,
-            hour: 0,
-            minute: 0,
-            second: 0,
-            milliseconds: 0,
-        };
-        unsafe extern "system" {
-            fn GetSystemTime(time: *mut SystemTimeParts);
-        }
-        GetSystemTime(&mut parts);
-        (parts.year, parts.month, parts.day)
-    }
-}
-
-fn log_csv_escape(cell: &str) -> String {
-    let field = truncate_utf8(cell, MAX_FIELD_LENGTH);
-    if !field.contains([',', '"', '\n', '\r']) {
-        return field;
-    }
-    let mut quoted = String::with_capacity(field.len() + 2);
-    quoted.push('"');
-    for character in field.chars() {
-        if character == '"' {
-            quoted.push('"');
-        }
-        quoted.push(character);
-    }
-    quoted.push('"');
-    quoted
-}
-
-fn append_log_lines(directory: PathBuf, filename: String, lines: Vec<String>) {
-    std::thread::spawn(move || {
-        if let Err(create_error) = std::fs::create_dir_all(&directory) {
-            eprintln!("true-tick log directory create failed: {create_error}");
-            return;
-        }
-        let path = directory.join(filename);
-        match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                use std::io::Write;
-                for line in lines {
-                    if let Err(write_error) = writeln!(file, "{line}") {
-                        eprintln!("true-tick log write failed: {write_error}");
-                        return;
-                    }
-                }
-            }
-            Err(open_error) => {
-                eprintln!("true-tick log open failed: {open_error}");
-            }
-        }
-    });
-}
-
-fn flush_diagnostic_events_to_disk(app: &mut App) {
-    let events = app.diagnostics.snapshot();
-    let mut lines = Vec::new();
-    let mut last_sequence = app.last_persisted_event_sequence;
-    for (index, event) in events.iter().enumerate() {
-        if event.sequence <= app.last_persisted_event_sequence {
-            continue;
-        }
-        let row = diagnostic_grid_row(index.saturating_add(1), event);
-        let mut cells: Vec<String> = row.cells.iter().map(|cell| log_csv_escape(cell)).collect();
-        cells.push(log_csv_escape(&hex_hash_string(&event.prev_hash)));
-        cells.push(log_csv_escape(&hex_hash_string(&event.entry_hash)));
-        lines.push(cells.join(","));
-        last_sequence = event.sequence;
-    }
-    if lines.is_empty() {
-        return;
-    }
-    app.last_persisted_event_sequence = last_sequence;
-    let (year, month, day) = utc_date_now();
-    append_log_lines(
-        app.log_directory.clone(),
-        daily_log_filename(year, month, day),
-        lines,
-    );
 }
 
 pub fn run() {
@@ -938,7 +795,7 @@ pub fn run() {
             }
         };
         let executable = get_module_file_name_w_path_with_diagnostics(Some(&diagnostics));
-        let log_directory = resolve_log_directory(&executable);
+        let log_directory = crate::logging::resolve_log_directory(&executable);
         diagnostics.record("lifecycle.executable_observed", "path=redacted");
         let (is_slot_layout, portable_root_str, active_slot_selection, slot_executable_target) =
             match crate::portable::portable_root_from_slot_executable(&executable) {
@@ -1342,10 +1199,10 @@ pub fn run() {
             );
             return;
         }
-        let presets_class_name = wide(PRESETS_WINDOW_CLASS);
+        let presets_class_name = wide(presets_window::PRESETS_WINDOW_CLASS);
         let presets_class = WndClass {
             style: 0,
-            wnd_proc: Some(presets_window_proc),
+            wnd_proc: Some(presets_window::presets_window_proc),
             cls_extra: 0,
             wnd_extra: 0,
             instance: wnd_class.instance,
@@ -1564,7 +1421,11 @@ pub fn run() {
             "lifecycle.shutdown.resources",
             "result=destroyed_before_app_drop",
         );
-        flush_diagnostic_events_to_disk(app);
+        crate::logging::flush_diagnostic_events_to_disk(
+            &app.diagnostics,
+            &mut app.last_persisted_event_sequence,
+            &app.log_directory,
+        );
         drop(Box::from_raw(app_ptr));
     }
 }
@@ -1696,7 +1557,7 @@ fn clear_diagnostic_state(app: &mut App) {
     app.diagnostic_auto_fit_generation = None;
 }
 
-unsafe fn destroy_created_diagnostic_controls(controls: [*mut c_void; 16]) {
+pub(crate) unsafe fn destroy_created_diagnostic_controls(controls: [*mut c_void; 16]) {
     for control in controls {
         if !control.is_null() {
             let _ = DestroyWindow(control);
@@ -2935,7 +2796,7 @@ impl App {
         request_diagnostic_refresh(self);
     }
 
-    fn record(&mut self, name: &str, details: impl AsRef<str>) {
+    pub(crate) fn record(&mut self, name: &str, details: impl AsRef<str>) {
         let details = details.as_ref();
         let source = self
             .operation
@@ -4266,7 +4127,7 @@ unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, command: usize) 
         }
         GITHUB_COMMAND_ID => open_github_page(hwnd, app),
         SCHEDULE_PRESETS_COMMAND_ID => {
-            open_presets_window(app);
+            crate::ui::open_presets_window(app);
         }
         CANCEL_SCHEDULED_COMMAND_ID | CANCEL_PAUSE_COMMAND_ID => cancel_scheduled_action(app),
         START_IN_1_COMMAND_ID
@@ -4605,499 +4466,6 @@ unsafe fn open_diagnostic_window(app: &mut App) -> bool {
     }
 }
 
-const PRESETS_MARGIN: i32 = 10;
-const PRESETS_LIST_HEIGHT: i32 = 168;
-const PRESETS_LABEL_HEIGHT: i32 = 18;
-const PRESETS_INPUT_HEIGHT: i32 = 24;
-const PRESETS_BUTTON_HEIGHT: i32 = 26;
-const PRESETS_ROW_GAP: i32 = 8;
-const PRESETS_BUTTON_GAP: i32 = 8;
-const PRESETS_INPUT_LIMIT: usize = 64;
-
-fn persist_presets(app: &mut App) -> bool {
-    let mut next = app.config.clone();
-    next.schedule_presets_seconds = app.presets_manager.to_seconds_list();
-    if let Err(error) = config::save_atomic(&app.config_path, &next) {
-        app.record(
-            "config.save.result",
-            format!("result=error setting=schedule_presets_seconds error={error}"),
-        );
-        return false;
-    }
-    app.record(
-        "config.save.result",
-        "result=success setting=schedule_presets_seconds",
-    );
-    app.config = next;
-    true
-}
-
-unsafe fn populate_presets_list(app: &App) {
-    let Some(listbox) = app.presets_listbox else {
-        return;
-    };
-    let _ = SendMessageW(listbox, LB_RESETCONTENT, 0, 0);
-    for preset in app.presets_manager.presets() {
-        let label = wide(&preset.format_label());
-        let _ = SendMessageW(listbox, LB_ADDSTRING, 0, label.as_ptr() as isize);
-    }
-}
-
-unsafe fn presets_input_text(input: *mut c_void) -> String {
-    let length = GetWindowTextLengthW(input);
-    if length <= 0 {
-        return String::new();
-    }
-    let mut buffer = vec![0u16; length as usize + 1];
-    let copied = GetWindowTextW(input, buffer.as_mut_ptr(), buffer.len() as i32);
-    if copied <= 0 {
-        return String::new();
-    }
-    buffer.truncate(copied as usize);
-    String::from_utf16_lossy(&buffer)
-}
-
-unsafe fn presets_add(app: &mut App) {
-    let Some(input) = app.presets_input else {
-        app.record("presets.add", "result=failed reason=input_missing");
-        return;
-    };
-    let text = presets_input_text(input);
-    match DurationPreset::parse(&text) {
-        Ok(preset) => match app.presets_manager.add(preset) {
-            Ok(()) => {
-                app.record(
-                    "presets.add",
-                    format!("result=added seconds={}", preset.seconds()),
-                );
-                persist_presets(app);
-                populate_presets_list(app);
-                let empty = wide("");
-                let _ = SetWindowTextW(input, empty.as_ptr());
-            }
-            Err(error) => {
-                app.record("presets.add", format!("result=rejected error={error}"));
-            }
-        },
-        Err(error) => {
-            app.record("presets.add", format!("result=invalid error={error}"));
-        }
-    }
-}
-
-unsafe fn presets_delete_selected(app: &mut App) {
-    let Some(listbox) = app.presets_listbox else {
-        app.record("presets.delete", "result=failed reason=listbox_missing");
-        return;
-    };
-    let selection = SendMessageW(listbox, LB_GETCURSEL, 0, 0);
-    if selection == LB_ERR || selection < 0 {
-        app.record("presets.delete", "result=rejected reason=no_selection");
-        return;
-    }
-    match app.presets_manager.remove(selection as usize) {
-        Ok(()) => {
-            app.record(
-                "presets.delete",
-                format!("result=removed index={selection}"),
-            );
-            persist_presets(app);
-            populate_presets_list(app);
-        }
-        Err(error) => {
-            app.record("presets.delete", format!("result=rejected error={error}"));
-        }
-    }
-}
-
-unsafe fn presets_reset(app: &mut App) {
-    app.presets_manager.reset_defaults();
-    app.record("presets.reset", "result=restored defaults=factory");
-    persist_presets(app);
-    populate_presets_list(app);
-}
-
-unsafe fn presets_children_ready(app: &App) -> bool {
-    [app.presets_listbox, app.presets_input]
-        .iter()
-        .all(|control| control.is_some_and(|hwnd| !hwnd.is_null() && IsWindow(hwnd) != 0))
-}
-
-unsafe fn open_presets_window(app: &mut App) -> bool {
-    if let Some(window) = app.presets_window {
-        if IsWindow(window) == 0 {
-            app.record(
-                "presets.window.invalid",
-                "result=cleared reason=not_a_window",
-            );
-            app.presets_window = None;
-            app.presets_listbox = None;
-            app.presets_input = None;
-        } else {
-            if IsIconic(window) != 0 {
-                ShowWindow(window, SW_RESTORE);
-            } else {
-                ShowWindow(window, SW_SHOWNORMAL);
-            }
-            UpdateWindow(window);
-            SetForegroundWindow(window);
-            app.record("presets.window.result", "result=focused_existing");
-            return true;
-        }
-    }
-    let class_name = wide(PRESETS_WINDOW_CLASS);
-    let title = wide(PRESETS_WINDOW_TITLE);
-    let dpi = GetDpiForSystem().max(96);
-    let window = CreateWindowExW(
-        0,
-        class_name.as_ptr(),
-        title.as_ptr(),
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-        140,
-        140,
-        scale_logical(PRESETS_WINDOW_WIDTH, dpi),
-        scale_logical(PRESETS_WINDOW_HEIGHT, dpi),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        GetModuleHandleW(std::ptr::null()),
-        app as *mut App as *mut c_void,
-    );
-    if window.is_null() {
-        app.record(
-            "presets.window.result",
-            format!("result=create_failed raw_status={}", GetLastError()),
-        );
-        return false;
-    }
-    app.presets_window = Some(window);
-    if !presets_children_ready(app) {
-        app.record(
-            "presets.window.invalid",
-            "result=destroyed reason=create_returned_without_required_children",
-        );
-        let _ = DestroyWindow(window);
-        app.presets_window = None;
-        app.presets_listbox = None;
-        app.presets_input = None;
-        return false;
-    }
-    ShowWindow(window, SW_SHOWNORMAL);
-    UpdateWindow(window);
-    SetForegroundWindow(window);
-    app.record("presets.window.result", "result=opened");
-    true
-}
-
-unsafe extern "system" fn presets_window_proc(
-    hwnd: *mut c_void,
-    message: u32,
-    w_param: usize,
-    l_param: isize,
-) -> isize {
-    let app = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;
-    if message == WM_CREATE {
-        let create = l_param as *const CreateStruct;
-        let app_ptr = app_create_params(create);
-        if app_ptr.is_null() {
-            return diagnostic_create_failure_result();
-        }
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, app_ptr as isize);
-        let app = app_ptr as *mut App;
-        let dpi = GetDpiForWindow(hwnd).max(96);
-        let margin = scale_logical(PRESETS_MARGIN, dpi);
-        let row_gap = scale_logical(PRESETS_ROW_GAP, dpi);
-        let list_height = scale_logical(PRESETS_LIST_HEIGHT, dpi);
-        let label_height = scale_logical(PRESETS_LABEL_HEIGHT, dpi);
-        let input_height = scale_logical(PRESETS_INPUT_HEIGHT, dpi);
-        let button_height = scale_logical(PRESETS_BUTTON_HEIGHT, dpi);
-        let button_gap = scale_logical(PRESETS_BUTTON_GAP, dpi);
-        let mut client = Rect {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        };
-        let client_width = if GetClientRect(hwnd, &mut client) != 0 {
-            (client.right - client.left).max(margin * 2 + button_gap * 3 + 4)
-        } else {
-            scale_logical(PRESETS_WINDOW_WIDTH - 16, dpi)
-        };
-        let content_width = client_width - margin * 2;
-        let instance = GetModuleHandleW(std::ptr::null());
-        let mut top = margin;
-        let listbox = CreateWindowExW(
-            WS_EX_CLIENTEDGE,
-            wide("LISTBOX").as_ptr(),
-            std::ptr::null(),
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | LBS_NOTIFY,
-            margin,
-            top,
-            content_width,
-            list_height,
-            hwnd,
-            ID_PRESETS_LISTBOX as *mut c_void,
-            instance,
-            std::ptr::null_mut(),
-        );
-        top += list_height + row_gap;
-        let label = CreateWindowExW(
-            0,
-            wide("STATIC").as_ptr(),
-            wide("New interval, for example 15m or 1h 30m").as_ptr(),
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            margin,
-            top,
-            content_width,
-            label_height,
-            hwnd,
-            ID_PRESETS_LABEL as *mut c_void,
-            instance,
-            std::ptr::null_mut(),
-        );
-        top += label_height + 2;
-        let input = CreateWindowExW(
-            WS_EX_CLIENTEDGE,
-            wide("EDIT").as_ptr(),
-            std::ptr::null(),
-            WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
-            margin,
-            top,
-            content_width,
-            input_height,
-            hwnd,
-            ID_PRESETS_INPUT as *mut c_void,
-            instance,
-            std::ptr::null_mut(),
-        );
-        if !input.is_null() {
-            SendMessageW(input, EM_LIMITTEXT, PRESETS_INPUT_LIMIT, 0);
-        }
-        top += input_height + row_gap;
-        let button_width = (content_width - button_gap * 3).max(4) / 4;
-        let button_class = wide("BUTTON");
-        let button_style = WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON;
-        let add = CreateWindowExW(
-            0,
-            button_class.as_ptr(),
-            wide("Add").as_ptr(),
-            button_style,
-            margin,
-            top,
-            button_width,
-            button_height,
-            hwnd,
-            ID_PRESETS_ADD as *mut c_void,
-            instance,
-            std::ptr::null_mut(),
-        );
-        let delete = CreateWindowExW(
-            0,
-            button_class.as_ptr(),
-            wide("Delete").as_ptr(),
-            button_style,
-            margin + button_width + button_gap,
-            top,
-            button_width,
-            button_height,
-            hwnd,
-            ID_PRESETS_DELETE as *mut c_void,
-            instance,
-            std::ptr::null_mut(),
-        );
-        let reset = CreateWindowExW(
-            0,
-            button_class.as_ptr(),
-            wide("Reset").as_ptr(),
-            button_style,
-            margin + (button_width + button_gap) * 2,
-            top,
-            button_width,
-            button_height,
-            hwnd,
-            ID_PRESETS_RESET as *mut c_void,
-            instance,
-            std::ptr::null_mut(),
-        );
-        let close = CreateWindowExW(
-            0,
-            button_class.as_ptr(),
-            wide("Close").as_ptr(),
-            button_style,
-            margin + (button_width + button_gap) * 3,
-            top,
-            button_width,
-            button_height,
-            hwnd,
-            ID_PRESETS_CLOSE as *mut c_void,
-            instance,
-            std::ptr::null_mut(),
-        );
-        if listbox.is_null()
-            || label.is_null()
-            || input.is_null()
-            || add.is_null()
-            || delete.is_null()
-            || reset.is_null()
-            || close.is_null()
-        {
-            if !app_ptr.is_null() {
-                (*app).diagnostics.record(
-                    "native.CreateWindowExW.presets_control.error",
-                    format!(
-                        "listbox_null={} label_null={} input_null={} add_null={} delete_null={} reset_null={} close_null={} raw_status={}",
-                        listbox.is_null(),
-                        label.is_null(),
-                        input.is_null(),
-                        add.is_null(),
-                        delete.is_null(),
-                        reset.is_null(),
-                        close.is_null(),
-                        GetLastError()
-                    ),
-                );
-            }
-            destroy_created_diagnostic_controls([
-                listbox,
-                label,
-                input,
-                add,
-                delete,
-                reset,
-                close,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            ]);
-            return diagnostic_create_failure_result();
-        }
-        for control in [listbox, label, input, add, delete, reset, close] {
-            set_diagnostic_control_font(control);
-        }
-        (*app).presets_listbox = Some(listbox);
-        (*app).presets_input = Some(input);
-        populate_presets_list(&*app);
-        return 0;
-    }
-    if app.is_null() {
-        return DefWindowProcW(hwnd, message, w_param, l_param);
-    }
-    if message == WM_ERASEBKGND {
-        let brush = GetSysColorBrush(COLOR_WINDOW);
-        let mut rect = Rect {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        };
-        if !brush.is_null() && GetClientRect(hwnd, &mut rect) != 0 {
-            let _ = FillRect(w_param as *mut c_void, &rect, brush);
-        }
-        return 1;
-    }
-    if message == WM_PAINT {
-        let mut paint = PaintStruct {
-            hdc: std::ptr::null_mut(),
-            erase: 0,
-            paint: Rect {
-                left: 0,
-                top: 0,
-                right: 0,
-                bottom: 0,
-            },
-            restore: 0,
-            inc_update: 0,
-            reserved: [0; 32],
-        };
-        let hdc = BeginPaint(hwnd, &mut paint);
-        if !hdc.is_null() {
-            let brush = GetSysColorBrush(COLOR_WINDOW);
-            let _ = FillRect(hdc, &paint.paint, brush);
-        }
-        let _ = EndPaint(hwnd, &paint);
-        return 0;
-    }
-    if message == WM_CTLCOLOREDIT || message == WM_CTLCOLORSTATIC {
-        let hdc = w_param as *mut c_void;
-        let brush = GetSysColorBrush(COLOR_WINDOW);
-        let _ = SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
-        let _ = SetBkColor(hdc, GetSysColor(COLOR_WINDOW));
-        return brush as isize;
-    }
-    if message == WM_COMMAND {
-        let command = w_param & 0xffff;
-        let notification = (w_param >> 16) & 0xffff;
-        if notification == BN_CLICKED {
-            match command {
-                ID_PRESETS_ADD => {
-                    presets_add(&mut *app);
-                    return 0;
-                }
-                ID_PRESETS_DELETE => {
-                    presets_delete_selected(&mut *app);
-                    return 0;
-                }
-                ID_PRESETS_RESET => {
-                    presets_reset(&mut *app);
-                    return 0;
-                }
-                ID_PRESETS_CLOSE => {
-                    let _ = DestroyWindow(hwnd);
-                    return 0;
-                }
-                _ => {}
-            }
-        }
-        if command == ID_PRESETS_LISTBOX && notification == LBN_SELCHANGE {
-            let selection = app
-                .as_ref()
-                .and_then(|app| app.presets_listbox)
-                .map_or(LB_ERR, |listbox| SendMessageW(listbox, LB_GETCURSEL, 0, 0));
-            (*app).record("presets.selection", format!("index={selection}"));
-            return 0;
-        }
-        if command == ID_PRESETS_INPUT && notification == EN_CHANGE {
-            return 0;
-        }
-    }
-    if message == WM_SIZE {
-        return 0;
-    }
-    if message == WM_DPICHANGED {
-        let suggested = l_param as *const Rect;
-        if !suggested.is_null() {
-            let width = ((*suggested).right - (*suggested).left).max(0);
-            let height = ((*suggested).bottom - (*suggested).top).max(0);
-            let _ = SetWindowPos(
-                hwnd,
-                std::ptr::null_mut(),
-                (*suggested).left,
-                (*suggested).top,
-                width,
-                height,
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-        }
-        return 0;
-    }
-    if message == WM_CLOSE {
-        DestroyWindow(hwnd);
-        return 0;
-    }
-    if message == WM_NCDESTROY {
-        (*app).presets_window = None;
-        (*app).presets_listbox = None;
-        (*app).presets_input = None;
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-    }
-    DefWindowProcW(hwnd, message, w_param, l_param)
-}
-
 fn power_state_label(power: PowerState) -> &'static str {
     match power {
         PowerState::Ac => "AC",
@@ -5254,7 +4622,7 @@ fn diagnostic_state_text(app: &App) -> String {
         .to_owned()
 }
 
-fn scale_logical(value: i32, dpi: u32) -> i32 {
+pub(crate) fn scale_logical(value: i32, dpi: u32) -> i32 {
     value.saturating_mul(dpi as i32).saturating_add(95) / 96
 }
 
@@ -7279,7 +6647,11 @@ fn request_diagnostic_refresh(app: &mut App) {
 
 fn finish_diagnostic_refresh(app: &mut App, follow_up_needed: bool) {
     app.diagnostic_refreshing = false;
-    flush_diagnostic_events_to_disk(app);
+    crate::logging::flush_diagnostic_events_to_disk(
+        &app.diagnostics,
+        &mut app.last_persisted_event_sequence,
+        &app.log_directory,
+    );
     if follow_up_needed {
         app.diagnostic_refresh_follow_up_scheduled = true;
     }
@@ -7725,11 +7097,11 @@ unsafe fn handle_diagnostic_notify(app: &mut App, l_param: isize) -> bool {
     }
 }
 
-const fn diagnostic_create_failure_result() -> isize {
+pub(crate) const fn diagnostic_create_failure_result() -> isize {
     -1
 }
 
-unsafe fn set_diagnostic_control_font(control: *mut c_void) {
+pub(crate) unsafe fn set_diagnostic_control_font(control: *mut c_void) {
     if control.is_null() {
         return;
     }
@@ -8752,7 +8124,7 @@ fn returned_menu_command(result: i32) -> Option<usize> {
     (result > 0).then_some(result as usize)
 }
 
-fn wide(value: &str) -> Vec<u16> {
+pub(crate) fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
@@ -8828,7 +8200,7 @@ struct MinMaxInfo {
 extern "system" {
     fn RegisterWindowMessageW(string: *const u16) -> u32;
     fn RegisterClassW(class: *const WndClass) -> u16;
-    fn CreateWindowExW(
+    pub(crate) fn CreateWindowExW(
         ex: u32,
         class: *const u16,
         title: *const u16,
@@ -8845,7 +8217,7 @@ extern "system" {
     fn GetMessageW(message: *mut Message, hwnd: *mut c_void, min: u32, max: u32) -> i32;
     fn TranslateMessage(message: *const Message) -> i32;
     fn DispatchMessageW(message: *const Message) -> isize;
-    fn DefWindowProcW(hwnd: *mut c_void, message: u32, w: usize, l: isize) -> isize;
+    pub(crate) fn DefWindowProcW(hwnd: *mut c_void, message: u32, w: usize, l: isize) -> isize;
     fn CallWindowProcW(
         prev_wnd_proc: unsafe extern "system" fn(*mut c_void, u32, usize, isize) -> isize,
         hwnd: *mut c_void,
@@ -8853,11 +8225,11 @@ extern "system" {
         w: usize,
         l: isize,
     ) -> isize;
-    fn GetWindowLongPtrW(hwnd: *mut c_void, index: i32) -> isize;
-    fn SetWindowLongPtrW(hwnd: *mut c_void, index: i32, value: isize) -> isize;
-    fn IsWindow(window: *mut c_void) -> i32;
+    pub(crate) fn GetWindowLongPtrW(hwnd: *mut c_void, index: i32) -> isize;
+    pub(crate) fn SetWindowLongPtrW(hwnd: *mut c_void, index: i32, value: isize) -> isize;
+    pub(crate) fn IsWindow(window: *mut c_void) -> i32;
     fn IsWindowVisible(hwnd: *mut c_void) -> i32;
-    fn IsIconic(window: *mut c_void) -> i32;
+    pub(crate) fn IsIconic(window: *mut c_void) -> i32;
     fn PostQuitMessage(code: i32);
     fn PostMessageW(hwnd: *mut c_void, message: u32, w: usize, l: isize) -> i32;
     fn SetTimer(
@@ -8885,7 +8257,7 @@ extern "system" {
         new_item: usize,
         text: *const u16,
     ) -> i32;
-    fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
+    pub(crate) fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
     fn TrackPopupMenu(
         menu: *mut c_void,
         flags: u32,
@@ -8896,26 +8268,26 @@ extern "system" {
         rect: *const c_void,
     ) -> i32;
     fn DestroyMenu(menu: *mut c_void) -> i32;
-    fn DestroyWindow(window: *mut c_void) -> i32;
-    fn ShowWindow(window: *mut c_void, command: i32) -> i32;
-    fn UpdateWindow(window: *mut c_void) -> i32;
-    fn BeginPaint(window: *mut c_void, paint: *mut PaintStruct) -> *mut c_void;
-    fn EndPaint(window: *mut c_void, paint: *const PaintStruct) -> i32;
-    fn GetSysColor(index: i32) -> u32;
-    fn GetSysColorBrush(index: i32) -> *mut c_void;
-    fn SetTextColor(hdc: *mut c_void, color: u32) -> u32;
-    fn SetBkColor(hdc: *mut c_void, color: u32) -> u32;
+    pub(crate) fn DestroyWindow(window: *mut c_void) -> i32;
+    pub(crate) fn ShowWindow(window: *mut c_void, command: i32) -> i32;
+    pub(crate) fn UpdateWindow(window: *mut c_void) -> i32;
+    pub(crate) fn BeginPaint(window: *mut c_void, paint: *mut PaintStruct) -> *mut c_void;
+    pub(crate) fn EndPaint(window: *mut c_void, paint: *const PaintStruct) -> i32;
+    pub(crate) fn GetSysColor(index: i32) -> u32;
+    pub(crate) fn GetSysColorBrush(index: i32) -> *mut c_void;
+    pub(crate) fn SetTextColor(hdc: *mut c_void, color: u32) -> u32;
+    pub(crate) fn SetBkColor(hdc: *mut c_void, color: u32) -> u32;
 
-    fn SetWindowTextW(window: *mut c_void, text: *const u16) -> i32;
+    pub(crate) fn SetWindowTextW(window: *mut c_void, text: *const u16) -> i32;
     fn OpenClipboard(owner: *mut c_void) -> i32;
     fn EmptyClipboard() -> i32;
     fn SetClipboardData(format: u32, data: *mut c_void) -> *mut c_void;
     fn CloseClipboard() -> i32;
-    fn GetWindowTextLengthW(window: *mut c_void) -> i32;
-    fn GetWindowTextW(window: *mut c_void, text: *mut u16, maximum: i32) -> i32;
+    pub(crate) fn GetWindowTextLengthW(window: *mut c_void) -> i32;
+    pub(crate) fn GetWindowTextW(window: *mut c_void, text: *mut u16, maximum: i32) -> i32;
     fn GetKeyState(key: i32) -> i16;
     fn EnableWindow(window: *mut c_void, enable: i32) -> i32;
-    fn GetClientRect(window: *mut c_void, rect: *mut Rect) -> i32;
+    pub(crate) fn GetClientRect(window: *mut c_void, rect: *mut Rect) -> i32;
     fn AdjustWindowRectEx(rect: *mut Rect, style: u32, menu: i32, ex_style: u32) -> i32;
     fn AdjustWindowRectExForDpi(
         rect: *mut Rect,
@@ -8924,9 +8296,9 @@ extern "system" {
         ex_style: u32,
         dpi: u32,
     ) -> i32;
-    fn SendMessageW(hwnd: *mut c_void, message: u32, w: usize, l: isize) -> isize;
+    pub(crate) fn SendMessageW(hwnd: *mut c_void, message: u32, w: usize, l: isize) -> isize;
     fn BeginDeferWindowPos(number: i32) -> *mut c_void;
-    fn SetWindowPos(
+    pub(crate) fn SetWindowPos(
         window: *mut c_void,
         insert_after: *mut c_void,
         x: i32,
@@ -8951,11 +8323,11 @@ extern "system" {
     fn SetScrollPos(window: *mut c_void, bar: i32, position: i32, redraw: i32) -> i32;
     fn GetCursorPos(point: *mut Point) -> i32;
     fn LoadIconW(instance: *mut c_void, name: *const u16) -> *mut c_void;
-    fn GetModuleHandleW(name: *const u16) -> *mut c_void;
-    fn GetDpiForWindow(window: *mut c_void) -> u32;
-    fn GetDpiForSystem() -> u32;
+    pub(crate) fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+    pub(crate) fn GetDpiForWindow(window: *mut c_void) -> u32;
+    pub(crate) fn GetDpiForSystem() -> u32;
     fn GetSystemMetrics(index: i32) -> i32;
-    fn FillRect(hdc: *mut c_void, rect: *const Rect, brush: *mut c_void) -> i32;
+    pub(crate) fn FillRect(hdc: *mut c_void, rect: *const Rect, brush: *mut c_void) -> i32;
     fn DrawFocusRect(hdc: *mut c_void, rect: *const Rect) -> i32;
     fn GetDC(hwnd: *mut c_void) -> *mut c_void;
     fn ReleaseDC(hwnd: *mut c_void, hdc: *mut c_void) -> i32;
@@ -8986,7 +8358,7 @@ extern "system" {
 
 #[link(name = "gdi32")]
 extern "system" {
-    fn GetStockObject(index: i32) -> *mut c_void;
+    pub(crate) fn GetStockObject(index: i32) -> *mut c_void;
     fn GetObjectW(object: *mut c_void, count: i32, object_data: *mut c_void) -> i32;
     fn CreateFontIndirectW(log_font: *const LogFontW) -> *mut c_void;
     fn CreateBitmap(
@@ -9087,7 +8459,7 @@ unsafe fn get_module_file_name_w_path() -> PathBuf {
 #[link(name = "kernel32")]
 extern "system" {
     fn GetModuleFileNameW(module: *mut c_void, filename: *mut u16, size: u32) -> u32;
-    fn GetLastError() -> u32;
+    pub(crate) fn GetLastError() -> u32;
     fn CreateMutexW(
         security_attributes: *mut c_void,
         initial_owner: i32,
@@ -10171,28 +9543,5 @@ mod tests {
         let last_event = events.last().expect("event recorded");
         assert_eq!(last_event.parent_operation_id, Some(root.operation_id));
         assert_eq!(last_event.operation_id, child.operation_id);
-    }
-
-    #[test]
-    fn daily_log_filename_formats_utc_date() {
-        assert_eq!(daily_log_filename(2026, 9, 16), "true-tick-2026-09-16.csv");
-        assert_eq!(daily_log_filename(2031, 1, 5), "true-tick-2031-01-05.csv");
-    }
-
-    #[test]
-    fn hex_hash_string_formats_bytes() {
-        let bytes: [u8; 32] = [
-            0x00, 0x01, 0x0a, 0x0f, 0x10, 0x1f, 0xa0, 0xff, 0xde, 0xad, 0xbe, 0xef, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00,
-        ];
-        let rendered = hex_hash_string(&bytes);
-        assert_eq!(rendered.len(), 64);
-        assert!(rendered.starts_with("00010a0f101fa0ffdeadbeef"));
-        assert!(rendered
-            .chars()
-            .all(|character| character.is_ascii_hexdigit()));
-        let zeros = hex_hash_string(&[0u8; 32]);
-        assert_eq!(zeros, "0".repeat(64));
     }
 }
