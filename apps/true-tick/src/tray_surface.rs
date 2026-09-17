@@ -624,7 +624,15 @@ pub(crate) const fn menu_command_is_enabled_with_pause(
         ),
         1002 => !matches!(
             status,
-            TrayStatus::Stopped | TrayStatus::Pausing | TrayStatus::Stopping | TrayStatus::Paused
+            TrayStatus::Stopped
+                | TrayStatus::Blocked
+                | TrayStatus::Unsupported
+                | TrayStatus::Paused
+                | TrayStatus::Pausing
+                | TrayStatus::Stopping
+                | TrayStatus::ScheduledStart
+                | TrayStatus::Degraded
+                | TrayStatus::Pending
         ),
         1005 => !startup_enabled,
         1006 => startup_enabled,
@@ -1559,6 +1567,89 @@ mod tests {
             false,
             false,
             false,
+        ));
+    }
+
+    #[test]
+    fn stop_command_is_disabled_when_not_running_and_enabled_when_active() {
+        assert!(!menu_command_is_enabled(
+            1002,
+            TrayStatus::Blocked,
+            false,
+            false
+        ));
+        assert!(!menu_command_is_enabled(
+            1002,
+            TrayStatus::Stopped,
+            false,
+            false
+        ));
+        assert!(!menu_command_is_enabled(
+            1002,
+            TrayStatus::Unsupported,
+            false,
+            false
+        ));
+        assert!(!menu_command_is_enabled(
+            1002,
+            TrayStatus::Paused,
+            false,
+            false
+        ));
+        assert!(!menu_command_is_enabled(
+            1002,
+            TrayStatus::Pausing,
+            false,
+            false
+        ));
+        assert!(!menu_command_is_enabled(
+            1002,
+            TrayStatus::Stopping,
+            false,
+            false
+        ));
+        assert!(!menu_command_is_enabled(
+            1002,
+            TrayStatus::ScheduledStart,
+            false,
+            false
+        ));
+        assert!(!menu_command_is_enabled(
+            1002,
+            TrayStatus::Degraded,
+            false,
+            false
+        ));
+        assert!(!menu_command_is_enabled(
+            1002,
+            TrayStatus::Pending,
+            false,
+            false
+        ));
+
+        assert!(menu_command_is_enabled(
+            1002,
+            TrayStatus::Running,
+            false,
+            false
+        ));
+        assert!(menu_command_is_enabled(
+            1002,
+            TrayStatus::Starting,
+            false,
+            false
+        ));
+        assert!(menu_command_is_enabled(
+            1002,
+            TrayStatus::ScheduledStop,
+            false,
+            false
+        ));
+        assert!(menu_command_is_enabled(
+            1002,
+            TrayStatus::Unverified,
+            false,
+            false
         ));
     }
 

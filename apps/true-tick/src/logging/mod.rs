@@ -124,16 +124,15 @@ pub fn append_log_lines(directory: PathBuf, filename: String, lines: Vec<String>
     });
 }
 
-pub fn flush_diagnostic_events_to_disk(
+fn build_log_lines(
     diagnostics: &DiagnosticStore,
-    last_persisted_event_sequence: &mut u64,
-    log_directory: &Path,
-) {
+    last_persisted_event_sequence: u64,
+) -> (Vec<String>, u64) {
     let events = diagnostics.snapshot();
     let mut lines = Vec::new();
-    let mut last_sequence = *last_persisted_event_sequence;
+    let mut last_sequence = last_persisted_event_sequence;
     for (index, event) in events.iter().enumerate() {
-        if event.sequence <= *last_persisted_event_sequence {
+        if event.sequence <= last_persisted_event_sequence {
             continue;
         }
         let row = diagnostic_grid_row(index.saturating_add(1), event);
@@ -143,6 +142,37 @@ pub fn flush_diagnostic_events_to_disk(
         lines.push(cells.join(","));
         last_sequence = event.sequence;
     }
+    (lines, last_sequence)
+}
+
+/// Builds pending lines and appends them on the calling thread so shutdown
+/// callers can guarantee the daily CSV is fully written before exit.
+pub fn flush_diagnostic_events_to_disk_sync(
+    diagnostics: &DiagnosticStore,
+    last_persisted_event_sequence: &mut u64,
+    log_directory: &Path,
+) {
+    let (lines, last_sequence) = build_log_lines(diagnostics, *last_persisted_event_sequence);
+    if lines.is_empty() {
+        return;
+    }
+    let (year, month, day) = utc_date_now();
+    match append_log_lines_sync(log_directory, &daily_log_filename(year, month, day), &lines) {
+        Ok(()) => {
+            *last_persisted_event_sequence = last_sequence;
+        }
+        Err(write_error) => {
+            eprintln!("true-tick log write failed: {write_error}");
+        }
+    }
+}
+
+pub fn flush_diagnostic_events_to_disk(
+    diagnostics: &DiagnosticStore,
+    last_persisted_event_sequence: &mut u64,
+    log_directory: &Path,
+) {
+    let (lines, last_sequence) = build_log_lines(diagnostics, *last_persisted_event_sequence);
     if lines.is_empty() {
         return;
     }
@@ -157,7 +187,10 @@ pub fn flush_diagnostic_events_to_disk(
 
 #[cfg(test)]
 mod tests {
-    use super::{append_log_lines_sync, daily_log_filename, hex_hash_string, LOG_HEADER};
+    use super::{
+        append_log_lines_sync, daily_log_filename, flush_diagnostic_events_to_disk_sync,
+        hex_hash_string, utc_date_now, LOG_HEADER,
+    };
 
     /// Builds a clean temporary directory inside the crate target directory so
     /// test artifacts never escape the workspace and never collide between runs.
@@ -235,6 +268,30 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0], LOG_HEADER);
         assert_eq!(lines[1], "7,gamma");
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn sync_flush_writes_header_and_all_event_rows() {
+        let directory = temporary_log_directory("sync-flush");
+        let store = tick_diagnostics::DiagnosticStore::new(8);
+        store.record("test.event.alpha", "result=first");
+        store.record("test.event.beta", "result=second");
+        store.record("test.event.gamma", "result=third");
+        let event_count = store.snapshot().len();
+        let mut last_persisted = 0u64;
+
+        flush_diagnostic_events_to_disk_sync(&store, &mut last_persisted, &directory);
+
+        let (year, month, day) = utc_date_now();
+        let path = directory.join(daily_log_filename(year, month, day));
+        let contents = std::fs::read_to_string(&path).expect("daily log readable after sync flush");
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), event_count.saturating_add(1));
+        assert_eq!(lines[0], LOG_HEADER);
+        assert_eq!(lines.len(), 1 + 3);
+        assert_eq!(last_persisted, 3);
 
         let _ = std::fs::remove_dir_all(&directory);
     }

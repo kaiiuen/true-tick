@@ -1041,7 +1041,7 @@ pub fn run() {
             "result=destroyed_before_app_drop",
         );
         mark_session_clean(app);
-        crate::logging::flush_diagnostic_events_to_disk(
+        crate::logging::flush_diagnostic_events_to_disk_sync(
             &app.diagnostics,
             &mut app.last_persisted_event_sequence,
             &app.log_directory,
