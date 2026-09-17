@@ -157,6 +157,8 @@ const ID_STARTUP_ON: usize = 1005;
 const ID_STARTUP_OFF: usize = 1006;
 const ID_AUTOMATIC_ON: usize = 1007;
 const ID_AUTOMATIC_OFF: usize = 1008;
+const ID_AUTO_RESUME_ON: usize = 1009;
+const ID_AUTO_RESUME_OFF: usize = 1010;
 pub(crate) const EN_CHANGE: usize = 0x0300;
 pub(crate) const BN_CLICKED: usize = 0;
 pub(crate) const WS_VSCROLL: u32 = 0x00200000;
@@ -362,6 +364,7 @@ fn register_startup_target(
 pub(crate) struct PopupMenuHandles {
     pub(crate) root: *mut c_void,
     pub(crate) schedule: Option<*mut c_void>,
+    pub(crate) settings: Option<*mut c_void>,
     pub(crate) status: Option<*mut c_void>,
 }
 
@@ -678,6 +681,19 @@ fn release_for_policy(app: &mut App, reason: tick_policy::PolicyReason) {
         );
         return;
     }
+    let is_power_restriction = matches!(
+        reason,
+        tick_policy::PolicyReason::BatteryRestricted
+            | tick_policy::PolicyReason::BatterySaverRestricted
+            | tick_policy::PolicyReason::PowerUnknown
+    );
+    let ownership = app.controller.ownership();
+    if is_power_restriction
+        && matches!(ownership, OwnershipState::Owned | OwnershipState::Uncertain)
+    {
+        app.pending_resume_on_ac = true;
+        app.record("policy.power_resume_pending", format!("reason={reason:?}"));
+    }
     let released_status = match reason {
         tick_policy::PolicyReason::BatteryRestricted
         | tick_policy::PolicyReason::BatterySaverRestricted
@@ -783,6 +799,7 @@ fn manual_start(app: &mut App) {
 }
 
 fn manual_stop(app: &mut App) {
+    app.pending_resume_on_ac = false;
     app.record("tray.command", "command=stop");
     app.record("lifecycle.stop_request", "source=manual");
     queue_intent(app, DesiredIntent::Release, "manual");
@@ -1256,6 +1273,18 @@ fn release_for_power_change(app: &mut App) {
     apply_power_reconciliation(app);
 }
 
+pub(crate) const fn resume_on_ac_applies(
+    auto_resume: bool,
+    pending: bool,
+    power: PowerState,
+    ownership: OwnershipState,
+) -> bool {
+    auto_resume
+        && pending
+        && matches!(power, PowerState::Ac)
+        && matches!(ownership, OwnershipState::Released)
+}
+
 fn apply_power_reconciliation(app: &mut App) {
     if app.pause.pause_active() {
         app.record(
@@ -1267,7 +1296,19 @@ fn apply_power_reconciliation(app: &mut App) {
     }
     let power = app.observation.power().state;
     let automatic = app.config.automatic;
-    let action = power_reconciliation(automatic, power, app.controller.ownership());
+    let ownership = app.controller.ownership();
+    if resume_on_ac_applies(
+        app.config.auto_resume_on_ac,
+        app.pending_resume_on_ac,
+        power,
+        ownership,
+    ) {
+        app.pending_resume_on_ac = false;
+        app.record("policy.power_resume_applied", "action=acquire");
+        apply_policy(app);
+        return;
+    }
+    let action = power_reconciliation(automatic, power, ownership);
     app.record(
         "policy.power_reconciliation",
         format!(
@@ -1802,6 +1843,52 @@ fn set_automatic(app: &mut App, enabled: bool) {
     }
 }
 
+#[allow(dead_code)]
+pub(crate) fn set_auto_resume(app: &mut App, enabled: bool) {
+    app.record(
+        "tray.command",
+        format!("command=auto_resume enabled={enabled}"),
+    );
+    app.record(
+        "toggle.requested",
+        format!("setting=auto_resume requested={enabled}"),
+    );
+    app.record(
+        "policy.auto_resume_setting_changed",
+        format!("enabled={enabled}"),
+    );
+    let mut next = app.config.clone();
+    next.auto_resume_on_ac = enabled;
+    if let Err(error) = config::save_atomic(&app.config_path, &next) {
+        app.record(
+            "config.save.result",
+            format!("result=error setting=auto_resume error={error}"),
+        );
+        app.record(
+            "toggle.result",
+            format!(
+                "setting=auto_resume value={} result=unchanged",
+                app.config.auto_resume_on_ac
+            ),
+        );
+        app.publish();
+        return;
+    }
+    app.record(
+        "config.save.result",
+        format!("result=success setting=auto_resume value={enabled}"),
+    );
+    app.config.auto_resume_on_ac = enabled;
+    app.record(
+        "toggle.result",
+        format!(
+            "setting=auto_resume value={} result=applied",
+            app.config.auto_resume_on_ac
+        ),
+    );
+    app.publish();
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StartupRollback {
     /// Leaving the written value in place is the only non-destructive inverse after an enable.
@@ -2288,6 +2375,40 @@ mod tests {
         assert_eq!(last_event.operation_id, child.operation_id);
     }
 
+    #[test]
+    fn resume_on_ac_applies_only_when_all_conditions_hold() {
+        assert!(resume_on_ac_applies(
+            true,
+            true,
+            PowerState::Ac,
+            OwnershipState::Released
+        ));
+        assert!(!resume_on_ac_applies(
+            false,
+            true,
+            PowerState::Ac,
+            OwnershipState::Released
+        ));
+        assert!(!resume_on_ac_applies(
+            true,
+            false,
+            PowerState::Ac,
+            OwnershipState::Released
+        ));
+        assert!(!resume_on_ac_applies(
+            true,
+            true,
+            PowerState::Battery,
+            OwnershipState::Released
+        ));
+        assert!(!resume_on_ac_applies(
+            true,
+            true,
+            PowerState::Ac,
+            OwnershipState::Owned
+        ));
+    }
+
     fn test_app(diagnostics: Arc<DiagnosticStore>) -> App {
         use crate::pause::{DurationCoordinator, PresetsManager};
         use tick_observation_windows::WindowsObservation;
@@ -2364,6 +2485,7 @@ mod tests {
             diagnostic_snapshot_generation: 0,
             diagnostic_auto_fit_generation: None,
             menu_active: false,
+            settings_submenu_open: false,
             popup_menus: None,
             popup_refresh_timer_active: false,
             schedule_display_timer_active: false,
@@ -2379,6 +2501,7 @@ mod tests {
             duration_timer_generation: None,
             scheduled_operation: None,
             running_since: None,
+            pending_resume_on_ac: false,
             shutdown_gate: crate::shutdown::ShutdownGate::new(),
             operation: None,
             operation_source: DiagnosticSource::Internal,

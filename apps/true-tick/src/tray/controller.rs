@@ -242,6 +242,8 @@ pub(crate) struct App {
     pub(crate) diagnostic_snapshot_generation: u64,
     pub(crate) diagnostic_auto_fit_generation: Option<u64>,
     pub(crate) menu_active: bool,
+    #[allow(dead_code)]
+    pub(crate) settings_submenu_open: bool,
     pub(crate) popup_menus: Option<PopupMenuHandles>,
     pub(crate) popup_refresh_timer_active: bool,
     pub(crate) schedule_display_timer_active: bool,
@@ -257,6 +259,7 @@ pub(crate) struct App {
     pub(crate) duration_timer_generation: Option<u64>,
     pub(crate) scheduled_operation: Option<OperationContext>,
     pub(crate) running_since: Option<std::time::Instant>,
+    pub(crate) pending_resume_on_ac: bool,
     pub(crate) shutdown_gate: ShutdownGate,
     pub(crate) operation: Option<OperationContext>,
     pub(crate) operation_source: DiagnosticSource,
@@ -660,6 +663,7 @@ pub fn run() {
             diagnostic_snapshot_generation: 0,
             diagnostic_auto_fit_generation: None,
             menu_active: false,
+            settings_submenu_open: false,
             popup_menus: None,
             popup_refresh_timer_active: false,
             schedule_display_timer_active: false,
@@ -675,6 +679,7 @@ pub fn run() {
             duration_timer_generation: None,
             scheduled_operation: None,
             running_since: None,
+            pending_resume_on_ac: false,
             shutdown_gate: ShutdownGate::new(),
             operation: None,
             operation_source: DiagnosticSource::Internal,
@@ -1206,6 +1211,7 @@ impl App {
         cancel_duration_timer(self);
         kill_schedule_display_timer(self);
         self.scheduled_operation = None;
+        self.pending_resume_on_ac = false;
         self.begin_operation(DiagnosticSource::Shutdown);
         self.record(
             "shutdown.cleanup",

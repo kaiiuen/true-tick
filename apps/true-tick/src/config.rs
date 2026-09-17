@@ -21,10 +21,14 @@ pub const LEGACY_ONE_MILLISECOND_REQUEST_INTERVAL: Hns = Hns::new(10_000);
 /// Factory interval presets offered by the pause and resume menus.
 pub const FACTORY_SCHEDULE_PRESETS_SECONDS: [u32; 5] = [60, 300, 900, 1800, 3600];
 
+/// Default setting for whether a manual Start reacquires timing upon returning to AC.
+pub const DEFAULT_AUTO_RESUME_ON_AC: bool = true;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     pub automatic: bool,
     pub startup_enabled: bool,
+    pub auto_resume_on_ac: bool,
     pub request_interval: Hns,
     pub schedule_presets_seconds: Vec<u32>,
 }
@@ -34,6 +38,7 @@ impl Default for Config {
         Self {
             automatic: false,
             startup_enabled: true,
+            auto_resume_on_ac: DEFAULT_AUTO_RESUME_ON_AC,
             request_interval: AUTOMATIC_REQUEST_INTERVAL,
             schedule_presets_seconds: FACTORY_SCHEDULE_PRESETS_SECONDS.to_vec(),
         }
@@ -118,9 +123,10 @@ pub fn save_atomic(path: &Path, config: &Config) -> Result<(), ConfigError> {
         .collect::<Vec<_>>()
         .join(", ");
     let text = format!(
-        "automatic = {}\nstartup_enabled = {}\nrequest_interval_hns = {}\nschedule_presets_seconds = [{}]\n",
+        "automatic = {}\nstartup_enabled = {}\nauto_resume_on_ac = {}\nrequest_interval_hns = {}\nschedule_presets_seconds = [{}]\n",
         config.automatic,
         config.startup_enabled,
+        config.auto_resume_on_ac,
         config.request_interval.value(),
         presets
     );
@@ -237,6 +243,17 @@ fn parse_with_migration(text: &str) -> Result<(Config, bool), ConfigError> {
                     }
                 }
             }
+            "auto_resume_on_ac" => {
+                config.auto_resume_on_ac = match value.trim() {
+                    "true" => true,
+                    "false" => false,
+                    other => {
+                        return Err(invalid_reason(format!(
+                            "invalid auto_resume_on_ac value {other}"
+                        )))
+                    }
+                }
+            }
             "request_interval_hns" => {
                 let value = value.parse::<u64>().map_err(|_| {
                     invalid_reason(format!(
@@ -308,6 +325,7 @@ mod tests {
             Config {
                 automatic: false,
                 startup_enabled: true,
+                auto_resume_on_ac: true,
                 request_interval: AUTOMATIC_REQUEST_INTERVAL,
                 schedule_presets_seconds: vec![60, 300, 900, 1800, 3600]
             }
@@ -324,6 +342,7 @@ mod tests {
             Config {
                 automatic: true,
                 startup_enabled: true,
+                auto_resume_on_ac: true,
                 request_interval: AUTOMATIC_REQUEST_INTERVAL,
                 schedule_presets_seconds: FACTORY_SCHEDULE_PRESETS_SECONDS.to_vec()
             }
@@ -467,6 +486,16 @@ mod tests {
     }
 
     #[test]
+    fn parses_auto_resume_on_ac_boolean_values() {
+        let parsed_true = parse("auto_resume_on_ac = true\n").unwrap();
+        assert!(parsed_true.auto_resume_on_ac);
+        let parsed_false = parse("auto_resume_on_ac = false\n").unwrap();
+        assert!(!parsed_false.auto_resume_on_ac);
+        let absent = parse("automatic = false\n").unwrap();
+        assert!(absent.auto_resume_on_ac);
+    }
+
+    #[test]
     fn consecutive_saves_leave_the_second_content() {
         let root = std::env::temp_dir().join(format!(
             "true-tick-config-consecutive-{}",
@@ -477,12 +506,14 @@ mod tests {
         let first = Config {
             automatic: false,
             startup_enabled: true,
+            auto_resume_on_ac: true,
             request_interval: AUTOMATIC_REQUEST_INTERVAL,
             schedule_presets_seconds: FACTORY_SCHEDULE_PRESETS_SECONDS.to_vec(),
         };
         let second = Config {
             automatic: true,
             startup_enabled: false,
+            auto_resume_on_ac: false,
             request_interval: Hns::new(2_000_000),
             schedule_presets_seconds: vec![15, 45, 7200],
         };
@@ -541,6 +572,7 @@ mod tests {
         let config = Config {
             automatic: true,
             startup_enabled: true,
+            auto_resume_on_ac: false,
             request_interval: AUTOMATIC_REQUEST_INTERVAL,
             schedule_presets_seconds: FACTORY_SCHEDULE_PRESETS_SECONDS.to_vec(),
         };
@@ -558,6 +590,7 @@ mod tests {
         let config = Config {
             automatic: false,
             startup_enabled: true,
+            auto_resume_on_ac: true,
             request_interval: AUTOMATIC_REQUEST_INTERVAL,
             schedule_presets_seconds: vec![45, 600, 7200],
         };
@@ -581,6 +614,7 @@ mod tests {
         let config = Config {
             automatic: true,
             startup_enabled: false,
+            auto_resume_on_ac: false,
             request_interval: Hns::new(5_000_000),
             schedule_presets_seconds: vec![10, 60, 900, 86400],
         };

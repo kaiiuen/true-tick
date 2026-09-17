@@ -4,27 +4,29 @@ use crate::pause::DurationAction;
 use crate::tray_surface::{
     duration_command, duration_menu_items, menu_action_keeps_open,
     menu_command_is_enabled_with_pause, menu_description, menu_items_with_duration, preset_command,
-    preset_command_base, preset_menu_items, status_menu_items, CANCEL_PAUSE_COMMAND_ID,
-    CANCEL_SCHEDULED_COMMAND_ID, GITHUB_COMMAND_ID, LOGS_COMMAND_ID, PAUSE_FOR_15_COMMAND_ID,
-    PAUSE_FOR_30_COMMAND_ID, PAUSE_FOR_5_COMMAND_ID, PAUSE_FOR_60_COMMAND_ID,
-    SCHEDULE_PRESETS_COMMAND_ID, START_IN_15_COMMAND_ID, START_IN_1_COMMAND_ID,
-    START_IN_30_COMMAND_ID, START_IN_5_COMMAND_ID, START_IN_60_COMMAND_ID, STOP_IN_15_COMMAND_ID,
-    STOP_IN_1_COMMAND_ID, STOP_IN_30_COMMAND_ID, STOP_IN_5_COMMAND_ID, STOP_IN_60_COMMAND_ID,
+    preset_command_base, preset_menu_items, settings_menu_items, status_menu_items,
+    CANCEL_PAUSE_COMMAND_ID, CANCEL_SCHEDULED_COMMAND_ID, GITHUB_COMMAND_ID, LOGS_COMMAND_ID,
+    PAUSE_FOR_15_COMMAND_ID, PAUSE_FOR_30_COMMAND_ID, PAUSE_FOR_5_COMMAND_ID,
+    PAUSE_FOR_60_COMMAND_ID, SCHEDULE_PRESETS_COMMAND_ID, START_IN_15_COMMAND_ID,
+    START_IN_1_COMMAND_ID, START_IN_30_COMMAND_ID, START_IN_5_COMMAND_ID, START_IN_60_COMMAND_ID,
+    STOP_IN_15_COMMAND_ID, STOP_IN_1_COMMAND_ID, STOP_IN_30_COMMAND_ID, STOP_IN_5_COMMAND_ID,
+    STOP_IN_60_COMMAND_ID,
 };
 use crate::win32::DestroyWindow;
 
 use super::{
     cancel_scheduled_action, manual_start, manual_stop, native_bool_result, open_github_page,
-    quit_decision, schedule_duration_action, schedule_preset_action, set_automatic, set_startup,
-    show_quit_warning, show_shutdown_warning, wide, App, AppendMenuW, CreatePopupMenu,
-    CreateWindowExW, DestroyMenu, DiagnosticOutcome, DiagnosticSource, GetCursorPos, GetLastError,
-    GetMenuItemCount, GetMenuStringW, GetModuleHandleW, GetSystemMetrics, KillTimer, MessageBoxW,
-    ModifyMenuW, NativeResult, Point, PopupMenuHandles, PostQuitMessage, QuitDecision,
-    QuitDialogDecision, Rect, SendMessageW, SetForegroundWindow, SetTimer, ToolInfo,
-    TrackPopupMenu, ID_AUTOMATIC_OFF, ID_AUTOMATIC_ON, ID_QUIT, ID_START, ID_STARTUP_OFF,
-    ID_STARTUP_ON, ID_STOP, MB_ICONWARNING, POPUP_REFRESH_INTERVAL_MS, POPUP_REFRESH_TIMER_ID,
-    TTF_ABSOLUTE, TTF_IDISHWND, TTF_TRACK, TTM_ADDTOOLW, TTM_TRACKACTIVATE, TTM_TRACKPOSITION,
-    TTM_UPDATETIPTEXTW, TTS_ALWAYSTIP, TTS_NOPREFIX, WS_EX_TOPMOST, WS_POPUP,
+    quit_decision, schedule_duration_action, schedule_preset_action, set_auto_resume,
+    set_automatic, set_startup, show_quit_warning, show_shutdown_warning, wide, App, AppendMenuW,
+    CreatePopupMenu, CreateWindowExW, DestroyMenu, DiagnosticOutcome, DiagnosticSource,
+    GetCursorPos, GetLastError, GetMenuItemCount, GetMenuStringW, GetModuleHandleW,
+    GetSystemMetrics, KillTimer, MessageBoxW, ModifyMenuW, NativeResult, Point, PopupMenuHandles,
+    PostQuitMessage, QuitDecision, QuitDialogDecision, Rect, SendMessageW, SetForegroundWindow,
+    SetTimer, ToolInfo, TrackPopupMenu, ID_AUTOMATIC_OFF, ID_AUTOMATIC_ON, ID_AUTO_RESUME_OFF,
+    ID_AUTO_RESUME_ON, ID_QUIT, ID_START, ID_STARTUP_OFF, ID_STARTUP_ON, ID_STOP, MB_ICONWARNING,
+    POPUP_REFRESH_INTERVAL_MS, POPUP_REFRESH_TIMER_ID, TTF_ABSOLUTE, TTF_IDISHWND, TTF_TRACK,
+    TTM_ADDTOOLW, TTM_TRACKACTIVATE, TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_ALWAYSTIP,
+    TTS_NOPREFIX, WS_EX_TOPMOST, WS_POPUP,
 };
 
 pub(crate) const TPM_LEFTALIGN: u32 = 0x0000;
@@ -41,18 +43,22 @@ pub(crate) const MF_BYPOSITION: u32 = 0x0400;
 
 pub(crate) const ROOT_MENU_START_POSITION: usize = 2;
 pub(crate) const ROOT_MENU_STOP_POSITION: usize = 3;
-pub(crate) const ROOT_MENU_AUTO_START_POSITION: usize = 6;
-pub(crate) const ROOT_MENU_AUTO_TIME_POSITION: usize = 7;
+#[allow(dead_code)]
+pub(crate) const ROOT_MENU_SETTINGS_POSITION: usize = 5;
 #[allow(dead_code)]
 pub(crate) const SCHEDULE_MENU_PRESETS_POSITION: usize = 4;
 pub(crate) const SCHEDULE_MENU_CANCEL_POSITION: usize = 6;
 pub(crate) const SCHEDULE_MENU_RESUME_POSITION: usize = 7;
+pub(crate) const SETTINGS_MENU_AUTO_START_POSITION: usize = 0;
+pub(crate) const SETTINGS_MENU_AUTO_TIME_POSITION: usize = 1;
+pub(crate) const SETTINGS_MENU_AUTO_RESUME_POSITION: usize = 2;
 
 pub(crate) unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
     if app.menu_active {
         return;
     }
     app.menu_active = true;
+    app.settings_submenu_open = false;
     let mut anchor = Point { x: 0, y: 0 };
     if GetCursorPos(&mut anchor) == 0 {
         app.record(
@@ -76,115 +82,156 @@ pub(crate) unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
         );
     }
     loop {
-        let menu = CreatePopupMenu();
-        if menu.is_null() {
-            app.record(
-                "native.CreatePopupMenu.error",
-                format!("raw_status={}", GetLastError()),
-            );
-            break;
-        }
-        app.popup_menus = Some(PopupMenuHandles {
-            root: menu,
-            schedule: None,
-            status: None,
-        });
-        let items = menu_items_with_duration(
-            app.lifecycle_status(),
-            app.config.startup_enabled,
-            app.config.automatic,
-            app.timing_values(),
-            app.pause.pause_active(),
-        );
-        let header_flags = if items[0].enabled {
-            MF_STRING
-        } else {
-            MF_STRING | MF_GRAYED
-        };
-        let start_flags = if items[1].enabled {
-            MF_STRING
-        } else {
-            MF_STRING | MF_GRAYED
-        };
-        let stop_flags = if items[2].enabled {
-            MF_STRING
-        } else {
-            MF_STRING | MF_GRAYED
-        };
-        let startup_id = if app.config.startup_enabled {
-            ID_STARTUP_OFF
-        } else {
-            ID_STARTUP_ON
-        };
-        let automatic_id = if app.config.automatic {
-            ID_AUTOMATIC_OFF
-        } else {
-            ID_AUTOMATIC_ON
-        };
-        let menu_ok = append_menu_checked(
-            app,
-            menu,
-            header_flags,
-            GITHUB_COMMAND_ID,
-            wide(&items[0].label).as_ptr(),
-        ) && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
-            && append_menu_checked(
-                app,
-                menu,
-                start_flags,
-                ID_START,
-                wide(&items[1].label).as_ptr(),
-            )
-            && append_menu_checked(
-                app,
-                menu,
-                stop_flags,
-                ID_STOP,
-                wide(&items[2].label).as_ptr(),
-            )
-            && append_schedule_submenu(app, menu, &items[3].label)
-            && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
-            && append_menu_checked(
-                app,
-                menu,
-                MF_STRING,
-                startup_id,
-                wide(&items[4].label).as_ptr(),
-            )
-            && append_menu_checked(
-                app,
-                menu,
-                MF_STRING,
-                automatic_id,
-                wide(&items[5].label).as_ptr(),
-            )
-            && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
-            && append_status_submenu(app, menu)
-            && append_menu_checked(
-                app,
-                menu,
-                MF_STRING,
-                LOGS_COMMAND_ID,
-                wide(&items[7].label).as_ptr(),
-            )
-            && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
-            && append_menu_checked(
-                app,
-                menu,
-                MF_STRING,
-                ID_QUIT,
-                wide(&items[8].label).as_ptr(),
-            );
-        if !menu_ok {
-            app.popup_menus = None;
-            if DestroyMenu(menu) == 0 {
+        let (menu, track_target) = if app.settings_submenu_open {
+            let submenu = CreatePopupMenu();
+            if submenu.is_null() {
                 app.record(
-                    "native.DestroyMenu.error",
+                    "native.CreatePopupMenu.settings_root.error",
                     format!("raw_status={}", GetLastError()),
                 );
+                break;
             }
-            break;
-        }
+            let items = settings_menu_items(
+                app.config.startup_enabled,
+                app.config.automatic,
+                app.config.auto_resume_on_ac,
+            );
+            let startup_id = if app.config.startup_enabled {
+                ID_STARTUP_OFF
+            } else {
+                ID_STARTUP_ON
+            };
+            let automatic_id = if app.config.automatic {
+                ID_AUTOMATIC_OFF
+            } else {
+                ID_AUTOMATIC_ON
+            };
+            let auto_resume_id = if app.config.auto_resume_on_ac {
+                ID_AUTO_RESUME_OFF
+            } else {
+                ID_AUTO_RESUME_ON
+            };
+            let mut ok = append_menu_checked(
+                app,
+                submenu,
+                MF_STRING,
+                startup_id,
+                wide(&items[0].label).as_ptr(),
+            );
+            ok &= append_menu_checked(
+                app,
+                submenu,
+                MF_STRING,
+                automatic_id,
+                wide(&items[1].label).as_ptr(),
+            );
+            ok &= append_menu_checked(
+                app,
+                submenu,
+                MF_STRING,
+                auto_resume_id,
+                wide(&items[2].label).as_ptr(),
+            );
+            if !ok {
+                DestroyMenu(submenu);
+                break;
+            }
+            app.popup_menus = Some(PopupMenuHandles {
+                root: submenu,
+                schedule: None,
+                settings: Some(submenu),
+                status: None,
+            });
+            (submenu, submenu)
+        } else {
+            let menu = CreatePopupMenu();
+            if menu.is_null() {
+                app.record(
+                    "native.CreatePopupMenu.error",
+                    format!("raw_status={}", GetLastError()),
+                );
+                break;
+            }
+            app.popup_menus = Some(PopupMenuHandles {
+                root: menu,
+                schedule: None,
+                settings: None,
+                status: None,
+            });
+            let items = menu_items_with_duration(
+                app.lifecycle_status(),
+                app.config.startup_enabled,
+                app.config.automatic,
+                app.timing_values(),
+                app.pause.pause_active(),
+            );
+            let header_flags = if items[0].enabled {
+                MF_STRING
+            } else {
+                MF_STRING | MF_GRAYED
+            };
+            let start_flags = if items[1].enabled {
+                MF_STRING
+            } else {
+                MF_STRING | MF_GRAYED
+            };
+            let stop_flags = if items[2].enabled {
+                MF_STRING
+            } else {
+                MF_STRING | MF_GRAYED
+            };
+            let menu_ok = append_menu_checked(
+                app,
+                menu,
+                header_flags,
+                GITHUB_COMMAND_ID,
+                wide(&items[0].label).as_ptr(),
+            ) && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
+                && append_menu_checked(
+                    app,
+                    menu,
+                    start_flags,
+                    ID_START,
+                    wide(&items[1].label).as_ptr(),
+                )
+                && append_menu_checked(
+                    app,
+                    menu,
+                    stop_flags,
+                    ID_STOP,
+                    wide(&items[2].label).as_ptr(),
+                )
+                && append_schedule_submenu(app, menu, &items[3].label)
+                && append_settings_submenu(app, menu, &items[4].label)
+                && append_status_submenu(app, menu)
+                && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
+                && append_menu_checked(
+                    app,
+                    menu,
+                    MF_STRING,
+                    LOGS_COMMAND_ID,
+                    wide(&items[6].label).as_ptr(),
+                )
+                && append_menu_checked(app, menu, MF_SEPARATOR, 0, std::ptr::null())
+                && append_menu_checked(
+                    app,
+                    menu,
+                    MF_STRING,
+                    ID_QUIT,
+                    wide(&items[7].label).as_ptr(),
+                );
+            if !menu_ok {
+                app.popup_menus = None;
+                if DestroyMenu(menu) == 0 {
+                    app.record(
+                        "native.DestroyMenu.error",
+                        format!("raw_status={}", GetLastError()),
+                    );
+                }
+                break;
+            }
+            (menu, menu)
+        };
         let _ = create_menu_help(hwnd, app);
         begin_popup_refresh_timer(app);
         if SetForegroundWindow(hwnd) == 0 {
@@ -194,7 +241,7 @@ pub(crate) unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
             );
         }
         let command = TrackPopupMenu(
-            menu,
+            track_target,
             TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
             anchor.x,
             anchor.y,
@@ -224,12 +271,26 @@ pub(crate) unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
             "tray.command.dispatch",
             format!("source=TPM_RETURNCMD id={command}"),
         );
-        if !crate::tray_surface::menu_command_dispatch_allowed(app.menu_active, true)
-            || !handle_menu_command(hwnd, app, command)
-        {
+        let allowed = crate::tray_surface::menu_command_dispatch_allowed(app.menu_active, true);
+        if !allowed {
             break;
         }
+        let is_settings_cmd = matches!(
+            command,
+            ID_STARTUP_ON
+                | ID_STARTUP_OFF
+                | ID_AUTOMATIC_ON
+                | ID_AUTOMATIC_OFF
+                | ID_AUTO_RESUME_ON
+                | ID_AUTO_RESUME_OFF
+        );
+        let continues = handle_menu_command(hwnd, app, command);
+        if !continues {
+            break;
+        }
+        app.settings_submenu_open = is_settings_cmd;
     }
+    app.settings_submenu_open = false;
     destroy_menu_help(app);
     kill_popup_refresh_timer(app);
     app.popup_menus = None;
@@ -283,6 +344,7 @@ pub(crate) unsafe fn refresh_popup_menu(app: &mut App) {
         app.lifecycle_status(),
         app.config.startup_enabled,
         app.config.automatic,
+        app.config.auto_resume_on_ac,
         app.pause.active(),
     );
     let stop_enabled = menu_command_is_enabled_with_pause(
@@ -290,6 +352,7 @@ pub(crate) unsafe fn refresh_popup_menu(app: &mut App) {
         app.lifecycle_status(),
         app.config.startup_enabled,
         app.config.automatic,
+        app.config.auto_resume_on_ac,
         app.pause.active(),
     );
     let _ = ModifyMenuW(
@@ -316,23 +379,39 @@ pub(crate) unsafe fn refresh_popup_menu(app: &mut App) {
     } else {
         ID_AUTOMATIC_ON
     };
-    let _ = ModifyMenuW(
-        handles.root,
-        ROOT_MENU_AUTO_START_POSITION,
-        MF_BYPOSITION | MF_STRING,
-        startup_id,
-        wide(crate::tray_surface::auto_start_label(
+    let auto_resume_id = if app.config.auto_resume_on_ac {
+        ID_AUTO_RESUME_OFF
+    } else {
+        ID_AUTO_RESUME_ON
+    };
+    if let Some(settings_menu) = handles.settings {
+        let items = settings_menu_items(
             app.config.startup_enabled,
-        ))
-        .as_ptr(),
-    );
-    let _ = ModifyMenuW(
-        handles.root,
-        ROOT_MENU_AUTO_TIME_POSITION,
-        MF_BYPOSITION | MF_STRING,
-        automatic_id,
-        wide(crate::tray_surface::automatic_label(app.config.automatic)).as_ptr(),
-    );
+            app.config.automatic,
+            app.config.auto_resume_on_ac,
+        );
+        let _ = ModifyMenuW(
+            settings_menu,
+            SETTINGS_MENU_AUTO_START_POSITION,
+            MF_BYPOSITION | MF_STRING,
+            startup_id,
+            wide(&items[0].label).as_ptr(),
+        );
+        let _ = ModifyMenuW(
+            settings_menu,
+            SETTINGS_MENU_AUTO_TIME_POSITION,
+            MF_BYPOSITION | MF_STRING,
+            automatic_id,
+            wide(&items[1].label).as_ptr(),
+        );
+        let _ = ModifyMenuW(
+            settings_menu,
+            SETTINGS_MENU_AUTO_RESUME_POSITION,
+            MF_BYPOSITION | MF_STRING,
+            auto_resume_id,
+            wide(&items[2].label).as_ptr(),
+        );
+    }
     if let Some(schedule) = handles.schedule {
         let cancel_enabled = app
             .pause
@@ -373,6 +452,80 @@ pub(crate) unsafe fn refresh_popup_menu(app: &mut App) {
             );
         }
     }
+}
+
+pub(crate) unsafe fn append_settings_submenu(
+    app: &mut App,
+    parent: *mut c_void,
+    label: &str,
+) -> bool {
+    let submenu = CreatePopupMenu();
+    if submenu.is_null() {
+        app.record(
+            "native.CreatePopupMenu.settings.error",
+            format!("raw_status={}", GetLastError()),
+        );
+        return false;
+    }
+    let items = settings_menu_items(
+        app.config.startup_enabled,
+        app.config.automatic,
+        app.config.auto_resume_on_ac,
+    );
+    let startup_id = if app.config.startup_enabled {
+        ID_STARTUP_OFF
+    } else {
+        ID_STARTUP_ON
+    };
+    let automatic_id = if app.config.automatic {
+        ID_AUTOMATIC_OFF
+    } else {
+        ID_AUTOMATIC_ON
+    };
+    let auto_resume_id = if app.config.auto_resume_on_ac {
+        ID_AUTO_RESUME_OFF
+    } else {
+        ID_AUTO_RESUME_ON
+    };
+    let mut ok = append_menu_checked(
+        app,
+        submenu,
+        MF_STRING,
+        startup_id,
+        wide(&items[0].label).as_ptr(),
+    );
+    ok &= append_menu_checked(
+        app,
+        submenu,
+        MF_STRING,
+        automatic_id,
+        wide(&items[1].label).as_ptr(),
+    );
+    ok &= append_menu_checked(
+        app,
+        submenu,
+        MF_STRING,
+        auto_resume_id,
+        wide(&items[2].label).as_ptr(),
+    );
+    if !ok {
+        DestroyMenu(submenu);
+        return false;
+    }
+    if !append_menu_checked(
+        app,
+        parent,
+        MF_STRING | MF_POPUP,
+        submenu as usize,
+        wide(label).as_ptr(),
+    ) {
+        DestroyMenu(submenu);
+        return false;
+    }
+    if let Some(handles) = app.popup_menus.as_mut() {
+        handles.settings = Some(submenu);
+    }
+    true
 }
 
 pub(crate) unsafe fn append_duration_choice_submenu(
@@ -674,6 +827,7 @@ pub(crate) fn submenu_description(menu: *mut c_void) -> Option<&'static str> {
             "Stop in >" => Some("Schedule a future guarded release"),
             "Pause for >" => Some("Suppress acquisition for a fixed duration"),
             "Resume now" => Some("Resume timing and cancel the pause"),
+            "Settings >" => Some("Configure startup and automation settings"),
             "Status >" => Some("View read-only lifecycle details"),
             _ => None,
         };
@@ -810,6 +964,7 @@ pub(crate) unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, comma
         app.lifecycle_status(),
         app.config.startup_enabled,
         app.config.automatic,
+        app.config.auto_resume_on_ac,
         app.pause.active(),
     ) {
         let reason = if command == ID_START && app.pause.pause_active() {
@@ -851,6 +1006,8 @@ pub(crate) unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, comma
         ID_STARTUP_OFF => "startup_off",
         ID_AUTOMATIC_ON => "automatic_on",
         ID_AUTOMATIC_OFF => "automatic_off",
+        ID_AUTO_RESUME_ON => "auto_resume_on",
+        ID_AUTO_RESUME_OFF => "auto_resume_off",
         ID_QUIT => "quit",
         _ => {
             if preset_command(command).is_some() {
@@ -920,6 +1077,8 @@ pub(crate) unsafe fn handle_menu_command(hwnd: *mut c_void, app: &mut App, comma
         ID_STARTUP_OFF => set_startup(app, false),
         ID_AUTOMATIC_ON => set_automatic(app, true),
         ID_AUTOMATIC_OFF => set_automatic(app, false),
+        ID_AUTO_RESUME_ON => set_auto_resume(app, true),
+        ID_AUTO_RESUME_OFF => set_auto_resume(app, false),
         ID_QUIT => {
             app.record("tray.command", "command=quit");
             app.record("lifecycle.shutdown_request", "source=tray");
@@ -1116,6 +1275,16 @@ mod tests {
             clamp_menu_anchor(Point { x: -10, y: -20 }, work),
             Point { x: 0, y: 0 }
         );
+    }
+
+    #[test]
+    fn settings_menu_positions_and_commands_match_settings_contract() {
+        assert_eq!(ROOT_MENU_SETTINGS_POSITION, 5);
+        assert_eq!(SETTINGS_MENU_AUTO_START_POSITION, 0);
+        assert_eq!(SETTINGS_MENU_AUTO_TIME_POSITION, 1);
+        assert_eq!(SETTINGS_MENU_AUTO_RESUME_POSITION, 2);
+        assert_eq!(ID_AUTO_RESUME_ON, 1009);
+        assert_eq!(ID_AUTO_RESUME_OFF, 1010);
     }
 
     #[test]

@@ -28,11 +28,16 @@ signatures and rollback are not implemented.
 
 The tray starts with a clickable `True™ Tick v<version>` header sourced from Cargo
 package metadata. Root menu order is `True™ Tick v<version>`, a separator,
-`Start`, `Stop`, `Schedule >`, a separator, `Auto-start: On/Off`,
-`Auto-time: On/Off`, a separator, a read-only `Status >` submenu, `Logs`, a
-separator, and `Quit`. Start and stop are primary and stay at the top. Scheduling
-and pausing are secondary and now share one submenu instead of two, so there is
-a single duration surface. `Schedule >` contents, in order, are `Start in >`,
+`Start`, `Stop`, `Schedule >`, `Settings >`, `Status >`, a separator,
+`Logs`, a separator, and `Quit`. Start and stop are primary and stay at the top.
+Scheduling and pausing share `Schedule >`, settings toggles share `Settings >`,
+and status telemetry shares `Status >`. `Settings >` contents, in order, are
+`Auto-start: On/Off`, `Auto-time: On/Off`, and `Auto-resume on AC: On/Off`.
+Auto-start launches the app at Windows login. Auto-time controls automatic timing
+acquisition on AC power. Auto-resume on AC reacquires timing when returning to AC
+after a restrictive power state released an active session. Toggling any setting
+in `Settings >` persists the setting atomically and keeps the submenu open.
+`Schedule >` contents, in order, are `Start in >`,
 `Stop in >`, `Pause for >`, `Interval presets...`, a separator, `Cancel scheduled
 action`, and `Resume now`. The declared menu vector in `tray_surface.rs` and the
 rendered menu both use `Pause for >`. Pause presets are 5 minutes, 15 minutes,
@@ -61,8 +66,7 @@ stacking, an indefinite pause, and overlapping scheduled actions remain absent.
 Start is explicitly disabled
 while a pause is active. Stop is enabled only when the app actually owns timing in a
 running state. It is disabled for Blocked, Stopped, Unsupported, Paused, Pausing,
-Stopping, ScheduledStart, Degraded, and Pending. Auto-start launches the app at Windows login. Auto-time
-controls automatic timing acquisition and defaults to off. Both tray release
+Stopping, ScheduledStart, Degraded, and Pending. Both tray release
 notifications open the same compact menu. Button-down and double-click
 notifications are ignored to avoid duplicate menus.
 
@@ -80,11 +84,13 @@ window titled `True™ Tick Status and Diagnostics` without changing timer state
 uses a normal overlapped style, `WS_EX_APPWINDOW`, no `WS_EX_TOOLWINDOW`, no child
 style, no owner, standard title-bar controls, a resizable read-only status and
 session log view, and a fresh snapshot each time it is reopened. The native menu
-keeps Start, Stop, and both setting toggles open after successful or failed handling.
+keeps Start, Stop, and Settings toggles open after successful or failed handling.
+Toggling an item inside Settings reopens the Settings submenu directly at the original
+anchor position, allowing consecutive configuration changes.
 Reopening after any persistent command reuses the original popup anchor POINT, and
 the returned `TPM_RETURNCMD` ID is dispatched once. Highlighting a command uses
 `WM_MENUSELECT` tooltips for Duration, Start in, Stop in, Pause for, Cancel scheduled
-action, Status, Logs, Start, Stop, settings, and Quit. The tooltip is destroyed
+action, Settings, Status, Logs, Start, Stop, auto-start, auto-time, auto-resume, and Quit. The tooltip is destroyed
 when the popup closes and does not change timer state. Cancel keeps the Quit command
 loop available, while successful Quit closes it.
 

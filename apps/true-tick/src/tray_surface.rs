@@ -131,6 +131,14 @@ pub(crate) const fn automatic_label(enabled: bool) -> &'static str {
     }
 }
 
+pub(crate) const fn auto_resume_label(enabled: bool) -> &'static str {
+    if enabled {
+        "Auto-resume on AC: On"
+    } else {
+        "Auto-resume on AC: Off"
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct TimingValues {
     pub(crate) requested: Option<Hns>,
@@ -325,8 +333,8 @@ pub(crate) fn tooltip_at(
     state_summary(status, timing, scheduled, now, block_reason)
 }
 
-pub(crate) const LOGS_COMMAND_ID: usize = 1009;
-pub(crate) const GITHUB_COMMAND_ID: usize = 1010;
+pub(crate) const LOGS_COMMAND_ID: usize = 1050;
+pub(crate) const GITHUB_COMMAND_ID: usize = 1051;
 pub(crate) const STATUS_STATE_COMMAND_ID: usize = 1030;
 pub(crate) const STATUS_TIMING_COMMAND_ID: usize = 1031;
 pub(crate) const STATUS_RUNNING_FOR_COMMAND_ID: usize = 1032;
@@ -491,6 +499,7 @@ pub(crate) const fn menu_description(command_id: usize) -> Option<&'static str> 
         1002 => Some("Release True™ Tick timing"),
         1005 | 1006 => Some("Launch True™ Tick when you sign in"),
         1007 | 1008 => Some("Request timing automatically on AC power"),
+        1009 | 1010 => Some("Resume timing when returning to AC power"),
         LOGS_COMMAND_ID => Some("Open status and session logs"),
         GITHUB_COMMAND_ID => Some("Open True™ Tick on GitHub"),
         DURATION_MENU_COMMAND_ID => Some("Schedule a bounded timing action"),
@@ -564,7 +573,7 @@ pub(crate) const fn menu_action_keeps_open(command_id: usize) -> bool {
     matches!(
         command_id,
         1001 | 1002 | 1005
-            ..=1008
+            ..=1010
                 | START_IN_1_COMMAND_ID
                 | START_IN_5_COMMAND_ID
                 | START_IN_15_COMMAND_ID
@@ -606,8 +615,16 @@ pub(crate) const fn menu_command_is_enabled(
     status: TrayStatus,
     startup_enabled: bool,
     automatic: bool,
+    auto_resume_on_ac: bool,
 ) -> bool {
-    menu_command_is_enabled_with_pause(command_id, status, startup_enabled, automatic, false)
+    menu_command_is_enabled_with_pause(
+        command_id,
+        status,
+        startup_enabled,
+        automatic,
+        auto_resume_on_ac,
+        false,
+    )
 }
 
 pub(crate) const fn menu_command_is_enabled_with_pause(
@@ -615,6 +632,7 @@ pub(crate) const fn menu_command_is_enabled_with_pause(
     status: TrayStatus,
     startup_enabled: bool,
     automatic: bool,
+    auto_resume_on_ac: bool,
     schedule_active: bool,
 ) -> bool {
     match command_id {
@@ -638,6 +656,8 @@ pub(crate) const fn menu_command_is_enabled_with_pause(
         1006 => startup_enabled,
         1007 => !automatic,
         1008 => automatic,
+        1009 => !auto_resume_on_ac,
+        1010 => auto_resume_on_ac,
         LOGS_COMMAND_ID | GITHUB_COMMAND_ID | SCHEDULE_PRESETS_COMMAND_ID | 1004 => true,
         START_IN_1_COMMAND_ID
         | START_IN_5_COMMAND_ID
@@ -817,6 +837,31 @@ pub(crate) fn status_menu_items(
 }
 
 #[allow(dead_code)]
+pub(crate) fn settings_menu_items(
+    startup_enabled: bool,
+    automatic: bool,
+    auto_resume_on_ac: bool,
+) -> Vec<MenuItem> {
+    vec![
+        MenuItem {
+            label: auto_start_label(startup_enabled).to_owned(),
+            enabled: true,
+            command_id: None,
+        },
+        MenuItem {
+            label: automatic_label(automatic).to_owned(),
+            enabled: true,
+            command_id: None,
+        },
+        MenuItem {
+            label: auto_resume_label(auto_resume_on_ac).to_owned(),
+            enabled: true,
+            command_id: None,
+        },
+    ]
+}
+
+#[allow(dead_code)]
 pub(crate) fn menu_items(
     status: TrayStatus,
     startup_enabled: bool,
@@ -828,8 +873,8 @@ pub(crate) fn menu_items(
 
 pub(crate) fn menu_items_with_duration(
     status: TrayStatus,
-    startup_enabled: bool,
-    automatic: bool,
+    _startup_enabled: bool,
+    _automatic: bool,
     _timing: TimingValues,
     paused: bool,
 ) -> Vec<MenuItem> {
@@ -859,12 +904,7 @@ pub(crate) fn menu_items_with_duration(
             command_id: None,
         },
         MenuItem {
-            label: auto_start_label(startup_enabled).to_owned(),
-            enabled: true,
-            command_id: None,
-        },
-        MenuItem {
-            label: automatic_label(automatic).to_owned(),
+            label: "Settings >".to_owned(),
             enabled: true,
             command_id: None,
         },
@@ -975,12 +1015,13 @@ mod tests {
             TrayStatus::Paused,
             false,
             false,
+            true,
             true
         ));
     }
 
     #[test]
-    fn root_menu_orders_nine_entries_with_schedule_after_stop() {
+    fn root_menu_orders_eight_entries_with_settings_after_schedule() {
         let items = menu_items_with_duration(
             TrayStatus::Stopped,
             false,
@@ -988,7 +1029,7 @@ mod tests {
             TimingValues::default(),
             false,
         );
-        assert_eq!(items.len(), 9);
+        assert_eq!(items.len(), 8);
         let labels = items
             .iter()
             .map(|item| item.label.as_str())
@@ -1000,14 +1041,14 @@ mod tests {
                 "Start",
                 "Stop",
                 "Schedule >",
-                "Auto-start: Off",
-                "Auto-time: Off",
+                "Settings >",
                 "Status >",
                 "Logs",
                 "Quit"
             ]
         );
         assert!(items[3].enabled);
+        assert!(items[4].enabled);
     }
 
     #[test]
@@ -1054,6 +1095,7 @@ mod tests {
             TrayStatus::Paused,
             false,
             false,
+            true,
             true
         ));
         assert!(!menu_command_is_enabled_with_pause(
@@ -1061,6 +1103,7 @@ mod tests {
             TrayStatus::Paused,
             false,
             false,
+            true,
             true
         ));
         assert!(menu_command_is_enabled_with_pause(
@@ -1068,6 +1111,7 @@ mod tests {
             TrayStatus::Paused,
             false,
             false,
+            true,
             true
         ));
         assert_eq!(
@@ -1202,7 +1246,7 @@ mod tests {
         assert!(!paused_menu[1].enabled);
         assert!(!paused_menu[2].enabled);
         assert!(paused_menu[3].enabled);
-        assert!(paused_menu[7].enabled);
+        assert!(paused_menu[6].enabled);
     }
 
     #[test]
@@ -1252,6 +1296,7 @@ mod tests {
                     TrayStatus::Stopped,
                     false,
                     false,
+                    true,
                     false,
                 )
             })
@@ -1268,8 +1313,8 @@ mod tests {
 
     #[test]
     fn logs_command_is_separate_from_read_only_status() {
-        assert_eq!(LOGS_COMMAND_ID, 1009);
-        assert_eq!(GITHUB_COMMAND_ID, 1010);
+        assert_eq!(LOGS_COMMAND_ID, 1050);
+        assert_eq!(GITHUB_COMMAND_ID, 1051);
         assert_eq!(GITHUB_URL, "https://github.com/kaiiuen/true-tick");
         let items = status_menu_items(
             TrayStatus::Stopped,
@@ -1292,6 +1337,8 @@ mod tests {
             (1006, "Launch True™ Tick when you sign in"),
             (1007, "Request timing automatically on AC power"),
             (1008, "Request timing automatically on AC power"),
+            (1009, "Resume timing when returning to AC power"),
+            (1010, "Resume timing when returning to AC power"),
             (LOGS_COMMAND_ID, "Open status and session logs"),
             (GITHUB_COMMAND_ID, "Open True™ Tick on GitHub"),
             (DURATION_MENU_COMMAND_ID, "Schedule a bounded timing action"),
@@ -1515,7 +1562,7 @@ mod tests {
 
     #[test]
     fn start_stop_and_toggle_actions_keep_the_native_menu_open() {
-        for command in [1001, 1002, 1005, 1006, 1007, 1008] {
+        for command in [1001, 1002, 1005, 1006, 1007, 1008, 1009, 1010] {
             assert!(menu_action_keeps_open(command));
         }
         for command in [LOGS_COMMAND_ID, GITHUB_COMMAND_ID, 1004] {
@@ -1558,6 +1605,7 @@ mod tests {
                 false,
                 false,
                 true,
+                true,
             ));
         }
         assert!(menu_action_keeps_open(CANCEL_SCHEDULED_COMMAND_ID));
@@ -1566,6 +1614,7 @@ mod tests {
             TrayStatus::Stopped,
             false,
             false,
+            true,
             false,
         ));
     }
@@ -1574,82 +1623,94 @@ mod tests {
     fn stop_command_is_disabled_when_not_running_and_enabled_when_active() {
         assert!(!menu_command_is_enabled(
             1002,
-            TrayStatus::Blocked,
+            TrayStatus::Stopped,
             false,
-            false
+            false,
+            true,
         ));
         assert!(!menu_command_is_enabled(
             1002,
-            TrayStatus::Stopped,
+            TrayStatus::Blocked,
             false,
-            false
+            false,
+            true,
         ));
         assert!(!menu_command_is_enabled(
             1002,
             TrayStatus::Unsupported,
             false,
-            false
+            false,
+            true,
         ));
         assert!(!menu_command_is_enabled(
             1002,
             TrayStatus::Paused,
             false,
-            false
+            false,
+            true,
         ));
         assert!(!menu_command_is_enabled(
             1002,
             TrayStatus::Pausing,
             false,
-            false
+            false,
+            true,
         ));
         assert!(!menu_command_is_enabled(
             1002,
             TrayStatus::Stopping,
             false,
-            false
+            false,
+            true,
         ));
         assert!(!menu_command_is_enabled(
             1002,
             TrayStatus::ScheduledStart,
             false,
-            false
+            false,
+            true,
         ));
         assert!(!menu_command_is_enabled(
             1002,
             TrayStatus::Degraded,
             false,
-            false
+            false,
+            true,
         ));
         assert!(!menu_command_is_enabled(
             1002,
             TrayStatus::Pending,
             false,
-            false
+            false,
+            true,
         ));
-
         assert!(menu_command_is_enabled(
             1002,
             TrayStatus::Running,
             false,
-            false
+            false,
+            true,
         ));
         assert!(menu_command_is_enabled(
             1002,
             TrayStatus::Starting,
             false,
-            false
+            false,
+            true,
         ));
         assert!(menu_command_is_enabled(
             1002,
             TrayStatus::ScheduledStop,
             false,
-            false
+            false,
+            true,
         ));
         assert!(menu_command_is_enabled(
             1002,
             TrayStatus::Unverified,
             false,
-            false
+            false,
+            true,
         ));
     }
 
@@ -1660,7 +1721,8 @@ mod tests {
             1004,
             TrayStatus::Running,
             true,
-            true
+            true,
+            true,
         ));
         assert!(!menu_action_keeps_open(1004));
     }
@@ -1671,96 +1733,155 @@ mod tests {
             1001,
             TrayStatus::Running,
             true,
-            false
+            false,
+            true,
         ));
         assert!(!menu_command_is_enabled(
             1006,
             TrayStatus::Stopped,
             false,
-            false
+            false,
+            true,
         ));
         assert!(!menu_command_is_enabled(
             1008,
             TrayStatus::Stopped,
             false,
-            false
+            false,
+            true,
+        ));
+        assert!(!menu_command_is_enabled(
+            1010,
+            TrayStatus::Stopped,
+            false,
+            false,
+            false,
         ));
         assert!(!menu_command_is_enabled(
             9999,
             TrayStatus::Stopped,
             false,
-            false
+            false,
+            true,
         ));
         assert!(menu_command_is_enabled(
             1001,
             TrayStatus::Stopped,
             false,
-            false
+            false,
+            true,
         ));
         assert!(menu_command_is_enabled(
             1006,
             TrayStatus::Stopped,
             true,
-            false
+            false,
+            true,
         ));
         assert!(menu_command_is_enabled(
             1008,
             TrayStatus::Stopped,
             false,
-            true
+            true,
+            true,
+        ));
+        assert!(menu_command_is_enabled(
+            1010,
+            TrayStatus::Stopped,
+            false,
+            false,
+            true,
         ));
     }
 
     #[test]
     fn repeated_commands_follow_the_current_state_without_duplicate_actions() {
         let mut status = TrayStatus::Stopped;
-        assert!(menu_command_is_enabled(1001, status, false, false));
+        assert!(menu_command_is_enabled(1001, status, false, false, true));
         status = TrayStatus::Running;
-        assert!(!menu_command_is_enabled(1001, status, false, false));
-        assert!(menu_command_is_enabled(1002, status, false, false));
+        assert!(!menu_command_is_enabled(1001, status, false, false, true));
+        assert!(menu_command_is_enabled(1002, status, false, false, true));
         status = TrayStatus::Stopped;
-        assert!(!menu_command_is_enabled(1002, status, false, false));
+        assert!(!menu_command_is_enabled(1002, status, false, false, true));
 
         let mut startup_enabled = false;
         assert!(menu_command_is_enabled(
             1005,
             status,
             startup_enabled,
-            false
+            false,
+            true,
         ));
         startup_enabled = true;
         assert!(!menu_command_is_enabled(
             1005,
             status,
             startup_enabled,
-            false
+            false,
+            true,
         ));
         assert!(menu_command_is_enabled(
             1006,
             status,
             startup_enabled,
-            false
+            false,
+            true,
+        ));
+        startup_enabled = false;
+        assert!(!menu_command_is_enabled(
+            1006,
+            status,
+            startup_enabled,
+            false,
+            true,
         ));
 
         let mut automatic = false;
         assert!(menu_command_is_enabled(
-            1007,
-            status,
-            startup_enabled,
-            automatic
+            1007, status, false, automatic, true,
         ));
         automatic = true;
         assert!(!menu_command_is_enabled(
-            1007,
-            status,
-            startup_enabled,
-            automatic
+            1007, status, false, automatic, true,
         ));
         assert!(menu_command_is_enabled(
-            1008,
+            1008, status, false, automatic, true,
+        ));
+        automatic = false;
+        assert!(!menu_command_is_enabled(
+            1008, status, false, automatic, true,
+        ));
+
+        let mut auto_resume = false;
+        assert!(menu_command_is_enabled(
+            1009,
             status,
-            startup_enabled,
-            automatic
+            false,
+            false,
+            auto_resume,
+        ));
+        auto_resume = true;
+        assert!(!menu_command_is_enabled(
+            1009,
+            status,
+            false,
+            false,
+            auto_resume,
+        ));
+        assert!(menu_command_is_enabled(
+            1010,
+            status,
+            false,
+            false,
+            auto_resume,
+        ));
+        auto_resume = false;
+        assert!(!menu_command_is_enabled(
+            1010,
+            status,
+            false,
+            false,
+            auto_resume,
         ));
     }
 
@@ -1785,8 +1906,7 @@ mod tests {
                 "Start",
                 "Stop",
                 "Schedule >",
-                "Auto-start: On",
-                "Auto-time: Off",
+                "Settings >",
                 "Status >",
                 "Logs",
                 "Quit"
@@ -1796,7 +1916,7 @@ mod tests {
         assert!(items[3].enabled);
         assert!(!items[1].enabled);
         assert!(items[6].enabled);
-        assert!(items[8].enabled);
+        assert!(items[7].enabled);
     }
 
     #[test]
@@ -2165,13 +2285,15 @@ mod tests {
             1002,
             TrayStatus::Stopping,
             false,
-            false
+            false,
+            true,
         ));
         assert!(!menu_command_is_enabled(
             1001,
             TrayStatus::Stopping,
             false,
-            false
+            false,
+            true,
         ));
     }
 
