@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -85,16 +87,16 @@ fn run() -> Result<i32, String> {
         .to_owned();
     let (slot, executable) =
         select(&root).map_err(|error| repair_reason(&root, &error.to_string()))?;
-    let status = Command::new(&executable)
+    Command::new(&executable)
         .args(std::env::args_os().skip(1))
-        .status()
+        .spawn()
         .map_err(|error| {
             repair_reason(
                 &root,
                 &format!("selected slot {slot:?} could not be launched: {error}"),
             )
         })?;
-    Ok(status.code().unwrap_or(1))
+    Ok(0)
 }
 
 #[cfg(windows)]
