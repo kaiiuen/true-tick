@@ -8,10 +8,11 @@ scripts/
 *.sh
 *.bat
 *.ps1
-thread_extracts/
 *.tmp
 *.tsv
 *.csv
+
+test_output.txt
 
 *.toml.tmp
 *.log
