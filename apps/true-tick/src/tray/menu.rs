@@ -70,7 +70,9 @@ pub(crate) unsafe fn show_menu(hwnd: *mut c_void, app: &mut App) {
     }
     let work_width = GetSystemMetrics(SM_CXWORKAREA).max(0);
     let work_height = GetSystemMetrics(SM_CYWORKAREA).max(0);
-    if work_width > 0 && work_height > 0 {
+    // Only clamp against the primary work area when anchor is inside the primary coordinate quadrant
+    // to preserve negative virtual coordinates on multi-monitor setups.
+    if work_width > 0 && work_height > 0 && anchor.x >= 0 && anchor.y >= 0 {
         anchor = clamp_menu_anchor(
             anchor,
             Rect {

@@ -763,11 +763,24 @@ pub fn format_tsv(rows: &[DiagnosticGridRow]) -> String {
 
 fn csv_field(cell: &str) -> String {
     let field = truncate_utf8(cell, MAX_FIELD_LENGTH);
-    if !field.contains([',', '"', '\n', '\r']) {
+    let trimmed = field.trim_start();
+    // CWE-1236: Neutralize formula injection if field starts with formula prefixes (=, @, or + / - followed by letters)
+    let needs_formula_neutralization = trimmed.starts_with(['=', '@'])
+        || (trimmed.starts_with(['+', '-'])
+            && trimmed[1..]
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_alphabetic()));
+    let needs_quoting = field.contains([',', '"', '\n', '\r']) || needs_formula_neutralization;
+
+    if !needs_quoting {
         return field;
     }
-    let mut quoted = String::with_capacity(field.len() + 2);
+    let mut quoted = String::with_capacity(field.len() + 4);
     quoted.push('"');
+    if needs_formula_neutralization {
+        quoted.push('\'');
+    }
     for character in field.chars() {
         if character == '"' {
             quoted.push('"');
@@ -1381,6 +1394,14 @@ mod tests {
         assert!(output.contains("1\t1\t"));
         assert!(output.contains("2\t2\t"));
         assert!(!output.contains("8\t8\t"));
+    }
+
+    #[test]
+    fn csv_formatter_neutralizes_formula_injection_attacks() {
+        assert_eq!(csv_field("=cmd|'calc'!A0"), "\"'=cmd|'calc'!A0\"");
+        assert_eq!(csv_field("@SUM(1,2)"), "\"'@SUM(1,2)\"");
+        assert_eq!(csv_field("+3ms"), "+3ms");
+        assert_eq!(csv_field("-12ms"), "-12ms");
     }
 
     #[test]

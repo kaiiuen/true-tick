@@ -1633,6 +1633,30 @@ unsafe extern "system" fn window_proc(
             WM_TIMER if app.duration_timer_id == Some(w_param) => {
                 handle_duration_timer(app, w_param);
             }
+            WM_POWERBROADCAST if w_param == PBT_APMSUSPEND => {
+                app.begin_operation(DiagnosticSource::PowerEvent);
+                app.record("power.broadcast", "event=APMSUSPEND");
+                app.running_since = None;
+                release_for_power_change(app);
+                app.finish_operation(DiagnosticOutcome::Completed);
+            }
+            WM_POWERBROADCAST if w_param == PBT_APMRESUMESUSPEND || w_param == PBT_APMRESUMEAUTOMATIC => {
+                app.begin_operation(DiagnosticSource::PowerEvent);
+                app.record(
+                    "power.broadcast",
+                    format!(
+                        "event={}",
+                        if w_param == PBT_APMRESUMESUSPEND {
+                            "APMRESUMESUSPEND"
+                        } else {
+                            "APMRESUMEAUTOMATIC"
+                        }
+                    ),
+                );
+                let _ = app.observation.refresh_power();
+                handle_power_broadcast_event(hwnd, app);
+                app.finish_operation(DiagnosticOutcome::Completed);
+            }
             WM_POWERBROADCAST if w_param == PBT_APMPOWERSTATUSCHANGE => {
                 app.begin_operation(DiagnosticSource::PowerEvent);
                 app.record("power.broadcast", "event=APMPOWERSTATUSCHANGE");
@@ -1656,6 +1680,10 @@ unsafe extern "system" fn window_proc(
                 );
                 handle_power_broadcast_event(hwnd, app);
                 app.finish_operation(DiagnosticOutcome::Completed);
+            }
+            WM_CLOSE => {
+                handle_menu_command(hwnd, app, ID_QUIT);
+                return 0;
             }
             WM_DESTROY => PostQuitMessage(0),
             _ => {}
