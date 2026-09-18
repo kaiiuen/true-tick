@@ -115,10 +115,8 @@ fn verify_slot_integrity(root: &Path, slot: Slot) -> Result<(), SelectionError> 
         if line.is_empty() {
             continue;
         }
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            let hash = parts[0];
-            let filename = parts[1];
+        let mut parts = line.split_whitespace();
+        if let (Some(hash), Some(filename)) = (parts.next(), parts.next()) {
             if filename == target_rel_path || filename == normalized_rel_path {
                 expected_hash = Some(hash.to_lowercase());
                 break;
@@ -160,10 +158,8 @@ fn verify_golden_master(root: &Path) -> Result<PathBuf, SelectionError> {
             if line.is_empty() {
                 continue;
             }
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let hash = parts[0];
-                let filename = parts[1];
+            let mut parts = line.split_whitespace();
+            if let (Some(hash), Some(filename)) = (parts.next(), parts.next()) {
                 if filename == target_rel_path || filename == normalized_rel_path {
                     expected_hash = Some(hash.to_lowercase());
                     break;

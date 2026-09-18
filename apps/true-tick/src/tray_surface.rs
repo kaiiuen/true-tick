@@ -640,17 +640,13 @@ pub(crate) const fn menu_command_is_enabled_with_pause(
             status,
             TrayStatus::Running | TrayStatus::Starting | TrayStatus::Stopping | TrayStatus::Paused
         ),
-        1002 => !matches!(
+        // Command 1002 (Stop): Enable strictly when timing is running, starting, scheduled to stop, or unverified
+        1002 => matches!(
             status,
-            TrayStatus::Stopped
-                | TrayStatus::Blocked
-                | TrayStatus::Unsupported
-                | TrayStatus::Paused
-                | TrayStatus::Pausing
-                | TrayStatus::Stopping
-                | TrayStatus::ScheduledStart
-                | TrayStatus::Degraded
-                | TrayStatus::Pending
+            TrayStatus::Running
+                | TrayStatus::Starting
+                | TrayStatus::ScheduledStop
+                | TrayStatus::Unverified
         ),
         1005 => !startup_enabled,
         1006 => startup_enabled,

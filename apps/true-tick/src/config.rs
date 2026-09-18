@@ -358,7 +358,7 @@ fn parse_schedule_presets(value: &str, line_number: usize) -> Result<Vec<u32>, C
         .strip_prefix('[')
         .and_then(|text| text.strip_suffix(']'))
         .ok_or_else(|| invalid_line("schedule_presets_seconds must be an integer array"))?;
-    let mut presets = Vec::new();
+    let mut presets = Vec::with_capacity(MAX_PRESETS);
     for element in inner.split(',') {
         let element = element.trim();
         if element.is_empty() {

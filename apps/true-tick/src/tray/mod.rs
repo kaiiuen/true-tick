@@ -2193,7 +2193,10 @@ fn message_box_decision(result: i32) -> QuitDialogDecision {
 }
 
 pub(crate) fn wide(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(std::iter::once(0)).collect()
+    let mut buffer = Vec::with_capacity(value.len() + 1);
+    buffer.extend(value.encode_utf16());
+    buffer.push(0);
+    buffer
 }
 
 #[repr(C)]
@@ -2503,6 +2506,9 @@ mod tests {
             diagnostic_summary: None,
             diagnostic_hud_separator: None,
             diagnostic_toolbar_separator: None,
+            diagnostic_toolbar_div_filter: None,
+            diagnostic_toolbar_div_search: None,
+            diagnostic_toolbar_div_export: None,
             diagnostic_display_label: None,
             diagnostic_display_input: None,
             diagnostic_show_all_button: None,

@@ -35,21 +35,27 @@ impl Hns {
     /// The output is exact to four decimal places because one HNS is exactly
     /// one ten-thousandth of a millisecond. No rounding is applied.
     pub fn format_milliseconds(self) -> String {
-        format!(
-            "{}.{:04}",
-            self.0 / HNS_PER_MILLISECOND,
-            self.0 % HNS_PER_MILLISECOND
-        )
+        let mut buffer = [0u8; 32];
+        let len = self.write_milliseconds_bytes(&mut buffer);
+        // SAFETY: write_milliseconds_bytes strictly emits ASCII digits and a period
+        unsafe { std::str::from_utf8_unchecked(&buffer[..len]) }.to_owned()
+    }
+
+    /// Writes concise millisecond display bytes directly into a stack buffer.
+    pub fn write_milliseconds_bytes(self, buffer: &mut [u8; 32]) -> usize {
+        use std::io::Write;
+        let whole = self.0 / HNS_PER_MILLISECOND;
+        let rem = self.0 - (whole * HNS_PER_MILLISECOND);
+        let mut cursor = std::io::Cursor::new(&mut buffer[..]);
+        let _ = write!(cursor, "{whole}.{rem:04}");
+        cursor.position() as usize
     }
 
     /// Formats the value with both exact milliseconds and the raw HNS count.
     pub fn format_detailed(self) -> String {
-        format!(
-            "{}.{:04} ms ({} HNS)",
-            self.0 / HNS_PER_MILLISECOND,
-            self.0 % HNS_PER_MILLISECOND,
-            self.0
-        )
+        let whole = self.0 / HNS_PER_MILLISECOND;
+        let rem = self.0 - (whole * HNS_PER_MILLISECOND);
+        format!("{whole}.{rem:04} ms ({} HNS)", self.0)
     }
 }
 

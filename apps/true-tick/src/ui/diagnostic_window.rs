@@ -79,7 +79,7 @@ const DIAGNOSTIC_TOOLBAR_MIN_MESSAGE_WIDTH: i32 = 140;
 // Compact toolbar widths at 96 DPI in left to right order. Both WM_CREATE sizes and
 // diagnostic_toolbar_layout consume this same list so creation and layout never drift.
 const DIAGNOSTIC_TOOLBAR_CONTROL_WIDTHS: [i32; 12] =
-    [64, 52, 64, 100, 48, 110, 118, 72, 128, 56, 56, 70];
+    [64, 52, 64, 100, 54, 104, 128, 66, 124, 56, 56, 70];
 const DIAGNOSTIC_COLUMN_WIDTHS: [i32; 11] = [54, 70, 78, 78, 70, 86, 82, 90, 86, 160, 240];
 const DIAGNOSTIC_COLUMN_MIN_WIDTHS: [i32; 11] = [36, 52, 64, 64, 52, 64, 60, 68, 64, 84, 240];
 const DIAGNOSTIC_COLUMN_MAX_WIDTHS: [i32; 11] =
@@ -195,6 +195,9 @@ fn clear_diagnostic_state(app: &mut App) {
     app.diagnostic_summary = None;
     app.diagnostic_hud_separator = None;
     app.diagnostic_toolbar_separator = None;
+    app.diagnostic_toolbar_div_filter = None;
+    app.diagnostic_toolbar_div_search = None;
+    app.diagnostic_toolbar_div_export = None;
     app.diagnostic_display_label = None;
     app.diagnostic_display_input = None;
     app.diagnostic_show_all_button = None;
@@ -2998,7 +3001,7 @@ pub unsafe extern "system" fn diagnostic_window_proc(
         let search_label = CreateWindowExW(
             0,
             static_class.as_ptr(),
-            wide("Search:").as_ptr(),
+            wide("|  Search:").as_ptr(),
             WS_CHILD | WS_VISIBLE | SS_LEFT,
             0,
             0,
@@ -3029,7 +3032,7 @@ pub unsafe extern "system" fn diagnostic_window_proc(
         let label = CreateWindowExW(
             0,
             static_class.as_ptr(),
-            wide("Rows to copy/export:").as_ptr(),
+            wide("|  Rows to copy/export:").as_ptr(),
             WS_CHILD | WS_VISIBLE | SS_LEFT,
             0,
             0,
