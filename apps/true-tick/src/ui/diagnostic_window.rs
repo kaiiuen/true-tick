@@ -541,8 +541,8 @@ fn diagnostic_hud_field_text(fields: DiagnosticHudFields<'_>) -> String {
 
 fn diagnostic_chain_status_text(events: &[DiagnosticEvent]) -> String {
     match verify_event_chain(events) {
-        Ok(()) => "OK".to_owned(),
-        Err((index, _reason)) => format!("Error at #{index}"),
+        Ok(()) => "Verified (SHA-256)".to_owned(),
+        Err((index, _reason)) => format!("TAMPER/ERROR at row {index}"),
     }
 }
 
