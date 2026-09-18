@@ -1,7 +1,7 @@
 use tick_core::Hns;
 use tick_platform_windows::{
-    HARDWARE_TIMER_TOLERANCE_HNS, KernelSettleProbe, NtStatus, TimerBounds, TimerError,
-    TimerObservation, TimerPlatform, TimerQuery,
+    KernelSettleProbe, NtStatus, TimerBounds, TimerError, TimerObservation, TimerPlatform,
+    TimerQuery, HARDWARE_TIMER_TOLERANCE_HNS,
 };
 
 struct FaultyPlatform {
@@ -60,8 +60,14 @@ fn interval_validation_rejects_zero_hns() {
         raw_status: 0,
     };
 
-    assert_eq!(query.resolve_request(Hns::ZERO), Err(TimerError::InvalidInterval));
-    assert_eq!(zero_bounds.smallest_supported_boundary(), Err(TimerError::InvalidInterval));
+    assert_eq!(
+        query.resolve_request(Hns::ZERO),
+        Err(TimerError::InvalidInterval)
+    );
+    assert_eq!(
+        zero_bounds.smallest_supported_boundary(),
+        Err(TimerError::InvalidInterval)
+    );
 }
 
 #[test]
@@ -77,8 +83,14 @@ fn interval_validation_rejects_values_below_minimum_resolution() {
         raw_status: 0,
     };
 
-    assert_eq!(query.resolve_request(Hns::new(4_999)), Err(TimerError::InvalidInterval));
-    assert_eq!(query.resolve_request(Hns::new(1)), Err(TimerError::InvalidInterval));
+    assert_eq!(
+        query.resolve_request(Hns::new(4_999)),
+        Err(TimerError::InvalidInterval)
+    );
+    assert_eq!(
+        query.resolve_request(Hns::new(1)),
+        Err(TimerError::InvalidInterval)
+    );
 }
 
 #[test]
@@ -94,10 +106,22 @@ fn interval_validation_rejects_values_above_maximum_resolution() {
         raw_status: 0,
     };
 
-    assert_eq!(query.resolve_request(Hns::new(156_251)), Err(TimerError::InvalidInterval));
-    assert_eq!(query.resolve_request(Hns::new(200_000)), Err(TimerError::InvalidInterval));
-    assert_eq!(query.resolve_request(Hns::new(u32::MAX as u64 + 1)), Err(TimerError::InvalidInterval));
-    assert_eq!(query.resolve_request(Hns::new(u64::MAX)), Err(TimerError::InvalidInterval));
+    assert_eq!(
+        query.resolve_request(Hns::new(156_251)),
+        Err(TimerError::InvalidInterval)
+    );
+    assert_eq!(
+        query.resolve_request(Hns::new(200_000)),
+        Err(TimerError::InvalidInterval)
+    );
+    assert_eq!(
+        query.resolve_request(Hns::new(u32::MAX as u64 + 1)),
+        Err(TimerError::InvalidInterval)
+    );
+    assert_eq!(
+        query.resolve_request(Hns::new(u64::MAX)),
+        Err(TimerError::InvalidInterval)
+    );
 }
 
 #[test]
@@ -119,11 +143,23 @@ fn interval_validation_normalizes_inverted_boundaries_where_min_exceeds_max() {
         raw_status: 0,
     };
 
-    assert_eq!(query.resolve_request(Hns::new(10_000)), Ok(Hns::new(10_000)));
+    assert_eq!(
+        query.resolve_request(Hns::new(10_000)),
+        Ok(Hns::new(10_000))
+    );
     assert_eq!(query.resolve_request(Hns::new(5_000)), Ok(Hns::new(5_000)));
-    assert_eq!(query.resolve_request(Hns::new(156_250)), Ok(Hns::new(156_250)));
-    assert_eq!(query.resolve_request(Hns::new(4_999)), Err(TimerError::InvalidInterval));
-    assert_eq!(query.resolve_request(Hns::new(156_251)), Err(TimerError::InvalidInterval));
+    assert_eq!(
+        query.resolve_request(Hns::new(156_250)),
+        Ok(Hns::new(156_250))
+    );
+    assert_eq!(
+        query.resolve_request(Hns::new(4_999)),
+        Err(TimerError::InvalidInterval)
+    );
+    assert_eq!(
+        query.resolve_request(Hns::new(156_251)),
+        Err(TimerError::InvalidInterval)
+    );
     assert_eq!(query.resolve_request(Hns::ZERO), Ok(Hns::new(5_000)));
 }
 
@@ -144,7 +180,10 @@ fn interval_validation_rejects_inverted_boundaries_with_zero_or_overflow() {
         reported_current: Hns::new(156_250),
         raw_status: 0,
     };
-    assert_eq!(query_zero.resolve_request(Hns::ZERO), Err(TimerError::InvalidInterval));
+    assert_eq!(
+        query_zero.resolve_request(Hns::ZERO),
+        Err(TimerError::InvalidInterval)
+    );
 
     let inverted_overflow = TimerBounds {
         minimum_interval: Hns::new(u32::MAX as u64 + 50),
@@ -159,7 +198,10 @@ fn interval_validation_rejects_inverted_boundaries_with_zero_or_overflow() {
         reported_current: Hns::new(156_250),
         raw_status: 0,
     };
-    assert_eq!(query_overflow.resolve_request(Hns::new(10_000)), Err(TimerError::InvalidInterval));
+    assert_eq!(
+        query_overflow.resolve_request(Hns::new(10_000)),
+        Err(TimerError::InvalidInterval)
+    );
 }
 
 #[test]

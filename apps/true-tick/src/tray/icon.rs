@@ -141,6 +141,64 @@ pub(crate) unsafe fn destroy_icon(icon: *mut c_void) {
     }
 }
 
+/// Owns the previous and incoming `h_icon` handles while `update_icon` swaps
+/// the tray icon. Exactly one of the two handles is destroyed when the guard
+/// drops. After a successful `NIM_MODIFY` the retired previous handle is freed
+/// so old icons never accumulate as leaked GDI handles. After a failed modify
+/// the unused incoming handle is freed instead. When both handles alias or the
+/// losing handle is null, nothing is destroyed because the surviving handle is
+/// still live either way.
+struct IconSlotTransition {
+    previous: *mut c_void,
+    incoming: *mut c_void,
+    keep_incoming: bool,
+}
+
+impl IconSlotTransition {
+    fn begin(previous: *mut c_void, incoming: *mut c_void) -> Self {
+        Self {
+            previous,
+            incoming,
+            keep_incoming: false,
+        }
+    }
+
+    fn previous(&self) -> *mut c_void {
+        self.previous
+    }
+
+    fn succeed(&mut self) {
+        self.keep_incoming = true;
+    }
+}
+
+/// Picks the handle that must be destroyed once an icon transition resolves.
+/// Returns null when there is nothing to free, either because the losing side
+/// holds no handle or because both sides alias the same live handle and
+/// destroying it would free the icon the tray is still displaying.
+fn icon_transition_stale_handle(
+    previous: *mut c_void,
+    incoming: *mut c_void,
+    keep_incoming: bool,
+) -> *mut c_void {
+    let loser = if keep_incoming { previous } else { incoming };
+    let winner = if keep_incoming { incoming } else { previous };
+    if loser.is_null() || loser == winner {
+        std::ptr::null_mut()
+    } else {
+        loser
+    }
+}
+
+impl Drop for IconSlotTransition {
+    fn drop(&mut self) {
+        let stale = icon_transition_stale_handle(self.previous, self.incoming, self.keep_incoming);
+        if !stale.is_null() {
+            unsafe { destroy_icon(stale) };
+        }
+    }
+}
+
 pub(crate) fn update_icon(
     icon: &mut NotifyIconData,
     status: TrayStatus,
@@ -149,8 +207,9 @@ pub(crate) fn update_icon(
     block_reason: Option<PolicyReason>,
 ) -> Result<(), u32> {
     let replacement = unsafe { status_icon(status, dpi_for_window(icon.h_wnd)) }?;
-    let old_icon = icon.h_icon;
     let old_tip = icon.sz_tip;
+    let mut transition = IconSlotTransition::begin(icon.h_icon, replacement);
+    let old_icon = transition.previous();
     icon.h_icon = replacement;
     icon.sz_tip = [0; 128];
     for (target, source) in icon.sz_tip.iter_mut().zip(
@@ -177,10 +236,9 @@ pub(crate) fn update_icon(
     ) {
         icon.h_icon = old_icon;
         icon.sz_tip = old_tip;
-        unsafe { destroy_icon(replacement) };
         Err(raw_error)
     } else {
-        unsafe { destroy_icon(old_icon) };
+        transition.succeed();
         Ok(())
     }
 }
@@ -246,5 +304,45 @@ mod tests {
         for (canvas, expected) in [(16, 64), (20, 80), (24, 96), (32, 128), (64, 512)] {
             assert_eq!(mask_buffer_len(canvas), expected);
         }
+    }
+
+    #[test]
+    fn icon_transition_marks_previous_handle_stale_after_success() {
+        let previous = 0x1111usize as *mut c_void;
+        let incoming = 0x2222usize as *mut c_void;
+        assert_eq!(
+            icon_transition_stale_handle(previous, incoming, true),
+            previous
+        );
+    }
+
+    #[test]
+    fn icon_transition_marks_incoming_handle_stale_after_failure() {
+        let previous = 0x1111usize as *mut c_void;
+        let incoming = 0x2222usize as *mut c_void;
+        assert_eq!(
+            icon_transition_stale_handle(previous, incoming, false),
+            incoming
+        );
+    }
+
+    #[test]
+    fn icon_transition_skips_destroy_when_handles_alias_or_are_null() {
+        let previous = 0x1111usize as *mut c_void;
+        let null = std::ptr::null_mut();
+        assert!(icon_transition_stale_handle(previous, previous, true).is_null());
+        assert!(icon_transition_stale_handle(previous, previous, false).is_null());
+        assert!(icon_transition_stale_handle(null, previous, true).is_null());
+        assert!(icon_transition_stale_handle(previous, null, false).is_null());
+        assert!(icon_transition_stale_handle(null, null, true).is_null());
+        assert!(icon_transition_stale_handle(null, null, false).is_null());
+        assert_eq!(
+            icon_transition_stale_handle(null, previous, false),
+            previous
+        );
+        assert_eq!(
+            icon_transition_stale_handle(previous, null, true),
+            previous
+        );
     }
 }

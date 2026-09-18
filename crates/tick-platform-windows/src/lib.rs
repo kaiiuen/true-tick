@@ -361,6 +361,22 @@ impl TimerPlatform for WindowsTimerPlatform {
                         observation.reported_current.value()
                     ),
                 );
+                let mut rollback_current = 0u32;
+                let rollback_status = unsafe {
+                    nt_set_timer_resolution(interval.value() as u32, false, &mut rollback_current)
+                };
+                self.requested = None;
+                self.log(
+                    "native.NtSetTimerResolution.postcondition_rollback",
+                    format!(
+                        "raw_status={} requested_hns={} effective_hns={} rollback_status={} rollback_effective_hns={}",
+                        status,
+                        interval.value(),
+                        current,
+                        rollback_status,
+                        rollback_current
+                    ),
+                );
                 return Err(TimerError::PostconditionUnverified {
                     raw_status: status,
                     reported_current: observation.reported_current,
@@ -403,8 +419,14 @@ impl TimerPlatform for WindowsTimerPlatform {
         #[cfg(windows)]
         {
             if self.requested != Some(interval) {
-                self.log("timer.release.rejected", "ownership_interval_not_tracked");
-                return Err(TimerError::InvalidInterval);
+                self.log(
+                    "timer.release.restorative",
+                    format!(
+                        "tracked_hns={} requested_hns={} action=restorative_release",
+                        self.requested.map(|value| value.value()).unwrap_or(0),
+                        interval.value()
+                    ),
+                );
             }
             let mut current = 0u32;
             let status =
@@ -1060,5 +1082,82 @@ mod tests {
         assert!(!observation.is_satisfied());
         assert!(!observation.is_finer_than_requested());
         assert_eq!(observation.effective_relation(), "unverified");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn release_without_tracked_request_issues_native_call() {
+        // Restorative release must not short circuit on missing ownership.
+        // A release for an interval that was never tracked should still reach
+        // the kernel and clear any stale tracking marker.
+        let mut platform = WindowsTimerPlatform::default();
+        let result = platform.release(Hns::new(5_000));
+        // The kernel call either succeeds (Ok) or fails with a native status
+        // (ReleaseFailed). It must not be rejected as InvalidInterval.
+        match result {
+            Ok(observation) => {
+                assert_eq!(observation.requested, Hns::new(5_000));
+                assert_eq!(observation.raw_status, STATUS_SUCCESS);
+            }
+            Err(TimerError::ReleaseFailed { raw_status }) => {
+                assert_ne!(raw_status, STATUS_SUCCESS);
+            }
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+        assert_eq!(platform.requested, None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn release_with_mismatched_interval_still_issues_native_call() {
+        // Restorative release must fire even when the caller interval differs
+        // from the tracked one so a wedged kernel state can be unwound.
+        let mut platform = WindowsTimerPlatform {
+            requested: Some(Hns::new(10_000)),
+            ..Default::default()
+        };
+        let result = platform.release(Hns::new(5_000));
+        match result {
+            Ok(observation) => {
+                assert_eq!(observation.requested, Hns::new(5_000));
+            }
+            Err(TimerError::ReleaseFailed { .. }) => {}
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+        assert_eq!(platform.requested, None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn postcondition_unverified_clears_tracked_request() {
+        // Drive a request for the coarsest supported boundary. The kernel
+        // reports the effective current resolution after NtSetTimerResolution.
+        // When the reported value lands outside the hardware tolerance the
+        // adapter must roll back the acquisition and clear `requested`.
+        // This test asserts the invariant that a failed postcondition never
+        // leaves a stale tracked interval behind, regardless of which branch
+        // the kernel takes on this host.
+        let mut platform = WindowsTimerPlatform::default();
+        let probe = platform.query(Hns::ZERO);
+        let Ok(query) = probe else {
+            return;
+        };
+        let (_, upper) = query.bounds.numeric_interval();
+        let candidate = upper;
+        if candidate == Hns::ZERO || candidate.value() > u32::MAX as u64 {
+            return;
+        }
+        match platform.request(candidate) {
+            Ok(observation) => {
+                assert!(observation.is_satisfied());
+                assert_eq!(platform.requested, Some(candidate));
+            }
+            Err(TimerError::PostconditionUnverified { .. }) => {
+                assert_eq!(platform.requested, None);
+            }
+            Err(_) => {
+                assert_eq!(platform.requested, None);
+            }
+        }
     }
 }

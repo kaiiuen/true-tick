@@ -134,8 +134,11 @@ deterministic genesis seed (`TrueTick-Genesis-v1`), and each subsequent event st
 its predecessor entry hash in `prev_hash` plus its own `entry_hash` computed over
 the link, sequence, timestamp, name, and details. `verify_event_chain` replays the
 chain over a snapshot and reports the first index whose content hash or link hash
-mismatches, so any modification to a recorded event is detected. The store tracks
-the running tail hash internally so recording stays O(1).
+mismatches, so any modification to a recorded event is detected. The link check
+between two retained neighbours applies only when their sequence numbers are
+consecutive, since a sequence gap marks an eviction boundary where the surviving
+row still references the evicted predecessor hash. The store tracks the running
+tail hash internally so recording stays O(1).
 Fields are sanitized and bounded so raw pointers, credentials, private tokens, arbitrary
 secrets, and unbounded sensitive paths are not recorded. Ownership state is
 logged separately from effective system state. After release, a remaining finer
@@ -162,7 +165,10 @@ Auto-time on attempts acquisition. Battery-to-AC with Auto-time off shows
 stopped current timing rather than remaining blocked.
 Configuration writes use a flushed temporary file replacement under a unique
 temporary name in the target directory, so two instances cannot collide. Parse and write
-errors remain visible. Portable startup registration validates the existing
+errors remain visible. A corrupted or unreadable configuration file is preserved
+beside the original as `true-tick.toml.corrupted.<timestamp>.bak` and replaced with
+factory defaults so the next start loads cleanly. When two recoveries land inside
+the same millisecond a monotonic counter suffix keeps each backup name unique. Portable startup registration validates the existing
 `Launcher.exe` file before registry writes. The debug fallback validates the
 current executable shape and existence. A failed configuration save after a
 registry change never deletes a value this process did not create. After an enable

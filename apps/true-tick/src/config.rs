@@ -130,17 +130,38 @@ pub fn load_with_migration(path: &Path) -> Result<LoadOutcome, ConfigError> {
 /// Preserves the damaged file beside the original as
 /// `true-tick.toml.corrupted.<timestamp>.bak` then atomically rewrites a clean
 /// factory default configuration so the next start loads normally.
+/// When two recoveries land inside the same millisecond the suffix walks a
+/// monotonic counter so each backup name stays unique instead of failing.
 fn recover_corrupted(path: &Path) -> Result<LoadOutcome, ConfigError> {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or_default();
-    let mut name = path
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let base = path
         .file_name()
         .unwrap_or_else(|| OsStr::new("true-tick.toml"))
         .to_os_string();
-    name.push(format!(".corrupted.{timestamp}.bak"));
-    let backup = path.parent().unwrap_or_else(|| Path::new(".")).join(name);
+    let mut attempt = 0u32;
+    let backup = loop {
+        let mut name = base.clone();
+        if attempt == 0 {
+            name.push(format!(".corrupted.{timestamp}.bak"));
+        } else {
+            name.push(format!(".corrupted.{timestamp}.{attempt}.bak"));
+        }
+        let candidate = parent.join(name);
+        if !candidate.exists() {
+            break candidate;
+        }
+        attempt += 1;
+        if attempt > 1024 {
+            return Err(ConfigError::Write(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "could not allocate a unique corrupted config backup name",
+            )));
+        }
+    };
     fs::rename(path, &backup).map_err(ConfigError::Write)?;
     let config = Config::default();
     save_atomic(path, &config)?;
@@ -720,6 +741,38 @@ mod tests {
         let outcome = load_with_recovery(&path).unwrap();
         assert!(outcome.recovered_from_corruption);
         assert_eq!(outcome.config, Config::default());
+        assert_eq!(load(&path).unwrap(), Config::default());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn corrupted_backup_collision_allocates_a_unique_name() {
+        let root =
+            std::env::temp_dir().join(format!("true-tick-config-collision-{}", std::process::id()));
+        let path = root.join("true-tick.toml");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&path, "automatic = not valid toml\n").unwrap();
+        let first = load_with_recovery(&path).unwrap();
+        assert!(first.recovered_from_corruption);
+
+        fs::write(&path, "automatic = still not valid\n").unwrap();
+        let second = load_with_recovery(&path).unwrap();
+        assert!(second.recovered_from_corruption);
+
+        let mut backups: Vec<PathBuf> = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name().is_some_and(|name| {
+                    let name = name.to_string_lossy();
+                    name.starts_with("true-tick.toml.corrupted.") && name.ends_with(".bak")
+                })
+            })
+            .collect();
+        backups.sort();
+        assert_eq!(backups.len(), 2, "expected two backups: {backups:?}");
+        assert_ne!(backups[0], backups[1]);
         assert_eq!(load(&path).unwrap(), Config::default());
         fs::remove_dir_all(root).unwrap();
     }

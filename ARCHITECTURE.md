@@ -111,7 +111,9 @@ preceding entry hash in `prev_hash` and its own `entry_hash` computed over the p
 hash, sequence, elapsed nanoseconds, event name, and details. `verify_event_chain`
 replays a snapshot and returns the first index whose entry hash or previous-hash link
 fails verification, so tampering with a stored name, details, sequence, or timestamp is
-detected. A six-variant `EventCategory` enum (`Startup`, `Timer`, `Power`, `UI`,
+detected. Adjacent link verification is skipped across a sequence gap, because a
+truncated ring buffer leaves the surviving row pointing at an evicted predecessor
+whose hash cannot appear on the retained neighbour. A six-variant `EventCategory` enum (`Startup`, `Timer`, `Power`, `UI`,
 `Schedule`, `System`) classifies each event by name prefix, and the diagnostic window
 uses it for live grid filtering.
 
@@ -201,6 +203,11 @@ in the same directory before replacement, so two instances cannot collide, and t
 module path query grows its buffer within a bounded retry limit so a long path is
 never silently truncated. A failed configuration save after a startup registry
 change follows a non-destructive rollback rule. Parse and write failures are surfaced in the tray status.
+A corrupted or unreadable configuration file is preserved beside the original as
+`true-tick.toml.corrupted.<timestamp>.bak` and replaced with factory defaults so
+the next start loads cleanly. When two recoveries land inside the same millisecond
+a monotonic counter suffix keeps each backup name unique rather than failing the
+rename.
 Missing or invalid A/B metadata requires repair and never defaults to slot A.
 Portable startup registration validates launcher existence and executable identity before
 writing. The debug fallback validates the current executable shape and existence.

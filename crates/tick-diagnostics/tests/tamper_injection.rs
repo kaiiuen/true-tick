@@ -164,10 +164,8 @@ fn persistence_failure_resilience_empty_or_corrupted_snapshot() {
     assert!(!sanitized_details.contains('\r'));
     assert!(!sanitized_details.contains('\n'));
 
-    let corrupted_rows = diagnostic_grid_rows(
-        &single_corrupted,
-        RowSelection::all(single_corrupted.len()),
-    );
+    let corrupted_rows =
+        diagnostic_grid_rows(&single_corrupted, RowSelection::all(single_corrupted.len()));
     let tsv_rendered = format_tsv(&corrupted_rows);
     assert!(!tsv_rendered.contains('\0'));
     assert!(!tsv_rendered.contains("\r\nwith"));

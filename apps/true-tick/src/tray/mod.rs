@@ -756,7 +756,10 @@ fn guarded_release(
             let effective = app.timing_snapshot.effective;
             let boundary = app.timing_snapshot.requested;
             if released && boundary.is_some_and(|value| release_needs_handoff(value, effective)) {
-                let boundary = boundary.expect("boundary checked above");
+                let Some(boundary) = boundary else {
+                    app.record("ownership.release.error", "reason=missing_release_boundary");
+                    return Err("missing release boundary".to_owned());
+                };
                 if begin_handoff(
                     app,
                     boundary,
@@ -1696,7 +1699,9 @@ fn handle_handoff_timer(app: &mut App) {
         }
     };
     let effective = observation.map(|value| value.reported_current);
-    let mut tracker = app.handoff.take().expect("handoff tracker remains active");
+    let Some(mut tracker) = app.handoff.take() else {
+        return;
+    };
     let progress = tracker.observe(effective);
     app.record(
         "handoff.observation",

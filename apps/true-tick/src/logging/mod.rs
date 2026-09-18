@@ -80,6 +80,23 @@ pub const LOG_HEADER: &str = "Row,Sequence,Elapsed,Operation,Parent,Correlation,
 /// the process wide lock is the only shared state between writers.
 static LOG_APPEND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Limits detached log writer threads to one at a time. When a flush is already
+/// active, additional append requests coalesce by dropping their payload because
+/// the diagnostic buffer is snapshotted fresh on every flush and the next flush
+/// cycle republishes anything the dropped thread would have written.
+static LOG_WRITER_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Resets `LOG_WRITER_ACTIVE` when the writer thread finishes, including paths
+/// that exit early through an IO error.
+struct LogWriterActiveGuard;
+
+impl Drop for LogWriterActiveGuard {
+    fn drop(&mut self) {
+        LOG_WRITER_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// Writes `lines` to the log file already opened for appending.
 ///
 /// The header row is emitted when the file is absent (the open creates it empty)
@@ -117,7 +134,19 @@ fn append_log_lines_sync(
 }
 
 pub fn append_log_lines(directory: PathBuf, filename: String, lines: Vec<String>) {
+    if LOG_WRITER_ACTIVE
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return;
+    }
     std::thread::spawn(move || {
+        let _active_guard = LogWriterActiveGuard;
         if let Err(write_error) = append_log_lines_sync(&directory, &filename, &lines) {
             eprintln!("true-tick log write failed: {write_error}");
         }

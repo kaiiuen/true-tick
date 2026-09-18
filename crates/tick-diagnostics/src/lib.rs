@@ -239,6 +239,13 @@ pub fn compute_entry_hash(
     hasher.finalize().into()
 }
 
+/// Verifies a snapshot slice. Every row re-derives its own `entry_hash` from
+/// the stored `prev_hash`, so tampering with any retained field is detected.
+/// The link check between adjacent retained rows applies only when their
+/// sequence numbers are consecutive. When the ring buffer evicts events the
+/// retained neighbours keep their original `prev_hash`, which still points at
+/// the evicted predecessor rather than the new retained neighbour, so a gap
+/// in `sequence` marks an expected eviction boundary instead of tampering.
 pub fn verify_event_chain(events: &[DiagnosticEvent]) -> Result<(), (usize, &'static str)> {
     if events.is_empty() {
         return Ok(());
@@ -259,7 +266,8 @@ pub fn verify_event_chain(events: &[DiagnosticEvent]) -> Result<(), (usize, &'st
 
         if index > 0 {
             let previous = &events[index - 1];
-            if previous.entry_hash != event.prev_hash {
+            let adjacent = event.sequence == previous.sequence.saturating_add(1);
+            if adjacent && previous.entry_hash != event.prev_hash {
                 return Err((index, "previous hash link mismatch"));
             }
         }
@@ -883,11 +891,10 @@ impl DiagnosticStore {
         parent: Option<OperationContext>,
         _source: DiagnosticSource,
     ) -> OperationContext {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .expect("diagnostic store mutex poisoned");
+        let mut state = match self.inner.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let operation_id = state.next_operation_id;
         state.next_operation_id = state.next_operation_id.saturating_add(1);
         OperationContext {
@@ -966,11 +973,10 @@ impl DiagnosticStore {
         name: &str,
         details: impl AsRef<str>,
     ) {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .expect("diagnostic store mutex poisoned");
+        let mut state = match self.inner.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let name = sanitize(name);
         let details = sanitize(details.as_ref());
         if name == "diagnostic.layout.error"
@@ -1044,12 +1050,11 @@ impl DiagnosticStore {
     }
 
     pub fn snapshot(&self) -> Vec<DiagnosticEvent> {
-        self.inner
-            .state
-            .lock()
-            .expect("diagnostic store mutex poisoned")
-            .events
-            .clone()
+        let state = match self.inner.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.events.clone()
     }
 
     pub fn maximum_events(&self) -> usize {
@@ -1967,6 +1972,25 @@ mod tests {
         assert_eq!(
             verify_event_chain(&events),
             Err((1, "previous hash link mismatch"))
+        );
+    }
+
+    #[test]
+    fn truncated_snapshot_chain_verifies_successfully() {
+        let store = DiagnosticStore::new(4);
+        for index in 0..6 {
+            store.record("test.event", format!("payload {index}"));
+        }
+        let events = store.snapshot();
+        assert_eq!(events.len(), 4);
+        assert!(snapshot_is_truncated(&events));
+        assert!(verify_event_chain(&events).is_ok());
+
+        let mut tampered = events.clone();
+        tampered[2].details = "tampered".to_owned();
+        assert_eq!(
+            verify_event_chain(&tampered),
+            Err((2, "entry hash mismatch"))
         );
     }
 }
