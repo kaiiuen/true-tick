@@ -4,7 +4,29 @@
 //! ownership from an effective value and never writes a guessed global default.
 
 use tick_core::{CoreError, Hns, Status};
-use tick_platform_windows::{NtStatus, TimerError, TimerObservation, TimerPlatform};
+use tick_platform_windows::{
+    KernelSettleProbeOutcome, NtStatus, TimerError, TimerObservation, TimerPlatform,
+};
+
+/// Maximum effective resolution that still proves a prior fine token is held.
+/// Any value at or below this boundary is treated as a high-resolution state
+/// during the startup kernel settle probe.
+pub const KERNEL_SETTLE_HIGH_RESOLUTION_THRESHOLD_HNS: Hns =
+    Hns::new(tick_core::HNS_PER_MILLISECOND);
+
+/// Candidate interval used by the startup kernel settle probe release call.
+pub const KERNEL_SETTLE_PROBE_CANDIDATE_INTERVAL_HNS: Hns =
+    Hns::new(tick_core::HNS_PER_MILLISECOND / 2);
+
+/// Result of the startup kernel settle probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartupProbeOutcome {
+    /// An orphaned token from a prior ungraceful exit was released and the
+    /// system resolution moved back towards the default.
+    Restored,
+    /// An external application legitimately holds the high-resolution state.
+    ExternalTiming,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OwnershipState {
@@ -323,6 +345,45 @@ impl<P: TimerPlatform> TimerController<P> {
         self.snapshot.selected = None;
     }
 
+    /// Run the startup kernel settle probe against an orphaned fine token.
+    ///
+    /// True Tick presumes zero prior ownership at startup. When the effective
+    /// resolution is already high while ownership is released, this probe
+    /// attempts a native release with `SetResolution = FALSE` on the candidate
+    /// interval. If the call succeeds and the effective resolution moves
+    /// coarser towards the default, the fine token was orphaned by a prior
+    /// ungraceful exit and ownership settles cleanly to released. If the call
+    /// fails or the resolution stays unchanged, an external application is
+    /// legitimately holding the resolution and external timing is confirmed.
+    pub fn attempt_startup_kernel_settle_probe(&mut self) -> Option<StartupProbeOutcome> {
+        let effective = self.snapshot.effective?;
+        if effective > KERNEL_SETTLE_HIGH_RESOLUTION_THRESHOLD_HNS {
+            return None;
+        }
+        if self.ownership.state() != OwnershipState::Released {
+            return None;
+        }
+        let probe = self
+            .platform
+            .attempt_kernel_settle_probe(KERNEL_SETTLE_PROBE_CANDIDATE_INTERVAL_HNS)
+            .ok()?;
+        self.observation = Some(TimerObservation {
+            requested: KERNEL_SETTLE_PROBE_CANDIDATE_INTERVAL_HNS,
+            reported_current: probe.after_effective,
+            raw_status: 0,
+        });
+        self.snapshot.requested = Some(KERNEL_SETTLE_PROBE_CANDIDATE_INTERVAL_HNS);
+        self.snapshot.effective = Some(probe.after_effective);
+        self.snapshot.raw_status = Some(0);
+        self.release_boundary = None;
+        self.selected_interval = None;
+        let outcome = match probe.outcome {
+            KernelSettleProbeOutcome::Restored => StartupProbeOutcome::Restored,
+            KernelSettleProbeOutcome::ExternalTiming => StartupProbeOutcome::ExternalTiming,
+        };
+        Some(outcome)
+    }
+
     pub const fn status(&self) -> Status {
         self.ownership.status()
     }
@@ -345,13 +406,16 @@ impl Default for Ownership {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tick_platform_windows::{TimerBounds, TimerQuery};
+    use tick_platform_windows::{
+        KernelSettleProbe, KernelSettleProbeOutcome, TimerBounds, TimerQuery,
+    };
 
     #[derive(Debug)]
     struct FixturePlatform {
         request_observation: TimerObservation,
         release_result: Result<TimerObservation, TimerError>,
         query_results: Vec<Result<TimerQuery, TimerError>>,
+        settle_probe_result: Result<KernelSettleProbe, TimerError>,
     }
 
     impl FixturePlatform {
@@ -390,6 +454,13 @@ mod tests {
 
         fn release(&mut self, _interval: Hns) -> Result<TimerObservation, TimerError> {
             self.release_result
+        }
+
+        fn attempt_kernel_settle_probe(
+            &mut self,
+            _interval: Hns,
+        ) -> Result<KernelSettleProbe, TimerError> {
+            self.settle_probe_result
         }
     }
 
@@ -430,6 +501,13 @@ mod tests {
                 raw_status: 0,
             })
         }
+
+        fn attempt_kernel_settle_probe(
+            &mut self,
+            _interval: Hns,
+        ) -> Result<KernelSettleProbe, TimerError> {
+            Err(TimerError::Unsupported)
+        }
     }
 
     impl<P> TimerController<P> {
@@ -452,6 +530,7 @@ mod tests {
                     raw_status: 0,
                 }),
                 query_results: Vec::new(),
+                settle_probe_result: Err(TimerError::Unsupported),
             },
             Hns::new(5_000),
         )
@@ -515,6 +594,7 @@ mod tests {
                 },
                 release_result: Err(TimerError::ReleaseFailed { raw_status: -1 }),
                 query_results: Vec::new(),
+                settle_probe_result: Err(TimerError::Unsupported),
             },
             Hns::new(5_000),
         );
@@ -553,6 +633,7 @@ mod tests {
                     raw_status: 0,
                 }),
                 query_results: vec![Err(TimerError::QueryFailed { raw_status: -7 })],
+                settle_probe_result: Err(TimerError::Unsupported),
             },
             Hns::new(5_000),
         );
@@ -591,6 +672,7 @@ mod tests {
                     Ok(query),
                     Err(TimerError::QueryFailed { raw_status: -8 }),
                 ],
+                settle_probe_result: Err(TimerError::Unsupported),
             },
             Hns::new(5_000),
         );
@@ -674,6 +756,7 @@ mod tests {
                 },
                 release_result: Err(TimerError::ReleaseFailed { raw_status: -1 }),
                 query_results: Vec::new(),
+                settle_probe_result: Err(TimerError::Unsupported),
             },
             Hns::new(5_000),
         );
@@ -707,5 +790,87 @@ mod tests {
             raw_status: 0,
         };
         assert!(!observation.is_satisfied());
+    }
+
+    #[test]
+    fn settle_probe_unwedges_an_orphaned_token_to_clean_released() {
+        let query = TimerQuery {
+            bounds: TimerBounds {
+                minimum_interval: Hns::new(156_250),
+                maximum_interval: Hns::new(5_000),
+            },
+            reported_current: Hns::new(4_966),
+            raw_status: 0,
+        };
+        let mut controller = TimerController::new(
+            FixturePlatform {
+                request_observation: TimerObservation {
+                    requested: Hns::new(5_000),
+                    reported_current: Hns::new(4_966),
+                    raw_status: 0,
+                },
+                release_result: Ok(TimerObservation {
+                    requested: Hns::new(5_000),
+                    reported_current: Hns::new(4_966),
+                    raw_status: 0,
+                }),
+                query_results: vec![Ok(query)],
+                settle_probe_result: Ok(KernelSettleProbe {
+                    outcome: KernelSettleProbeOutcome::Restored,
+                    before_effective: Hns::new(4_966),
+                    after_effective: Hns::new(156_250),
+                }),
+            },
+            Hns::new(5_000),
+        );
+        controller.query().unwrap();
+        assert_eq!(
+            controller.attempt_startup_kernel_settle_probe(),
+            Some(StartupProbeOutcome::Restored)
+        );
+        assert_eq!(controller.ownership(), OwnershipState::Released);
+        assert_eq!(controller.snapshot().effective, Some(Hns::new(156_250)));
+        assert_eq!(controller.release_boundary(), None);
+        assert_eq!(controller.selected_interval(), None);
+    }
+
+    #[test]
+    fn settle_probe_confirms_external_timing_when_resolution_is_held() {
+        let query = TimerQuery {
+            bounds: TimerBounds {
+                minimum_interval: Hns::new(156_250),
+                maximum_interval: Hns::new(5_000),
+            },
+            reported_current: Hns::new(4_966),
+            raw_status: 0,
+        };
+        let mut controller = TimerController::new(
+            FixturePlatform {
+                request_observation: TimerObservation {
+                    requested: Hns::new(5_000),
+                    reported_current: Hns::new(4_966),
+                    raw_status: 0,
+                },
+                release_result: Ok(TimerObservation {
+                    requested: Hns::new(5_000),
+                    reported_current: Hns::new(4_966),
+                    raw_status: 0,
+                }),
+                query_results: vec![Ok(query)],
+                settle_probe_result: Ok(KernelSettleProbe {
+                    outcome: KernelSettleProbeOutcome::ExternalTiming,
+                    before_effective: Hns::new(4_966),
+                    after_effective: Hns::new(4_966),
+                }),
+            },
+            Hns::new(5_000),
+        );
+        controller.query().unwrap();
+        assert_eq!(
+            controller.attempt_startup_kernel_settle_probe(),
+            Some(StartupProbeOutcome::ExternalTiming)
+        );
+        assert_eq!(controller.ownership(), OwnershipState::Released);
+        assert_eq!(controller.snapshot().effective, Some(Hns::new(4_966)));
     }
 }

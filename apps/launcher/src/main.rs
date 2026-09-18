@@ -140,6 +140,90 @@ fn verify_slot_integrity(root: &Path, slot: Slot) -> Result<(), SelectionError> 
     Ok(())
 }
 
+fn verify_golden_master(root: &Path) -> Result<PathBuf, SelectionError> {
+    let executable = root.join("Recovery").join("true-tick.exe");
+    if !executable.exists() {
+        return Err(SelectionError::ExecutableMissing(executable));
+    }
+    if !executable.is_file() {
+        return Err(SelectionError::ExecutableNotFile(executable));
+    }
+    let manifest_path = root.join("SHA256SUMS.txt");
+    if manifest_path.exists() {
+        let manifest_content =
+            fs::read_to_string(&manifest_path).map_err(SelectionError::ManifestRead)?;
+        let target_rel_path = "Recovery/true-tick.exe";
+        let normalized_rel_path = target_rel_path.replace('/', "\\");
+        let mut expected_hash = None;
+        for line in manifest_content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                let hash = parts[0];
+                let filename = parts[1];
+                if filename == target_rel_path || filename == normalized_rel_path {
+                    expected_hash = Some(hash.to_lowercase());
+                    break;
+                }
+            }
+        }
+        if let Some(expected) = expected_hash {
+            let actual = compute_sha256(&executable).map_err(SelectionError::MetadataRead)?;
+            if actual.to_lowercase() != expected {
+                return Err(SelectionError::ChecksumMismatch {
+                    target: target_rel_path.to_owned(),
+                    expected,
+                    actual,
+                });
+            }
+        }
+    }
+    Ok(executable)
+}
+
+fn record_golden_master_restoration(root: &Path, target: Slot) {
+    let logs = root.join("Data").join("logs");
+    if fs::create_dir_all(&logs).is_err() {
+        return;
+    }
+    let entry = format!(
+        "event=autonomous_golden_master_restoration target=Slot::{} status=restored\n",
+        target.name()
+    );
+    let path = logs.join("launcher-rollback.log");
+    let _ = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map(|mut file| std::io::Write::write_all(&mut file, entry.as_bytes()));
+}
+
+fn restore_from_golden_master(root: &Path) -> Result<PathBuf, SelectionError> {
+    let recovery = root.join("Recovery");
+    let golden_executable = verify_golden_master(root)?;
+    let golden_config = recovery.join("true-tick.toml");
+    if !golden_config.is_file() {
+        return Err(SelectionError::ExecutableMissing(golden_config));
+    }
+    let slot_dir = root.join("Slots").join(Slot::A.name());
+    fs::create_dir_all(&slot_dir).map_err(SelectionError::MetadataRead)?;
+    let executable = slot_dir.join("true-tick.exe");
+    fs::copy(&golden_executable, &executable).map_err(SelectionError::MetadataRead)?;
+    fs::copy(&golden_config, slot_dir.join("true-tick.toml"))
+        .map_err(SelectionError::MetadataRead)?;
+    verify_slot_executable(root, Slot::A)?;
+    record_golden_master_restoration(root, Slot::A);
+    fs::write(
+        root.join("active-slot.txt"),
+        format!("{}\n", Slot::A.name()),
+    )
+    .map_err(SelectionError::MetadataRead)?;
+    Ok(executable)
+}
+
 fn record_rollback_decision(root: &Path, from: Slot, to: Slot, cause: &SelectionError) {
     let logs = root.join("Data").join("logs");
     if fs::create_dir_all(&logs).is_err() {
@@ -179,10 +263,13 @@ fn select(root: &Path) -> Result<(Slot, PathBuf), SelectionError> {
                         .map_err(SelectionError::MetadataRead)?;
                     Ok((standby, executable))
                 }
-                Err(standby_error) => Err(SelectionError::BothSlotsCorrupted {
-                    active: active_error.to_string(),
-                    standby: standby_error.to_string(),
-                }),
+                Err(standby_error) => match restore_from_golden_master(root) {
+                    Ok(executable) => Ok((Slot::A, executable)),
+                    Err(_) => Err(SelectionError::BothSlotsCorrupted {
+                        active: active_error.to_string(),
+                        standby: standby_error.to_string(),
+                    }),
+                },
             }
         }
     }
@@ -383,6 +470,63 @@ mod tests {
     #[test]
     fn test_both_slots_corrupted_fails_with_explicit_error() {
         let path = root("both-corrupted");
+        fs::create_dir_all(path.join("Slots").join("A")).unwrap();
+        fs::create_dir_all(path.join("Slots").join("B")).unwrap();
+        fs::write(path.join("active-slot.txt"), "A\n").unwrap();
+        assert!(matches!(
+            select(&path),
+            Err(SelectionError::BothSlotsCorrupted { .. })
+        ));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn test_golden_master_autonomous_reconstruction() {
+        let path = root("golden-master");
+        fs::create_dir_all(path.join("Slots").join("A")).unwrap();
+        fs::create_dir_all(path.join("Slots").join("B")).unwrap();
+        fs::create_dir_all(path.join("Recovery")).unwrap();
+        fs::write(path.join("active-slot.txt"), "A\n").unwrap();
+        fs::write(path.join("Recovery").join("true-tick.exe"), b"golden").unwrap();
+        fs::write(
+            path.join("Recovery").join("true-tick.toml"),
+            "automatic = false\n",
+        )
+        .unwrap();
+        let golden_hash = compute_sha256(&path.join("Recovery").join("true-tick.exe")).unwrap();
+        fs::write(
+            path.join("SHA256SUMS.txt"),
+            format!("{golden_hash}  Recovery/true-tick.exe\n"),
+        )
+        .unwrap();
+        let (slot, executable) = select(&path).unwrap();
+        assert_eq!(slot, Slot::A);
+        assert_eq!(
+            executable,
+            path.join("Slots").join("A").join("true-tick.exe")
+        );
+        assert_eq!(
+            fs::read_to_string(path.join("Slots").join("A").join("true-tick.exe")).unwrap(),
+            "golden"
+        );
+        assert_eq!(
+            fs::read_to_string(path.join("Slots").join("A").join("true-tick.toml")).unwrap(),
+            "automatic = false\n"
+        );
+        assert_eq!(
+            fs::read_to_string(path.join("active-slot.txt")).unwrap(),
+            "A\n"
+        );
+        let log = fs::read_to_string(path.join("Data").join("logs").join("launcher-rollback.log"))
+            .unwrap();
+        assert!(log
+            .contains("event=autonomous_golden_master_restoration target=Slot::A status=restored"));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn test_dual_slot_failure_without_recovery_fails_with_explicit_error() {
+        let path = root("no-recovery");
         fs::create_dir_all(path.join("Slots").join("A")).unwrap();
         fs::create_dir_all(path.join("Slots").join("B")).unwrap();
         fs::write(path.join("active-slot.txt"), "A\n").unwrap();

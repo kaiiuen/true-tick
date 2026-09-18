@@ -449,14 +449,19 @@ pub fn run() {
         };
         let portable_root_label = portable_root_str.clone();
         let config_path = config::path_from_executable(&executable);
-        let (loaded, config_status, config_migrated) =
+        let (loaded, config_status, config_migrated, config_recovered) =
             match config::load_with_migration(&config_path) {
-                Ok((config, migrated)) => {
+                Ok(outcome) => {
                     diagnostics.record(
                         "config.load.result",
-                        format!("result=success migrated={migrated}"),
+                        format!("result=success migrated={}", outcome.migrated),
                     );
-                    (config, None, migrated)
+                    (
+                        outcome.config,
+                        None,
+                        outcome.migrated,
+                        outcome.recovered_from_corruption,
+                    )
                 }
                 Err(error) => {
                     diagnostics.record("config.load.result", format!("result=error error={error}"));
@@ -464,9 +469,16 @@ pub fn run() {
                         config::Config::default(),
                         Some(format!("Red: {error}")),
                         false,
+                        false,
                     )
                 }
             };
+        if config_recovered {
+            diagnostics.record(
+                "config.self_heal.recovered",
+                "reason=corrupted_syntax backup_created=true",
+            );
+        }
         if config_migrated {
             diagnostics.record(
                 "config.migration",
@@ -484,8 +496,15 @@ pub fn run() {
                 startup_operation(loaded.startup_enabled)
             ),
         );
-        let startup_status = match (config_status, startup_operation(loaded.startup_enabled)) {
-            (Some(error), _) => error,
+        let startup_status = match (
+            config_status.or(if config_recovered {
+                Some("Info: config recovered from corrupted file".to_owned())
+            } else {
+                None
+            }),
+            startup_operation(loaded.startup_enabled),
+        ) {
+            (Some(note), _) => note,
             (None, StartupOperation::Register) => match startup_target(&executable) {
                 Ok(target) => {
                     diagnostics
@@ -966,6 +985,7 @@ pub fn run() {
         app.tray_icon = Some(icon);
         app.record("policy.recalculate", "trigger=startup");
         refresh_timing_observation(app);
+        probe_startup_kernel_settle(app);
         if app.config.automatic {
             app.record("policy.startup_automatic", "enabled=true");
         }

@@ -12,6 +12,19 @@ use tick_diagnostics::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KernelSettleProbeOutcome {
+    Restored,
+    ExternalTiming,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KernelSettleProbe {
+    pub outcome: KernelSettleProbeOutcome,
+    pub before_effective: Hns,
+    pub after_effective: Hns,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimerBounds {
     /// The value returned through the API's minimum-resolution output.
     ///
@@ -140,6 +153,10 @@ pub trait TimerPlatform {
     fn preflight(&mut self, interval: Hns) -> Result<TimerQuery, TimerError>;
     fn request(&mut self, interval: Hns) -> Result<TimerObservation, TimerError>;
     fn release(&mut self, interval: Hns) -> Result<TimerObservation, TimerError>;
+    fn attempt_kernel_settle_probe(
+        &mut self,
+        interval: Hns,
+    ) -> Result<KernelSettleProbe, TimerError>;
 }
 
 #[derive(Debug, Default)]
@@ -419,6 +436,78 @@ impl TimerPlatform for WindowsTimerPlatform {
             Err(TimerError::Unsupported)
         }
     }
+
+    fn attempt_kernel_settle_probe(
+        &mut self,
+        interval: Hns,
+    ) -> Result<KernelSettleProbe, TimerError> {
+        self.log(
+            "kernel.self_heal.settle_probe",
+            format!("candidate_hns={} set=false", interval.value()),
+        );
+        #[cfg(windows)]
+        {
+            let before_effective = query_current_resolution()?;
+            let mut current = 0u32;
+            let status =
+                unsafe { nt_set_timer_resolution(interval.value() as u32, false, &mut current) };
+            self.log(
+                "native.NtSetTimerResolution.settle_probe",
+                format!(
+                    "raw_status={} candidate_hns={} effective_hns={} set=false",
+                    status,
+                    interval.value(),
+                    current
+                ),
+            );
+            if status != STATUS_SUCCESS {
+                self.log(
+                    "kernel.self_heal.settle_probe.failed",
+                    format!("raw_status={status}"),
+                );
+                return Err(TimerError::ReleaseFailed { raw_status: status });
+            }
+            let immediate_effective = Hns::new(current as u64);
+            let after_effective = query_current_resolution()?;
+            self.log(
+                "kernel.self_heal.settle_probe.result",
+                format!(
+                    "before_hns={} immediate_hns={} after_hns={} outcome={}",
+                    before_effective.value(),
+                    immediate_effective.value(),
+                    after_effective.value(),
+                    if after_effective > before_effective {
+                        "restored"
+                    } else {
+                        "external_timing"
+                    }
+                ),
+            );
+            if after_effective > before_effective {
+                self.requested = None;
+                Ok(KernelSettleProbe {
+                    outcome: KernelSettleProbeOutcome::Restored,
+                    before_effective,
+                    after_effective,
+                })
+            } else {
+                Ok(KernelSettleProbe {
+                    outcome: KernelSettleProbeOutcome::ExternalTiming,
+                    before_effective,
+                    after_effective,
+                })
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            self.log(
+                "kernel.self_heal.settle_probe.unsupported",
+                "platform=non_windows",
+            );
+            let _ = interval;
+            Err(TimerError::Unsupported)
+        }
+    }
 }
 
 pub type NtStatus = i32;
@@ -445,6 +534,12 @@ fn query_resolution() -> Result<(TimerBounds, Hns), TimerError> {
         maximum_resolution,
         current_resolution,
     ))
+}
+
+#[cfg(windows)]
+fn query_current_resolution() -> Result<Hns, TimerError> {
+    let (_, current) = query_resolution()?;
+    Ok(current)
 }
 
 fn native_resolution_values(

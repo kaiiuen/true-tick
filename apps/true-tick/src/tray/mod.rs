@@ -11,7 +11,7 @@ use tick_diagnostics::{
     truncate_utf8, DiagnosticOutcome, DiagnosticPhase, DiagnosticSource, NativeOutcome,
 };
 use tick_observation_windows::ObservationSource;
-use tick_ownership::{OwnershipState, Verification};
+use tick_ownership::{OwnershipState, StartupProbeOutcome, Verification};
 use tick_platform_windows::TimerObservation;
 use tick_policy::{decide, PolicyInput, PowerState};
 use tick_startup_windows::{StartupRegistration, WindowsUserStartup};
@@ -1524,6 +1524,41 @@ fn refresh_timing_observation(app: &mut App) -> Option<TimerObservation> {
                 format!("error={error:?} effective=unknown"),
             );
             None
+        }
+    }
+}
+
+/// Run the startup kernel settle probe after the initial timing observation.
+///
+/// If the effective resolution is already fine while True Tick holds no
+/// ownership, the probe attempts to release an orphaned token from a prior
+/// ungraceful exit. A coarse move proves the token was orphaned and settles
+/// cleanly to released. A failed or unchanged probe proves external timing.
+pub(crate) fn probe_startup_kernel_settle(app: &mut App) {
+    let Some(outcome) = app.controller.attempt_startup_kernel_settle_probe() else {
+        return;
+    };
+    app.sync_timing_snapshot();
+    app.timing_snapshot_valid = true;
+    match outcome {
+        StartupProbeOutcome::Restored => {
+            app.record(
+                "kernel.self_heal.settle_probe_restored",
+                format!(
+                    "ownership=released detail={}",
+                    app.timing_snapshot_details()
+                ),
+            );
+        }
+        StartupProbeOutcome::ExternalTiming => {
+            app.external_timing = true;
+            app.record(
+                "kernel.self_heal.external_timing_confirmed",
+                format!(
+                    "ownership=released external_timing=true detail={}",
+                    app.timing_snapshot_details()
+                ),
+            );
         }
     }
 }

@@ -77,10 +77,25 @@ pub fn path_from_executable(executable: &Path) -> PathBuf {
 
 #[cfg(test)]
 pub fn load(path: &Path) -> Result<Config, ConfigError> {
-    load_with_migration(path).map(|(config, _)| config)
+    load_with_migration(path).map(|outcome| outcome.config)
 }
 
-pub fn load_with_migration(path: &Path) -> Result<(Config, bool), ConfigError> {
+#[cfg(test)]
+pub fn load_with_recovery(path: &Path) -> Result<LoadOutcome, ConfigError> {
+    load_with_migration(path)
+}
+
+/// Result of loading the on-disk configuration.
+/// `migrated` marks a legacy value that was rewritten in place.
+/// `recovered_from_corruption` marks a damaged file that was preserved as a
+/// timestamped backup and replaced with factory defaults.
+pub struct LoadOutcome {
+    pub config: Config,
+    pub migrated: bool,
+    pub recovered_from_corruption: bool,
+}
+
+pub fn load_with_migration(path: &Path) -> Result<LoadOutcome, ConfigError> {
     let metadata = fs::metadata(path).map_err(ConfigError::Read)?;
     if metadata.len() > MAX_CONFIG_FILE_BYTES as u64 {
         return Err(invalid_reason("configuration file exceeds maximum size"));
@@ -89,13 +104,51 @@ pub fn load_with_migration(path: &Path) -> Result<(Config, bool), ConfigError> {
     if bytes.len() > MAX_CONFIG_FILE_BYTES {
         return Err(invalid_reason("configuration file exceeds maximum size"));
     }
-    let text =
-        String::from_utf8(bytes).map_err(|_| invalid_reason("configuration is not valid UTF-8"))?;
-    let (config, migrated) = parse_with_migration(&text)?;
-    if migrated {
-        save_atomic(path, &config)?;
-    }
-    Ok((config, migrated))
+    let outcome = if bytes.is_empty() {
+        recover_corrupted(path)?
+    } else {
+        match String::from_utf8(bytes) {
+            Ok(text) => match parse_with_migration(&text) {
+                Ok((config, migrated)) => {
+                    if migrated {
+                        save_atomic(path, &config)?;
+                    }
+                    LoadOutcome {
+                        config,
+                        migrated,
+                        recovered_from_corruption: false,
+                    }
+                }
+                Err(_) => recover_corrupted(path)?,
+            },
+            Err(_) => recover_corrupted(path)?,
+        }
+    };
+    Ok(outcome)
+}
+
+/// Preserves the damaged file beside the original as
+/// `true-tick.toml.corrupted.<timestamp>.bak` then atomically rewrites a clean
+/// factory default configuration so the next start loads normally.
+fn recover_corrupted(path: &Path) -> Result<LoadOutcome, ConfigError> {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    let mut name = path
+        .file_name()
+        .unwrap_or_else(|| OsStr::new("true-tick.toml"))
+        .to_os_string();
+    name.push(format!(".corrupted.{timestamp}.bak"));
+    let backup = path.parent().unwrap_or_else(|| Path::new(".")).join(name);
+    fs::rename(path, &backup).map_err(ConfigError::Write)?;
+    let config = Config::default();
+    save_atomic(path, &config)?;
+    Ok(LoadOutcome {
+        config,
+        migrated: false,
+        recovered_from_corruption: true,
+    })
 }
 
 /// Per process sequence that keeps concurrent saves from sharing a temporary file.
@@ -481,7 +534,8 @@ mod tests {
         fs::write(&path, vec![b'x'; MAX_CONFIG_FILE_BYTES + 1]).unwrap();
         assert!(load(&path).is_err());
         fs::write(&path, *b"a\xff").unwrap();
-        assert!(load(&path).is_err());
+        let outcome = load_with_recovery(&path).unwrap();
+        assert!(outcome.recovered_from_corruption);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -600,6 +654,97 @@ mod tests {
             text.contains("schedule_presets_seconds = [45, 600, 7200]"),
             "unexpected serialized text {text}"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn corrupted_config_triggers_backup_and_self_healing_regeneration() {
+        let root =
+            std::env::temp_dir().join(format!("true-tick-config-corrupted-{}", std::process::id()));
+        let path = root.join("true-tick.toml");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&path, "automatic = maybe this is not toml\n").unwrap();
+        let outcome = load_with_recovery(&path).unwrap();
+        assert!(outcome.recovered_from_corruption);
+        assert_eq!(outcome.config, Config::default());
+        let backups: Vec<PathBuf> = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name().is_some_and(|name| {
+                    let name = name.to_string_lossy();
+                    name.starts_with("true-tick.toml.corrupted.") && name.ends_with(".bak")
+                })
+            })
+            .collect();
+        assert_eq!(backups.len(), 1, "expected one backup: {backups:?}");
+        assert_eq!(load(&path).unwrap(), Config::default());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn truncated_zero_byte_config_triggers_self_healing() {
+        let root =
+            std::env::temp_dir().join(format!("true-tick-config-truncated-{}", std::process::id()));
+        let path = root.join("true-tick.toml");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&path, "").unwrap();
+        let outcome = load_with_recovery(&path).unwrap();
+        assert!(outcome.recovered_from_corruption);
+        assert_eq!(outcome.config, Config::default());
+        assert!(path.exists());
+        assert_eq!(load(&path).unwrap(), Config::default());
+        let backups: Vec<PathBuf> = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name().is_some_and(|name| {
+                    let name = name.to_string_lossy();
+                    name.starts_with("true-tick.toml.corrupted.") && name.ends_with(".bak")
+                })
+            })
+            .collect();
+        assert_eq!(backups.len(), 1, "expected one backup: {backups:?}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn corrupted_utf8_triggers_self_healing() {
+        let root =
+            std::env::temp_dir().join(format!("true-tick-config-utf8-{}", std::process::id()));
+        let path = root.join("true-tick.toml");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&path, vec![0xff, 0xfe, b'a', b'=']).unwrap();
+        let outcome = load_with_recovery(&path).unwrap();
+        assert!(outcome.recovered_from_corruption);
+        assert_eq!(outcome.config, Config::default());
+        assert_eq!(load(&path).unwrap(), Config::default());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn valid_config_loads_without_recovery() {
+        let root =
+            std::env::temp_dir().join(format!("true-tick-config-valid-{}", std::process::id()));
+        let path = root.join("true-tick.toml");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&path, "automatic = true\nstartup_enabled = false\n").unwrap();
+        let outcome = load_with_recovery(&path).unwrap();
+        assert!(!outcome.recovered_from_corruption);
+        assert!(outcome.config.automatic);
+        assert!(!outcome.config.startup_enabled);
+        let backups: Vec<PathBuf> = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().contains(".corrupted."))
+            })
+            .collect();
+        assert!(backups.is_empty(), "unexpected backup files: {backups:?}");
         fs::remove_dir_all(root).unwrap();
     }
 
