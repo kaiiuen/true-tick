@@ -34,9 +34,11 @@ True-Tick-internal-v0.1.0/
 1. Locates its own executable path via `GetModuleFileNameW`.
 2. Verifies the existence of `active-slot.txt` within the adjacent directory.
 3. Reads the active slot identifier (`A` or `B`).
-4. Validates that `Slots/<slot>/true-tick.exe` exists and matches bounded executable shape.
-5. Spawns the target binary as an independent child process via `Command::spawn()`.
-6. Exits immediately with code 0, freeing all launcher resources while the payload runs.
+4. Validates that `Slots/<slot>/true-tick.exe` exists, is a file, and passes the `SHA256SUMS.txt` manifest checksum.
+5. If the active slot fails verification, the launcher autonomously checks the alternate standby slot, and when the standby verifies cleanly it appends a rollback record to `Data/logs/launcher-rollback.log`, rewrites `active-slot.txt` to the standby slot, and boots the standby.
+6. If both slots fail verification, the launcher reports a `BothSlotsCorrupted` repair condition and refuses to boot.
+7. Spawns the verified target binary as an independent child process via `Command::spawn()`.
+8. Exits immediately with code 0, freeing all launcher resources while the payload runs.
 
 If `active-slot.txt` is missing or corrupt, `Launcher.exe` presents a native error dialog informing the user of the damaged package rather than guessing a default.
 

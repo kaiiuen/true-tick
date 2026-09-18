@@ -18,6 +18,13 @@ impl Slot {
             Self::B => "B",
         }
     }
+
+    fn alternate(self) -> Self {
+        match self {
+            Self::A => Self::B,
+            Self::B => Self::A,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -31,6 +38,10 @@ enum SelectionError {
         target: String,
         expected: String,
         actual: String,
+    },
+    BothSlotsCorrupted {
+        active: String,
+        standby: String,
     },
 }
 
@@ -60,6 +71,10 @@ impl std::fmt::Display for SelectionError {
                 formatter,
                 "integrity verification failed for {target}: expected {expected} but computed {actual}"
             ),
+            Self::BothSlotsCorrupted { active, standby } => write!(
+                formatter,
+                "both slots failed verification and require package repair: active slot rejected with [{active}] and standby slot rejected with [{standby}]"
+            ),
         }
     }
 }
@@ -70,6 +85,18 @@ fn compute_sha256(path: &Path) -> std::io::Result<String> {
     std::io::copy(&mut file, &mut hasher)?;
     let hash = hasher.finalize();
     Ok(format!("{hash:x}"))
+}
+
+fn verify_slot_executable(root: &Path, slot: Slot) -> Result<PathBuf, SelectionError> {
+    let executable = root.join("Slots").join(slot.name()).join("true-tick.exe");
+    if !executable.exists() {
+        return Err(SelectionError::ExecutableMissing(executable));
+    }
+    if !executable.is_file() {
+        return Err(SelectionError::ExecutableNotFile(executable));
+    }
+    verify_slot_integrity(root, slot)?;
+    Ok(executable)
 }
 
 fn verify_slot_integrity(root: &Path, slot: Slot) -> Result<(), SelectionError> {
@@ -113,6 +140,25 @@ fn verify_slot_integrity(root: &Path, slot: Slot) -> Result<(), SelectionError> 
     Ok(())
 }
 
+fn record_rollback_decision(root: &Path, from: Slot, to: Slot, cause: &SelectionError) {
+    let logs = root.join("Data").join("logs");
+    if fs::create_dir_all(&logs).is_err() {
+        return;
+    }
+    let entry = format!(
+        "event=autonomous_slot_rollback from={} to={} cause={}\n",
+        from.name(),
+        to.name(),
+        cause
+    );
+    let path = logs.join("launcher-rollback.log");
+    let _ = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map(|mut file| std::io::Write::write_all(&mut file, entry.as_bytes()));
+}
+
 fn select(root: &Path) -> Result<(Slot, PathBuf), SelectionError> {
     let metadata = root.join("active-slot.txt");
     let value = fs::read_to_string(&metadata).map_err(SelectionError::MetadataRead)?;
@@ -122,15 +168,24 @@ fn select(root: &Path) -> Result<(Slot, PathBuf), SelectionError> {
         "B" => Slot::B,
         other => return Err(SelectionError::InvalidMetadata(other.to_owned())),
     };
-    let executable = root.join("Slots").join(slot.name()).join("true-tick.exe");
-    if !executable.exists() {
-        return Err(SelectionError::ExecutableMissing(executable));
+    match verify_slot_executable(root, slot) {
+        Ok(executable) => Ok((slot, executable)),
+        Err(active_error) => {
+            let standby = slot.alternate();
+            match verify_slot_executable(root, standby) {
+                Ok(executable) => {
+                    record_rollback_decision(root, slot, standby, &active_error);
+                    fs::write(&metadata, format!("{}\n", standby.name()))
+                        .map_err(SelectionError::MetadataRead)?;
+                    Ok((standby, executable))
+                }
+                Err(standby_error) => Err(SelectionError::BothSlotsCorrupted {
+                    active: active_error.to_string(),
+                    standby: standby_error.to_string(),
+                }),
+            }
+        }
     }
-    if !executable.is_file() {
-        return Err(SelectionError::ExecutableNotFile(executable));
-    }
-    verify_slot_integrity(root, slot)?;
-    Ok((slot, executable))
 }
 
 fn workspace_root(launcher: &Path) -> Option<&Path> {
@@ -254,7 +309,7 @@ mod tests {
         fs::write(path.join("active-slot.txt"), "A\n").unwrap();
         assert!(matches!(
             select(&path),
-            Err(SelectionError::ExecutableMissing(_))
+            Err(SelectionError::BothSlotsCorrupted { .. })
         ));
         fs::remove_dir_all(path).unwrap();
     }
@@ -290,7 +345,50 @@ mod tests {
         .unwrap();
         assert!(matches!(
             select(&path),
-            Err(SelectionError::ChecksumMismatch { .. })
+            Err(SelectionError::BothSlotsCorrupted { .. })
+        ));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn test_autonomous_rollback_when_active_slot_corrupted() {
+        let path = root("rollback");
+        fs::create_dir_all(path.join("Slots").join("A")).unwrap();
+        fs::create_dir_all(path.join("Slots").join("B")).unwrap();
+        fs::write(path.join("active-slot.txt"), "A\n").unwrap();
+        fs::write(
+            path.join("Slots").join("A").join("true-tick.exe"),
+            b"tampered",
+        )
+        .unwrap();
+        fs::write(
+            path.join("Slots").join("B").join("true-tick.exe"),
+            b"fixture",
+        )
+        .unwrap();
+        fs::write(
+            path.join("SHA256SUMS.txt"),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  Slots/A/true-tick.exe\n",
+        )
+        .unwrap();
+        let (slot, _) = select(&path).unwrap();
+        assert_eq!(slot, Slot::B);
+        assert_eq!(
+            fs::read_to_string(path.join("active-slot.txt")).unwrap(),
+            "B\n"
+        );
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn test_both_slots_corrupted_fails_with_explicit_error() {
+        let path = root("both-corrupted");
+        fs::create_dir_all(path.join("Slots").join("A")).unwrap();
+        fs::create_dir_all(path.join("Slots").join("B")).unwrap();
+        fs::write(path.join("active-slot.txt"), "A\n").unwrap();
+        assert!(matches!(
+            select(&path),
+            Err(SelectionError::BothSlotsCorrupted { .. })
         ));
         fs::remove_dir_all(path).unwrap();
     }
