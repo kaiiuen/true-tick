@@ -1,5 +1,6 @@
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -25,6 +26,12 @@ enum SelectionError {
     InvalidMetadata(String),
     ExecutableMissing(PathBuf),
     ExecutableNotFile(PathBuf),
+    ManifestRead(std::io::Error),
+    ChecksumMismatch {
+        target: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 impl std::fmt::Display for SelectionError {
@@ -46,8 +53,64 @@ impl std::fmt::Display for SelectionError {
                 "selected slot executable is not a file: {}",
                 path.display()
             ),
+            Self::ManifestRead(error) => {
+                write!(formatter, "package manifest SHA256SUMS.txt cannot be read: {error}")
+            }
+            Self::ChecksumMismatch { target, expected, actual } => write!(
+                formatter,
+                "integrity verification failed for {target}: expected {expected} but computed {actual}"
+            ),
         }
     }
+}
+
+fn compute_sha256(path: &Path) -> std::io::Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    let hash = hasher.finalize();
+    Ok(format!("{hash:x}"))
+}
+
+fn verify_slot_integrity(root: &Path, slot: Slot) -> Result<(), SelectionError> {
+    let manifest_path = root.join("SHA256SUMS.txt");
+    if !manifest_path.exists() {
+        return Ok(());
+    }
+    let manifest_content =
+        fs::read_to_string(&manifest_path).map_err(SelectionError::ManifestRead)?;
+    let target_rel_path = format!("Slots/{}/true-tick.exe", slot.name());
+    let normalized_rel_path = target_rel_path.replace('/', "\\");
+
+    let mut expected_hash = None;
+    for line in manifest_content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let hash = parts[0];
+            let filename = parts[1];
+            if filename == target_rel_path || filename == normalized_rel_path {
+                expected_hash = Some(hash.to_lowercase());
+                break;
+            }
+        }
+    }
+
+    if let Some(expected) = expected_hash {
+        let executable_path = root.join("Slots").join(slot.name()).join("true-tick.exe");
+        let actual = compute_sha256(&executable_path).map_err(SelectionError::MetadataRead)?;
+        if actual.to_lowercase() != expected {
+            return Err(SelectionError::ChecksumMismatch {
+                target: target_rel_path,
+                expected,
+                actual,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn select(root: &Path) -> Result<(Slot, PathBuf), SelectionError> {
@@ -66,6 +129,7 @@ fn select(root: &Path) -> Result<(Slot, PathBuf), SelectionError> {
     if !executable.is_file() {
         return Err(SelectionError::ExecutableNotFile(executable));
     }
+    verify_slot_integrity(root, slot)?;
     Ok((slot, executable))
 }
 
@@ -206,6 +270,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(select(&path).unwrap().0, Slot::B);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn manifest_checksum_mismatch_fails_selection() {
+        let path = root("checksum-mismatch");
+        fs::create_dir_all(path.join("Slots").join("A")).unwrap();
+        fs::write(path.join("active-slot.txt"), "A\n").unwrap();
+        fs::write(
+            path.join("Slots").join("A").join("true-tick.exe"),
+            b"tampered",
+        )
+        .unwrap();
+        fs::write(
+            path.join("SHA256SUMS.txt"),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  Slots/A/true-tick.exe\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            select(&path),
+            Err(SelectionError::ChecksumMismatch { .. })
+        ));
         fs::remove_dir_all(path).unwrap();
     }
 }
