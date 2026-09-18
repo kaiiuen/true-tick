@@ -150,6 +150,8 @@ const POPUP_REFRESH_INTERVAL_MS: u32 = 500;
 const SCHEDULE_DISPLAY_TIMER_ID: usize = 0x7100;
 /// Bounded tray countdown cadence. The publication key suppresses redundant updates.
 const SCHEDULE_DISPLAY_INTERVAL_MS: u32 = 1_000;
+pub(crate) const POWER_DEBOUNCE_TIMER_ID: usize = 0x7200;
+pub(crate) const POWER_DEBOUNCE_INTERVAL_MS: u32 = 2_000;
 const ID_START: usize = 1001;
 const ID_STOP: usize = 1002;
 const ID_QUIT: usize = 1004;
@@ -2419,6 +2421,12 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn power_debounce_constants_are_bounded_and_monotonic() {
+        assert_eq!(super::POWER_DEBOUNCE_TIMER_ID, 0x7200);
+        assert_eq!(super::POWER_DEBOUNCE_INTERVAL_MS, 2_000);
+    }
+
     fn test_app(diagnostics: Arc<DiagnosticStore>) -> App {
         use crate::pause::{DurationCoordinator, PresetsManager};
         use tick_observation_windows::WindowsObservation;
@@ -2519,6 +2527,8 @@ mod tests {
             last_publication: None,
             log_directory: PathBuf::new(),
             last_persisted_event_sequence: 0,
+            power_debounce_active: false,
+            power_debounce_target_state: None,
         }
     }
 

@@ -267,6 +267,8 @@ pub(crate) struct App {
     pub(crate) last_publication: Option<PublicationKey>,
     pub(crate) log_directory: PathBuf,
     pub(crate) last_persisted_event_sequence: u64,
+    pub(crate) power_debounce_active: bool,
+    pub(crate) power_debounce_target_state: Option<PowerState>,
 }
 
 pub fn run() {
@@ -687,6 +689,8 @@ pub fn run() {
             last_publication: None,
             log_directory,
             last_persisted_event_sequence: 0,
+            power_debounce_active: false,
+            power_debounce_target_state: None,
         });
         let app_ptr = Box::into_raw(app);
         let app = &mut *app_ptr;
@@ -1462,6 +1466,81 @@ impl App {
     }
 }
 
+unsafe fn handle_power_broadcast_event(hwnd: *mut c_void, app: &mut App) {
+    let current_power = app.observation.power().state;
+    let is_battery_saver = app.observation.power().battery_saver == Some(true);
+    if is_battery_saver {
+        if app.power_debounce_active {
+            let _ = KillTimer(hwnd, POWER_DEBOUNCE_TIMER_ID);
+            app.power_debounce_active = false;
+            app.power_debounce_target_state = None;
+            app.record(
+                "power.debounce.suppressed",
+                "reason=battery_saver_immediate_override",
+            );
+        }
+        release_for_power_change(app);
+        return;
+    }
+    if let Some(target) = app.power_debounce_target_state {
+        if target == current_power {
+            let timer_set = SetTimer(
+                hwnd,
+                POWER_DEBOUNCE_TIMER_ID,
+                POWER_DEBOUNCE_INTERVAL_MS,
+                std::ptr::null_mut(),
+            );
+            app.record(
+                "power.debounce.extended",
+                format!("state={target:?} timer_valid={}", timer_set != 0),
+            );
+            return;
+        } else {
+            let _ = KillTimer(hwnd, POWER_DEBOUNCE_TIMER_ID);
+            app.power_debounce_active = false;
+            app.power_debounce_target_state = None;
+            app.record(
+                "power.debounce.suppressed",
+                format!("reason=rapid_transient_flip new_state={current_power:?}"),
+            );
+        }
+    }
+    app.power_debounce_active = true;
+    app.power_debounce_target_state = Some(current_power);
+    let timer_set = SetTimer(
+        hwnd,
+        POWER_DEBOUNCE_TIMER_ID,
+        POWER_DEBOUNCE_INTERVAL_MS,
+        std::ptr::null_mut(),
+    );
+    app.record(
+        "power.debounce.started",
+        format!(
+            "candidate_state={current_power:?} delay_ms={POWER_DEBOUNCE_INTERVAL_MS} timer_valid={}",
+            timer_set != 0
+        ),
+    );
+}
+
+unsafe fn handle_power_debounce_timer(hwnd: *mut c_void, app: &mut App) {
+    let _ = KillTimer(hwnd, POWER_DEBOUNCE_TIMER_ID);
+    app.power_debounce_active = false;
+    let target = app.power_debounce_target_state.take();
+    let current_power = app.observation.power().state;
+    if target == Some(current_power) {
+        app.record(
+            "power.debounce.stabilized",
+            format!("state={current_power:?}"),
+        );
+        release_for_power_change(app);
+    } else {
+        app.record(
+            "power.debounce.discarded",
+            format!("target={target:?} actual={current_power:?}"),
+        );
+    }
+}
+
 unsafe extern "system" fn window_proc(
     hwnd: *mut c_void,
     message: u32,
@@ -1519,6 +1598,9 @@ unsafe extern "system" fn window_proc(
             WM_TIMER if w_param == SCHEDULE_DISPLAY_TIMER_ID => {
                 handle_schedule_display_timer(app);
             }
+            WM_TIMER if w_param == POWER_DEBOUNCE_TIMER_ID => {
+                handle_power_debounce_timer(hwnd, app);
+            }
             WM_TIMER if w_param == HANDOFF_TIMER_ID => {
                 handle_handoff_timer(app);
             }
@@ -1546,7 +1628,7 @@ unsafe extern "system" fn window_proc(
                         app.observation.power().state
                     ),
                 );
-                release_for_power_change(app);
+                handle_power_broadcast_event(hwnd, app);
                 app.finish_operation(DiagnosticOutcome::Completed);
             }
             WM_DESTROY => PostQuitMessage(0),
