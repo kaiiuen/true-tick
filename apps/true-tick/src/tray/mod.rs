@@ -1305,7 +1305,7 @@ fn apply_power_reconciliation(app: &mut App) {
     ) {
         app.pending_resume_on_ac = false;
         app.record("policy.power_resume_applied", "action=acquire");
-        apply_policy(app);
+        queue_intent(app, DesiredIntent::Acquire, "power auto resume on ac");
         return;
     }
     let action = power_reconciliation(automatic, power, ownership);
@@ -2381,31 +2381,41 @@ mod tests {
             true,
             true,
             PowerState::Ac,
-            OwnershipState::Released
+            OwnershipState::Released,
         ));
         assert!(!resume_on_ac_applies(
             false,
             true,
             PowerState::Ac,
-            OwnershipState::Released
+            OwnershipState::Released,
         ));
         assert!(!resume_on_ac_applies(
             true,
             false,
             PowerState::Ac,
-            OwnershipState::Released
+            OwnershipState::Released,
         ));
         assert!(!resume_on_ac_applies(
             true,
             true,
             PowerState::Battery,
-            OwnershipState::Released
+            OwnershipState::Released,
         ));
         assert!(!resume_on_ac_applies(
             true,
             true,
             PowerState::Ac,
-            OwnershipState::Owned
+            OwnershipState::Owned,
+        ));
+    }
+
+    #[test]
+    fn resume_on_ac_queues_acquire_intent_even_when_automatic_timing_is_false() {
+        assert!(resume_on_ac_applies(
+            true,
+            true,
+            PowerState::Ac,
+            OwnershipState::Released,
         ));
     }
 
