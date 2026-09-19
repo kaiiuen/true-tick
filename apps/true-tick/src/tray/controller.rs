@@ -363,6 +363,16 @@ pub fn run() {
         let executable = get_module_file_name_w_path_with_diagnostics(Some(&diagnostics));
         let log_directory = crate::logging::resolve_log_directory(&executable);
         let previous_marker = crate::session::read_session_marker(&log_directory);
+        let tombstone_existed = crate::session::session_marker_path(&log_directory).exists();
+        if tombstone_existed {
+            diagnostics.record(
+                "lifecycle.session_tombstone.detected",
+                format!(
+                    "previous_marker={}",
+                    previous_marker.as_deref().map(str::trim).unwrap_or("")
+                ),
+            );
+        }
         match crate::session::classify_previous_session(previous_marker.as_deref()) {
             crate::session::PreviousSession::UncleanShutdown => {
                 diagnostics.record(
@@ -381,10 +391,8 @@ pub fn run() {
                 diagnostics.record("lifecycle.clean_start", "previous_marker=absent");
             }
         }
-        if let Err(error) = crate::session::write_session_marker(
-            &log_directory,
-            crate::session::SESSION_STATE_RUNNING,
-        ) {
+        let tombstone = crate::session::SessionTombstone::current();
+        if let Err(error) = crate::session::create_session_tombstone(&log_directory, &tombstone) {
             diagnostics.record(
                 "lifecycle.session_marker.error",
                 format!("result=running_write_failed error={error}"),
@@ -1088,13 +1096,10 @@ pub fn run() {
 }
 
 fn mark_session_clean(app: &App) {
-    if let Err(error) = crate::session::write_session_marker(
-        &app.log_directory,
-        crate::session::SESSION_STATE_CLEAN,
-    ) {
+    if let Err(error) = crate::session::remove_session_marker(&app.log_directory) {
         app.diagnostics.record(
             "lifecycle.session_marker.error",
-            format!("result=clean_write_failed error={error}"),
+            format!("result=clean_remove_failed error={error}"),
         );
     }
 }
@@ -1643,7 +1648,9 @@ unsafe extern "system" fn window_proc(
                 release_for_power_change(app);
                 app.finish_operation(DiagnosticOutcome::Completed);
             }
-            WM_POWERBROADCAST if w_param == PBT_APMRESUMESUSPEND || w_param == PBT_APMRESUMEAUTOMATIC => {
+            WM_POWERBROADCAST
+                if w_param == PBT_APMRESUMESUSPEND || w_param == PBT_APMRESUMEAUTOMATIC =>
+            {
                 app.begin_operation(DiagnosticSource::PowerEvent);
                 app.record(
                     "power.broadcast",

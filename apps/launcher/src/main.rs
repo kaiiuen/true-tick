@@ -39,6 +39,10 @@ enum SelectionError {
         expected: String,
         actual: String,
     },
+    CrashLoopDetected {
+        slot: Slot,
+        consecutive_failures: u32,
+    },
     BothSlotsCorrupted {
         active: String,
         standby: String,
@@ -70,6 +74,11 @@ impl std::fmt::Display for SelectionError {
             Self::ChecksumMismatch { target, expected, actual } => write!(
                 formatter,
                 "integrity verification failed for {target}: expected {expected} but computed {actual}"
+            ),
+            Self::CrashLoopDetected { slot, consecutive_failures } => write!(
+                formatter,
+                "crash loop detected for slot {}: {consecutive_failures} consecutive failures",
+                slot.name()
             ),
             Self::BothSlotsCorrupted { active, standby } => write!(
                 formatter,
@@ -137,6 +146,37 @@ fn verify_slot_integrity(root: &Path, slot: Slot) -> Result<(), SelectionError> 
     }
     Ok(())
 }
+
+fn read_slot_health(root: &Path, slot: Slot) -> u32 {
+    let health_path = root
+        .join("Data")
+        .join("state")
+        .join(format!("slot-{}-health.state", slot.name()));
+    if let Ok(content) = fs::read_to_string(&health_path) {
+        content.trim().parse::<u32>().unwrap_or(0)
+    } else {
+        0
+    }
+}
+
+fn increment_slot_health(root: &Path, slot: Slot) -> u32 {
+    let state_dir = root.join("Data").join("state");
+    let _ = fs::create_dir_all(&state_dir);
+    let count = read_slot_health(root, slot) + 1;
+    let health_path = state_dir.join(format!("slot-{}-health.state", slot.name()));
+    let _ = fs::write(&health_path, format!("{count}\n"));
+    count
+}
+
+fn clear_slot_health(root: &Path, slot: Slot) {
+    let health_path = root
+        .join("Data")
+        .join("state")
+        .join(format!("slot-{}-health.state", slot.name()));
+    let _ = fs::remove_file(&health_path);
+}
+
+const BOOT_FAILURE_THRESHOLD: u32 = 3;
 
 fn verify_golden_master(root: &Path) -> Result<PathBuf, SelectionError> {
     let executable = root.join("Recovery").join("true-tick.exe");
@@ -248,24 +288,44 @@ fn select(root: &Path) -> Result<(Slot, PathBuf), SelectionError> {
         "B" => Slot::B,
         other => return Err(SelectionError::InvalidMetadata(other.to_owned())),
     };
-    match verify_slot_executable(root, slot) {
+
+    let verify_and_check_slot = |target_slot: Slot| -> Result<PathBuf, SelectionError> {
+        let failures = read_slot_health(root, target_slot);
+        if failures >= BOOT_FAILURE_THRESHOLD {
+            return Err(SelectionError::CrashLoopDetected {
+                slot: target_slot,
+                consecutive_failures: failures,
+            });
+        }
+        verify_slot_executable(root, target_slot)
+    };
+
+    match verify_and_check_slot(slot) {
         Ok(executable) => Ok((slot, executable)),
         Err(active_error) => {
+            increment_slot_health(root, slot);
             let standby = slot.alternate();
-            match verify_slot_executable(root, standby) {
+            match verify_and_check_slot(standby) {
                 Ok(executable) => {
                     record_rollback_decision(root, slot, standby, &active_error);
                     fs::write(&metadata, format!("{}\n", standby.name()))
                         .map_err(SelectionError::MetadataRead)?;
                     Ok((standby, executable))
                 }
-                Err(standby_error) => match restore_from_golden_master(root) {
-                    Ok(executable) => Ok((Slot::A, executable)),
-                    Err(_) => Err(SelectionError::BothSlotsCorrupted {
-                        active: active_error.to_string(),
-                        standby: standby_error.to_string(),
-                    }),
-                },
+                Err(standby_error) => {
+                    increment_slot_health(root, standby);
+                    match restore_from_golden_master(root) {
+                        Ok(executable) => {
+                            clear_slot_health(root, Slot::A);
+                            clear_slot_health(root, Slot::B);
+                            Ok((Slot::A, executable))
+                        }
+                        Err(_) => Err(SelectionError::BothSlotsCorrupted {
+                            active: active_error.to_string(),
+                            standby: standby_error.to_string(),
+                        }),
+                    }
+                }
             }
         }
     }
@@ -517,6 +577,96 @@ mod tests {
             .unwrap();
         assert!(log
             .contains("event=autonomous_golden_master_restoration target=Slot::A status=restored"));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn test_crash_loop_triggers_autonomous_rollback() {
+        let path = root("crash-loop-rollback");
+        fs::create_dir_all(path.join("Slots").join("A")).unwrap();
+        fs::create_dir_all(path.join("Slots").join("B")).unwrap();
+        fs::create_dir_all(path.join("Data").join("state")).unwrap();
+        fs::write(path.join("active-slot.txt"), "A\n").unwrap();
+        fs::write(
+            path.join("Slots").join("A").join("true-tick.exe"),
+            b"fixture_a",
+        )
+        .unwrap();
+        fs::write(
+            path.join("Slots").join("B").join("true-tick.exe"),
+            b"fixture_b",
+        )
+        .unwrap();
+        fs::write(
+            path.join("Data").join("state").join("slot-A-health.state"),
+            "3\n",
+        )
+        .unwrap();
+
+        let (slot, _) = select(&path).unwrap();
+        assert_eq!(slot, Slot::B);
+        assert_eq!(
+            fs::read_to_string(path.join("active-slot.txt")).unwrap(),
+            "B\n"
+        );
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn test_dual_slot_crash_loop_triggers_golden_master() {
+        let path = root("crash-loop-golden");
+        fs::create_dir_all(path.join("Slots").join("A")).unwrap();
+        fs::create_dir_all(path.join("Slots").join("B")).unwrap();
+        fs::create_dir_all(path.join("Recovery")).unwrap();
+        fs::create_dir_all(path.join("Data").join("state")).unwrap();
+        fs::write(path.join("active-slot.txt"), "A\n").unwrap();
+        fs::write(
+            path.join("Slots").join("A").join("true-tick.exe"),
+            b"fixture_a",
+        )
+        .unwrap();
+        fs::write(
+            path.join("Slots").join("B").join("true-tick.exe"),
+            b"fixture_b",
+        )
+        .unwrap();
+        fs::write(
+            path.join("Data").join("state").join("slot-A-health.state"),
+            "3\n",
+        )
+        .unwrap();
+        fs::write(
+            path.join("Data").join("state").join("slot-B-health.state"),
+            "3\n",
+        )
+        .unwrap();
+        fs::write(path.join("Recovery").join("true-tick.exe"), b"golden").unwrap();
+        fs::write(
+            path.join("Recovery").join("true-tick.toml"),
+            "automatic = false\n",
+        )
+        .unwrap();
+        let golden_hash = compute_sha256(&path.join("Recovery").join("true-tick.exe")).unwrap();
+        fs::write(
+            path.join("SHA256SUMS.txt"),
+            format!("{golden_hash}  Recovery/true-tick.exe\n"),
+        )
+        .unwrap();
+
+        let (slot, executable) = select(&path).unwrap();
+        assert_eq!(slot, Slot::A);
+        assert_eq!(
+            executable,
+            path.join("Slots").join("A").join("true-tick.exe")
+        );
+        assert_eq!(
+            fs::read_to_string(path.join("Slots").join("A").join("true-tick.exe")).unwrap(),
+            "golden"
+        );
+        assert_eq!(
+            fs::read_to_string(path.join("active-slot.txt")).unwrap(),
+            "A\n"
+        );
         fs::remove_dir_all(path).unwrap();
     }
 

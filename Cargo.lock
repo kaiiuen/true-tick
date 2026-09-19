@@ -93,6 +93,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tick-ipc"
+version = "0.1.0"
+dependencies = [
+ "tick-core",
+]
+
+[[package]]
 name = "tick-multiclient"
 version = "0.1.0"
 dependencies = [
@@ -142,6 +149,7 @@ version = "0.1.0"
 dependencies = [
  "tick-core",
  "tick-diagnostics",
+ "tick-ipc",
  "tick-observation-windows",
  "tick-ownership",
  "tick-platform-windows",

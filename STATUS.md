@@ -20,11 +20,17 @@ recovers or reports the state. Hardware motherboard crystal divisor and phase-lo
 cleanup once and keeps an unverified warning if release is not confirmed. Tray Quit now logs the request, active-state decision, dialog result, cleanup result, and exit permission. An owned request uses `True™ Tick is currently controlling timer resolution. Stop timing and quit?`. Uncertain ownership uses `True™ Tick could not verify that timing is fully released. Keep the app open and retry cleanup?`. `Yes` maps to Stop and Quit. `No`, close, zero, unknown, and MessageBox failure map to Cancel. A released post-release handoff is observational only, records that external timing remains, stops its watcher, and allows normal exit. Failed owned cleanup keeps the app alive, updates the icon and diagnostic log, and allows retry. A definitely stopped state with no pending ownership exits without a warning. Opt-in current-user boot startup registration is isolated behind its own Windows
 adapter. Portable A/B mode targets the buildable `Launcher.exe` entry point. The
 launcher requires valid active-slot metadata, validates the named A or B
-executable, and launches that slot before activation. A normal debug run uses a
+executable against package SHA-256 digests, and implements an autonomous
+three-tier recovery hierarchy: Tier 1 executes the active slot, Tier 2
+automatically rolls back to the standby slot after three consecutive boot
+failures or checksum corruption, and Tier 3 reconstructs Slot A from the
+immutable Golden Master payload preserved in `Recovery/true-tick.exe` and
+`Recovery/true-tick.toml` if both primary slots fail. A normal debug run uses a
 separate fallback that registers the actual `target/debug/true-tick.exe` tray
 executable when no portable launcher path is available. Registration is distinct
-from automatic timer activation after the application has launched. Secure
-signatures and rollback are not implemented.
+from automatic timer activation after the application has launched. Release
+specifications for Ed25519 signatures, RFC 8785 canonical manifests, and
+monotonic anti-replay counters are formalized in the decision register.
 
 The tray starts with a clickable `True™ Tick v<version>` header sourced from Cargo
 package metadata. Root menu order is `True™ Tick v<version>`, a separator,
@@ -257,10 +263,16 @@ signed screen coordinates. Failed `GetCursorPos` deactivates the tooltip.
 
 The Windows support matrix, exact native API behavior, and runtime confirmation of the loader fix remain bounded internal validation work. The exact non-running tray development build command is `cargo build -p true-tick --bin true-tick`. It selects the tray binary and is the required build target for this project. Core Windows DLLs such as `kernel32.dll`, `user32.dll`, `ntdll.dll`, `shell32.dll`, `gdi32.dll`, and `comctl32.dll` are OS components and must not be copied or bundled. The embedded Common Controls v6 manifest is the compatibility mechanism. The current MSVC build has a non-system dependency on the Microsoft Visual C++ runtime and Universal CRT. A static binary scan found `VCRUNTIME140.dll` and `api-ms-win-crt-*` imports. The eventual distribution choice is a documented VC++ Redistributable prerequisite or a validated static CRT build. No installer or arbitrary DLL copy is added. The deterministic PE evidence check uses Visual Studio `dumpbin` for `/DEPENDENTS`, `/IMPORTS`, the `.rsrc` section headers, and `.rsrc` raw data. It must show the ordinal 345 import, a non-empty resource directory, and the embedded Common Controls dependency. No runtime Windows success is claimed here. The diagnostic window style contract is source-tested, but its actual appearance, taskbar registration, title-bar controls, restore, and close behavior remain runtime-unverified because the app is not launched. The grid message contract keeps `LVM_INSERTITEMW` at `LVM_FIRST + 77` and corrects `LVM_SETITEMTEXTW` to `LVM_FIRST + 116`. Each refresh logs bounded snapshot row count, inserted row count, item count, insert failures, and set-text failures without cell values or secrets. Session events also retain operation_id, optional parent_operation_id, correlation_id, finite phase, finite source, finite outcome, and typed native outcome fields. Retention is hard-capped at 512 events with a truncation marker. Rendered text and fields are bounded and sanitized. Power observation does not yet provide full Battery Saver,
 session, lock, suspend, or resume notification coverage. Unknown observation is
-reported as degraded and blocks acquisition. A/B selection is a safe local
-scaffold. Missing or invalid active-slot metadata requires repair. It does not
-verify a signed package or perform rollback. No installer, signed artifact,
-tag, GitHub Release, or public publication is created here. Evidence registration for Gates 0, 1, 2, and 4 is complete, and the packaging pipeline populated artifacts/True-Tick-internal-v0.1.0 with 9 of 9 verified artifacts matching SHA256SUMS.txt. An internal test
+reported as degraded and blocks acquisition. A/B selection and autonomous recovery
+are implemented in `Launcher.exe`, providing Tier 1 active-slot execution, Tier 2
+standby slot rollback with incident logging to `launcher-rollback.log`, and Tier 3
+Golden Master recovery. Missing or unrecoverable metadata requires package repair.
+Inter-process communication is We64 AI with bounded framing,
+CRC-32 checksums, and rate limiting. No installer, signed artifact, tag, GitHub
+Release, or public publication is created here. Evidence registration for Gates 0,
+1, 2, and 4 is complete, and the packaging pipeline populated
+artifacts/True-Tick-internal-v0.1.0 with 9 of 9 verified artifacts matching
+SHA256SUMS.txt. An internal test
 package is assembled locally under the untracked `artifacts/` directory for
 hand testing, and it is not published.
 
