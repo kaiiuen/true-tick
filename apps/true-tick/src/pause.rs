@@ -137,7 +137,7 @@ impl DurationPreset {
             return Self::from_seconds_f64(minutes * 60.0);
         }
         let mut chars = lower.chars().peekable();
-        let mut total_seconds = 0.0f64;
+        let mut total_seconds = 0u64;
         let mut consumed_segment = false;
         loop {
             while matches!(chars.peek(), Some(character) if character.is_whitespace()) {
@@ -165,7 +165,6 @@ impl DurationPreset {
             if !seen_digit {
                 return Err("expected a number in duration text");
             }
-            let value: f64 = number_text.parse().map_err(|_| "invalid duration number")?;
             let mut unit = String::new();
             while let Some(character) = chars.peek().copied() {
                 if character.is_ascii_alphabetic() {
@@ -176,19 +175,46 @@ impl DurationPreset {
                 }
             }
             let multiplier = match unit.as_str() {
-                "s" | "sec" | "secs" | "second" | "seconds" => 1.0,
-                "m" | "min" | "mins" | "minute" | "minutes" => 60.0,
-                "h" | "hr" | "hrs" | "hour" | "hours" => 3600.0,
+                "s" | "sec" | "secs" | "second" | "seconds" => 1u64,
+                "m" | "min" | "mins" | "minute" | "minutes" => 60,
+                "h" | "hr" | "hrs" | "hour" | "hours" => 3600,
                 "" => return Err("expected a unit after the number"),
                 _ => return Err("unknown duration unit"),
             };
-            total_seconds += value * multiplier;
+            let segment_seconds = if seen_dot {
+                let fraction: f64 = number_text
+                    .parse()
+                    .map_err(|_| "invalid duration number")?;
+                let scaled = fraction * multiplier as f64;
+                if !(scaled.is_finite() && scaled >= 0.0 && scaled <= u64::MAX as f64) {
+                    return Err("invalid duration number");
+                }
+                scaled.round() as u64
+            } else {
+                let value: u64 = number_text
+                    .parse()
+                    .map_err(|_| "invalid duration number")?;
+                match value.checked_mul(multiplier) {
+                    Some(product) => product,
+                    None => return Err("invalid duration number"),
+                }
+            };
+            total_seconds = match total_seconds.checked_add(segment_seconds) {
+                Some(total) => total,
+                None => return Err("invalid duration number"),
+            };
+            if total_seconds > MAX_PRESET_SECONDS as u64 {
+                return Err("preset must be between 10 seconds and 24 hours");
+            }
             consumed_segment = true;
         }
         if !consumed_segment {
             return Err("duration text is empty");
         }
-        Self::from_seconds_f64(total_seconds)
+        if !(MIN_PRESET_SECONDS as u64..=MAX_PRESET_SECONDS as u64).contains(&total_seconds) {
+            return Err("preset must be between 10 seconds and 24 hours");
+        }
+        Self::new(total_seconds as u32)
     }
 
     fn from_seconds_f64(total_seconds: f64) -> Result<Self, &'static str> {
@@ -713,6 +739,18 @@ mod tests {
         assert!(DurationPreset::parse("25h").is_err());
         assert!(DurationPreset::parse("9s").is_err());
         assert!(DurationPreset::parse("m").is_err());
+    }
+
+    #[test]
+    fn test_parse_preset_string_rejects_astronomical_hours_overflow() {
+        assert!(DurationPreset::parse("99999999999999h").is_err());
+        assert!(DurationPreset::parse("4294967295h").is_err());
+        assert!(DurationPreset::parse("99999999999999999999h").is_err());
+    }
+
+    #[test]
+    fn test_parse_preset_string_rejects_multiplication_overflow() {
+        assert!(DurationPreset::parse("5000000h").is_err());
     }
 
     #[test]

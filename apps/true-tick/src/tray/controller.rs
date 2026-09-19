@@ -283,6 +283,8 @@ pub fn run() {
         let instance_last_error = GetLastError();
         let _instance_guard = match single_instance_decision(instance_handle, instance_last_error) {
             SingleInstanceDecision::Proceed { handle } => {
+                // Ensure the single-instance mutex cannot be inherited by child processes
+                let _ = SetHandleInformation(handle, 0x0000_0001, 0);
                 diagnostics.record("lifecycle.single_instance", "result=acquired");
                 Some(SingleInstanceGuard::new(handle, diagnostics.clone()))
             }
@@ -1240,6 +1242,7 @@ impl App {
         }
         cancel_duration_timer(self);
         kill_schedule_display_timer(self);
+        kill_power_debounce_timer(self);
         self.scheduled_operation = None;
         self.pending_resume_on_ac = false;
         self.begin_operation(DiagnosticSource::Shutdown);
@@ -1803,6 +1806,7 @@ extern "system" {
         initial_owner: i32,
         name: *const u16,
     ) -> *mut c_void;
+    fn SetHandleInformation(handle: *mut c_void, mask: u32, flags: u32) -> i32;
     fn CloseHandle(handle: *mut c_void) -> i32;
 }
 

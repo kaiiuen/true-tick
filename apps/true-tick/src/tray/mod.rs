@@ -137,7 +137,7 @@ const WM_APP: u32 = 0x8000;
 const WM_TRAY: u32 = WM_APP + 1;
 pub(crate) const WM_CREATE: u32 = 0x0001;
 pub(crate) const WM_COMMAND: u32 = 0x0111;
-const WM_DESTROY: u32 = 0x0002;
+pub(crate) const WM_DESTROY: u32 = 0x0002;
 const WM_POWERBROADCAST: u32 = 0x0218;
 pub(crate) const WM_TIMER: u32 = 0x0113;
 const WM_MENUSELECT: u32 = 0x011F;
@@ -997,6 +997,23 @@ fn begin_schedule_display_timer(app: &mut App) {
     } else {
         app.schedule_display_timer_active = true;
     }
+}
+
+fn kill_power_debounce_timer(app: &mut App) {
+    if !app.power_debounce_active {
+        return;
+    }
+    app.power_debounce_active = false;
+    app.power_debounce_target_state = None;
+    if let Some(hwnd) = app.tray_icon.as_ref().map(|icon| icon.h_wnd) {
+        unsafe {
+            let _ = KillTimer(hwnd, POWER_DEBOUNCE_TIMER_ID);
+        }
+    }
+    app.record(
+        "power.debounce.suppressed",
+        "reason=shutdown_teardown",
+    );
 }
 
 fn kill_schedule_display_timer(app: &mut App) {
@@ -2343,7 +2360,7 @@ extern "system" {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Arc;
     use tick_diagnostics::{DiagnosticRecord, DiagnosticStore};
@@ -2473,7 +2490,7 @@ mod tests {
         assert_eq!(super::POWER_DEBOUNCE_INTERVAL_MS, 2_000);
     }
 
-    fn test_app(diagnostics: Arc<DiagnosticStore>) -> App {
+    pub(crate) fn test_app(diagnostics: Arc<DiagnosticStore>) -> App {
         use crate::pause::{DurationCoordinator, PresetsManager};
         use tick_observation_windows::WindowsObservation;
         use tick_ownership::{TimerController, TimingSnapshot};

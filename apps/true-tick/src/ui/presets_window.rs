@@ -13,8 +13,8 @@ use crate::tray::{
     BS_PUSHBUTTON, COLOR_WINDOW, COLOR_WINDOWTEXT, EM_LIMITTEXT, EN_CHANGE, ES_AUTOHSCROLL,
     GWLP_USERDATA, SS_LEFT, SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE, SW_SHOWNORMAL, WM_CLOSE,
     WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_NCDESTROY, WM_PAINT, WM_SIZE, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-    WS_EX_CLIENTEDGE, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    WM_DESTROY, WM_NCDESTROY, WM_PAINT, WM_SIZE, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
+    WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 
 pub const PRESETS_WINDOW_TITLE: &str = "True™ Tick Interval Presets";
@@ -160,15 +160,7 @@ unsafe fn presets_children_ready(app: &App) -> bool {
 
 pub unsafe fn open_presets_window(app: &mut App) -> bool {
     if let Some(window) = app.presets_window {
-        if IsWindow(window) == 0 {
-            app.record(
-                "presets.window.invalid",
-                "result=cleared reason=not_a_window",
-            );
-            app.presets_window = None;
-            app.presets_listbox = None;
-            app.presets_input = None;
-        } else {
+        if IsWindow(window) != 0 {
             if IsIconic(window) != 0 {
                 ShowWindow(window, SW_RESTORE);
             } else {
@@ -178,6 +170,10 @@ pub unsafe fn open_presets_window(app: &mut App) -> bool {
             SetForegroundWindow(window);
             app.record("presets.window.result", "result=focused_existing");
             return true;
+        } else {
+            app.presets_window = None;
+            app.presets_listbox = None;
+            app.presets_input = None;
         }
     }
     let class_name = wide(PRESETS_WINDOW_CLASS);
@@ -524,6 +520,12 @@ pub unsafe extern "system" fn presets_window_proc(
         DestroyWindow(hwnd);
         return 0;
     }
+    if message == WM_DESTROY {
+        (*app).presets_window = None;
+        (*app).presets_listbox = None;
+        (*app).presets_input = None;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+    }
     if message == WM_NCDESTROY {
         (*app).presets_window = None;
         (*app).presets_listbox = None;
@@ -531,4 +533,34 @@ pub unsafe extern "system" fn presets_window_proc(
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
     }
     DefWindowProcW(hwnd, message, w_param, l_param)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tray::tests::test_app;
+    use std::sync::Arc;
+    use tick_diagnostics::DiagnosticStore;
+
+    #[test]
+    fn open_presets_window_recovers_from_invalid_handle() {
+        let store = Arc::new(DiagnosticStore::new(16));
+        let mut app = test_app(store.clone());
+        let invalid = 0xdead_beef as *mut c_void;
+        app.presets_window = Some(invalid);
+        app.presets_listbox = Some(invalid);
+        app.presets_input = Some(invalid);
+        let result = unsafe { open_presets_window(&mut app) };
+        if let Some(window) = app.presets_window {
+            assert_ne!(window, invalid);
+            unsafe {
+                let _ = DestroyWindow(window);
+            }
+        }
+        if result {
+            assert!(app.presets_window.is_some());
+        }
+        assert_ne!(app.presets_listbox, Some(invalid));
+        assert_ne!(app.presets_input, Some(invalid));
+    }
 }
