@@ -170,8 +170,10 @@ fn verify_slot_executable(root: &Path, slot: Slot) -> Result<PathBuf, SelectionE
 }
 
 fn verify_slot_integrity(root: &Path, slot: Slot) -> Result<(), SelectionError> {
-    if let Some(manifest) = prepare_signed_manifest(root)? {
-        return verify_slot_integrity_signed(root, slot, &manifest);
+    if prepare_signed_manifest(root, slot)?.is_some() {
+        // prepare_signed_manifest already verified the slot and recovery
+        // digests before it committed the release counter.
+        return Ok(());
     }
     verify_slot_integrity_checksum(root, slot)
 }
@@ -248,14 +250,19 @@ fn persist_release_counter(root: &Path, counter: u64) -> Result<(), SelectionErr
 }
 
 /// Loads, signature-verifies, and counter-checks the signed manifest when one
-/// is present. On success the new release counter is persisted before the
-/// caller verifies per-file digests.
+/// is present. The selected slot executable and the recovery executable
+/// digests are verified before the new release counter is committed, so a
+/// failed digest check leaves the previous counter on disk and preserves
+/// rollback capability.
 ///
 /// Returns `None` when no `manifest.sig` is present so the caller can retain
 /// the existing SHA256SUMS.txt behaviour. Signature verification is not
 /// performed in that case because no signing tool exists yet to produce the
 /// artifact, so absence is a diagnostic rather than a failure.
-fn prepare_signed_manifest(root: &Path) -> Result<Option<SignedManifest>, SelectionError> {
+fn prepare_signed_manifest(
+    root: &Path,
+    slot: Slot,
+) -> Result<Option<SignedManifest>, SelectionError> {
     let Some(manifest) = load_signed_manifest(root)? else {
         eprintln!(
             "diagnostic: manifest.sig absent under {}, signature verification not performed, \
@@ -269,8 +276,39 @@ fn prepare_signed_manifest(root: &Path) -> Result<Option<SignedManifest>, Select
     let previously_seen = read_release_counter(root)?;
     check_release_counter(&manifest, previously_seen)
         .map_err(SelectionError::ReleaseCounterRejected)?;
+    // Commit ordering matters. Verifying the payload before the counter is
+    // written keeps the on disk counter at the last release that proved valid,
+    // which is what makes an autonomous rollback possible.
+    verify_slot_integrity_signed(root, slot, &manifest)?;
+    verify_recovery_integrity_signed(root, &manifest)?;
     persist_release_counter(root, manifest.release_counter)?;
     Ok(Some(manifest))
+}
+
+const RECOVERY_EXECUTABLE_REL: &str = "Recovery/true-tick.exe";
+
+/// Verifies the recovery golden master digest when the signed manifest lists
+/// it. A manifest without a recovery entry is tolerated so packages that only
+/// authorize slot executables keep working.
+fn verify_recovery_integrity_signed(
+    root: &Path,
+    manifest: &SignedManifest,
+) -> Result<(), SelectionError> {
+    let authorized = manifest
+        .entries
+        .iter()
+        .any(|entry| entry.path == RECOVERY_EXECUTABLE_REL);
+    if !authorized {
+        return Ok(());
+    }
+    let recovery_path = root.join("Recovery").join("true-tick.exe");
+    let bytes = fs::read(&recovery_path).map_err(SelectionError::MetadataRead)?;
+    verify_entry_digest(manifest, RECOVERY_EXECUTABLE_REL, &bytes).map_err(|cause| {
+        SelectionError::SignedDigestMismatch {
+            target: RECOVERY_EXECUTABLE_REL.to_owned(),
+            cause,
+        }
+    })
 }
 
 fn verify_slot_integrity_signed(
@@ -592,14 +630,54 @@ fn record_rollback_decision(
     Ok(())
 }
 
+/// Normalizes raw `active-slot.txt` bytes by dropping a UTF-8 BOM, CRLF
+/// terminators, surrounding whitespace, and null bytes before the value is
+/// interpreted.
+fn normalize_active_slot(raw: &str) -> String {
+    raw.trim_matches(|c: char| c.is_whitespace() || c == '\0')
+        .trim_matches('\u{feff}')
+        .trim_matches(|c: char| c.is_whitespace() || c == '\0')
+        .to_owned()
+}
+
+fn parse_active_slot(raw: &str) -> Option<Slot> {
+    match normalize_active_slot(raw).as_str() {
+        "A" => Some(Slot::A),
+        "B" => Some(Slot::B),
+        _ => None,
+    }
+}
+
+/// Last resort selector used when `active-slot.txt` cannot be interpreted.
+/// Slot A wins when both slot executables are present so startup is
+/// deterministic.
+fn fallback_slot_from_installed_executables(root: &Path) -> Option<Slot> {
+    [Slot::A, Slot::B].into_iter().find(|slot| {
+        root.join("Slots")
+            .join(slot.name())
+            .join("true-tick.exe")
+            .exists()
+    })
+}
+
 fn select(root: &Path) -> Result<(Slot, PathBuf), SelectionError> {
     let metadata = root.join("active-slot.txt");
-    let value = fs::read_to_string(&metadata).map_err(SelectionError::MetadataRead)?;
-    let value = value.trim();
-    let slot = match value {
-        "A" => Slot::A,
-        "B" => Slot::B,
-        other => return Err(SelectionError::InvalidMetadata(other.to_owned())),
+    let raw = fs::read_to_string(&metadata).map_err(SelectionError::MetadataRead)?;
+    let slot = match parse_active_slot(&raw) {
+        Some(slot) => slot,
+        None => {
+            let invalid = normalize_active_slot(&raw);
+            match fallback_slot_from_installed_executables(root) {
+                Some(slot) => {
+                    eprintln!(
+                        "warning: active-slot.txt value {invalid:?} is invalid, falling back to slot {}",
+                        slot.name()
+                    );
+                    slot
+                }
+                None => return Err(SelectionError::InvalidMetadata(invalid)),
+            }
+        }
     };
 
     let verify_and_check_slot = |target_slot: Slot| -> Result<PathBuf, SelectionError> {
