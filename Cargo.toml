@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tick-core",
+    "crates/tick-policy",
+    "crates/tick-ownership",
+    "crates/tick-platform-windows",
+    "crates/tick-observation-windows",
+    "crates/tick-diagnostics",
+    "crates/tick-startup-windows",
+    "crates/tick-multiclient",
+    "crates/tick-ipc",
+    "crates/tick-watchdog",
+    "crates/tick-crypto",
+    "apps/true-tick",
+    "apps/true-tick-cli",
+    "apps/launcher",
+    "apps/manifest-tool",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "UNLICENSED"
+publish = false
