@@ -529,6 +529,10 @@ fn wait_for_client(pipe: *mut c_void) -> bool {
             true
         } else {
             unsafe { CancelIoEx(pipe, &overlapped) };
+            // Block until the kernel acknowledges cancellation so the
+            // driver cannot signal the event after we close it.
+            let mut transferred: u32 = 0;
+            unsafe { GetOverlappedResult(pipe, &overlapped, &mut transferred, 1) };
             false
         }
     } else {
@@ -592,11 +596,19 @@ fn read_frame(pipe: *mut c_void) -> Result<IpcFrame, IpcError> {
         let wait = unsafe { WaitForSingleObject(event, PIPE_READ_DEADLINE_MS) };
         if wait == WAIT_TIMEOUT {
             unsafe { CancelIoEx(pipe, &overlapped) };
+            // Block until the kernel acknowledges cancellation so the
+            // driver cannot signal the event after we close it.
+            let mut transferred: u32 = 0;
+            unsafe { GetOverlappedResult(pipe, &overlapped, &mut transferred, 1) };
             unsafe { CloseHandle(event) };
             return Err(IpcError::PayloadTruncated);
         }
         if wait != WAIT_OBJECT_0 {
             unsafe { CancelIoEx(pipe, &overlapped) };
+            // Block until the kernel acknowledges cancellation so the
+            // driver cannot signal the event after we close it.
+            let mut transferred: u32 = 0;
+            unsafe { GetOverlappedResult(pipe, &overlapped, &mut transferred, 1) };
             unsafe { CloseHandle(event) };
             return Err(IpcError::PayloadTruncated);
         }
