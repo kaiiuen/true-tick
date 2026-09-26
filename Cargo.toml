@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+default-members = ["apps/true-tick"]
 members = [
     "crates/tick-core",
     "crates/tick-policy",
@@ -21,5 +22,5 @@ members = [
 [workspace.package]
 edition = "2021"
 version = "0.1.0"
-license = "UNLICENSED"
+license = "PolyForm-Noncommercial-1.0.0"
 publish = false
