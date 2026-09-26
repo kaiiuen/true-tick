@@ -1,0 +1,10 @@
+[package]
+name = "tick-diagnostics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tick-core = { path = "../tick-core" }
+sha2 = "0.10"
