@@ -49,11 +49,23 @@ pub fn utc_date_now() -> (u16, u16, u16) {
 
 pub fn log_csv_escape(cell: &str) -> String {
     let field = truncate_utf8(cell, MAX_FIELD_LENGTH);
-    if !field.contains([',', '"', '\n', '\r']) {
+    let trimmed = field.trim_start();
+    // CWE-1236: neutralize formula injection when the cell begins with a formula
+    // prefix so spreadsheet importers never execute attacker controlled cells.
+    let needs_formula_neutralization = trimmed.starts_with(['=', '@', '\t'])
+        || (trimmed.starts_with(['+', '-'])
+            && trimmed[1..]
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_digit()));
+    if !field.contains([',', '"', '\n', '\r']) && !needs_formula_neutralization {
         return field;
     }
-    let mut quoted = String::with_capacity(field.len() + 2);
+    let mut quoted = String::with_capacity(field.len() + 4);
     quoted.push('"');
+    if needs_formula_neutralization {
+        quoted.push('\'');
+    }
     for character in field.chars() {
         if character == '"' {
             quoted.push('"');
@@ -445,8 +457,8 @@ pub fn purge_expired_logs_at_startup(log_directory: &Path, diagnostics: &Diagnos
 mod tests {
     use super::{
         append_log_lines_sync, append_log_lines_sync_internal, daily_log_filename,
-        flush_diagnostic_events_to_disk_sync, free_bytes_available, hex_hash_string, utc_date_now,
-        LogWriteError, LOG_HEADER, MIN_FREE_BYTES_BEFORE_WRITE,
+        flush_diagnostic_events_to_disk_sync, free_bytes_available, hex_hash_string,
+        log_csv_escape, utc_date_now, LogWriteError, LOG_HEADER, MIN_FREE_BYTES_BEFORE_WRITE,
     };
 
     /// Builds a clean temporary directory inside the crate target directory so
@@ -464,6 +476,26 @@ mod tests {
     fn daily_log_filename_formats_utc_date() {
         assert_eq!(daily_log_filename(2026, 9, 16), "true-tick-2026-09-16.csv");
         assert_eq!(daily_log_filename(2031, 1, 5), "true-tick-2031-01-05.csv");
+    }
+
+    #[test]
+    fn log_csv_escape_neutralizes_formula_prefixes() {
+        // CWE-1236 cells that start with a formula trigger must be quoted and
+        // prefixed with a single quote so spreadsheet imports stay inert.
+        assert_eq!(log_csv_escape("=cmd|'calc'!A0"), "\"'=cmd|'calc'!A0\"");
+        assert_eq!(log_csv_escape("@SUM(1,2)"), "\"'@SUM(1,2)\"");
+        assert_eq!(log_csv_escape("+1234"), "\"'+1234\"");
+        assert_eq!(log_csv_escape("-1234"), "\"'-1234\"");
+        assert_eq!(log_csv_escape("\t=cmd"), "\"'\t=cmd\"");
+        // Leading whitespace does not hide a formula trigger.
+        assert_eq!(log_csv_escape("  =cmd"), "\"'  =cmd\"");
+        // Ordinary signed words and benign cells remain unescaped.
+        assert_eq!(log_csv_escape("-report"), "-report");
+        assert_eq!(log_csv_escape("+note"), "+note");
+        assert_eq!(log_csv_escape("plain"), "plain");
+        // Embedded commas still force quoting and inner quotes double up.
+        assert_eq!(log_csv_escape("a,b"), "\"a,b\"");
+        assert_eq!(log_csv_escape("say \"hi\""), "\"say \"\"hi\"\"\"");
     }
 
     #[test]
