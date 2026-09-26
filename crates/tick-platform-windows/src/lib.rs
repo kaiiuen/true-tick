@@ -422,9 +422,9 @@ impl TimerPlatform for WindowsTimerPlatform {
         #[cfg(windows)]
         {
             let _ = self.preflight(interval)?;
+            let desired = native_desired(interval)?;
             let mut current = 0u32;
-            let status =
-                unsafe { nt_set_timer_resolution(interval.value() as u32, true, &mut current) };
+            let status = unsafe { nt_set_timer_resolution(desired, true, &mut current) };
             self.log(
                 "native.NtSetTimerResolution.result",
                 format!(
@@ -465,9 +465,8 @@ impl TimerPlatform for WindowsTimerPlatform {
                     ),
                 );
                 let mut rollback_current = 0u32;
-                let rollback_status = unsafe {
-                    nt_set_timer_resolution(interval.value() as u32, false, &mut rollback_current)
-                };
+                let rollback_status =
+                    unsafe { nt_set_timer_resolution(desired, false, &mut rollback_current) };
                 self.requested = None;
                 self.log(
                     "native.NtSetTimerResolution.postcondition_rollback",
@@ -531,9 +530,9 @@ impl TimerPlatform for WindowsTimerPlatform {
                     ),
                 );
             }
+            let desired = native_desired(interval)?;
             let mut current = 0u32;
-            let status =
-                unsafe { nt_set_timer_resolution(interval.value() as u32, false, &mut current) };
+            let status = unsafe { nt_set_timer_resolution(desired, false, &mut current) };
             self.log(
                 "native.NtSetTimerResolution.release_result",
                 format!(
@@ -565,9 +564,9 @@ impl TimerPlatform for WindowsTimerPlatform {
         #[cfg(windows)]
         {
             let before_effective = query_current_resolution()?;
+            let desired = native_desired(interval)?;
             let mut current = 0u32;
-            let status =
-                unsafe { nt_set_timer_resolution(interval.value() as u32, false, &mut current) };
+            let status = unsafe { nt_set_timer_resolution(desired, false, &mut current) };
             self.log(
                 "native.NtSetTimerResolution.settle_probe",
                 format!(
@@ -736,6 +735,11 @@ extern "system" {
         set_resolution: NtBoolean,
         current_resolution: *mut u32,
     ) -> NtStatus;
+}
+
+#[cfg(windows)]
+fn native_desired(interval: Hns) -> Result<u32, TimerError> {
+    u32::try_from(interval.value()).map_err(|_| TimerError::InvalidInterval)
 }
 
 #[cfg(windows)]
