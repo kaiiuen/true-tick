@@ -21,6 +21,9 @@ default the directory containing this executable is used, which sits beside
 - `stop` release the timer
 - `schedule <start-in|stop-in|pause> <seconds>` arm a timed action
 - `cancel` cancel a pending scheduled action
+- `daemon` launch the headless background engine. Exits quietly when an
+  instance is already running, otherwise spawns `true-tick.exe` (or the
+  slot loader `Launcher.exe`) detached and waits for the session token
 - `logs [--tail N] [--date YYYY-MM-DD]` print the last N lines of the daily
   CSV log, defaults to N=20 and the current UTC date, reads the file
   directly so the tray does not need to be running

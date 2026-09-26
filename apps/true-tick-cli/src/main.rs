@@ -6,6 +6,10 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use tick_ipc::{
     encode_interval_payload, encode_schedule_payload, read_token_file, CommandVerb, IpcResponse,
@@ -26,6 +30,15 @@ const DEFAULT_LOG_TAIL: usize = 20;
 
 const LOG_FILE_PREFIX: &str = "true-tick-";
 const LOG_FILE_SUFFIX: &str = ".csv";
+
+/// Budget for the ipc-token file to appear after the engine is spawned.
+const DAEMON_TOKEN_TIMEOUT_MS: u64 = 10_000;
+const DAEMON_TOKEN_POLL_MS: u64 = 50;
+
+/// Win32 process creation flags that detach the spawned engine from the
+/// console and the job of this short lived launcher.
+#[cfg(windows)]
+const DAEMON_DETACHED_FLAGS: u32 = 0x0000_0008 | 0x0000_0200;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -49,6 +62,8 @@ enum CliRequest {
         seconds: u32,
     },
     Cancel,
+    /// Launch the headless background engine when no instance is running.
+    Daemon,
     Logs {
         tail: usize,
         date: Option<String>,
@@ -111,6 +126,7 @@ fn run(args: &[String], executable: &Path) -> u8 {
             EXIT_OK
         }
         CliRequest::Logs { tail, date } => run_logs(&root, tail, date.as_deref()),
+        CliRequest::Daemon => run_daemon(&root, executable),
         CliRequest::Status { json } => match exchange(&root, CommandVerb::QueryStatus, &[]) {
             Ok(IpcResponse::Status(text)) => {
                 if json {
@@ -229,6 +245,7 @@ fn parse_args(args: &[String]) -> Result<CliRequest, CliParseError> {
         }
         "stop" => expect_no_args(rest, CliRequest::Stop),
         "cancel" => expect_no_args(rest, CliRequest::Cancel),
+        "daemon" => expect_no_args(rest, CliRequest::Daemon),
         "schedule" => {
             let action = rest.first().ok_or(CliParseError::MissingArgument(
                 "schedule <start-in|stop-in|pause> <seconds>",
@@ -376,6 +393,95 @@ fn report_error(error: &RunError) -> u8 {
     exit_code(error)
 }
 
+/// Ordered spawn candidates for the headless engine: a sibling true-tick.exe
+/// first, then each slot under the root, then Launcher.exe beside the cli or
+/// at the root so both flat and slot layouts are covered.
+fn daemon_candidates(root: &Path, executable: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(directory) = executable.parent() {
+        candidates.push(directory.join("true-tick.exe"));
+    }
+    candidates.push(root.join("true-tick.exe"));
+    for slot in ["A", "B"] {
+        candidates.push(root.join("Slots").join(slot).join("true-tick.exe"));
+    }
+    let mut launcher_directories = Vec::new();
+    if let Some(directory) = executable.parent() {
+        launcher_directories.push(directory);
+    }
+    if !launcher_directories.contains(&root) {
+        launcher_directories.push(root);
+    }
+    candidates.extend(
+        launcher_directories
+            .iter()
+            .map(|directory| directory.join("Launcher.exe")),
+    );
+    candidates
+}
+
+fn resolve_daemon_target(root: &Path, executable: &Path) -> Result<PathBuf, RunError> {
+    daemon_candidates(root, executable)
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            RunError::Failure(format!(
+                "no true-tick engine found beside {} or under {}",
+                executable.display(),
+                root.display()
+            ))
+        })
+}
+
+/// Ensures a background engine is running. A live pipe means an instance is
+/// already up, otherwise the resolved engine is spawned detached and the
+/// ipc-token file is awaited before success is reported.
+fn run_daemon(root: &Path, executable: &Path) -> u8 {
+    if tick_ipc::connect(PIPE_NAME, PIPE_BUSY_RETRY_MS).is_ok() {
+        println!("daemon already running");
+        return EXIT_OK;
+    }
+    let target = match resolve_daemon_target(root, executable) {
+        Ok(target) => target,
+        Err(error) => return report_error(&error),
+    };
+    // A token file left behind by a crashed engine would satisfy the ready
+    // check below before the new server publishes its own token, and a
+    // follow-up status exchange with the stale credential gets rejected, so
+    // remove it before spawning.
+    let token_file = token_path(root);
+    let _ = std::fs::remove_file(&token_file);
+    let mut command = std::process::Command::new(&target);
+    // Null every stdio handle so the detached engine never inherits and pins
+    // open this caller's console or pipe handles after spawn returns.
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(DAEMON_DETACHED_FLAGS);
+    if let Err(error) = command.spawn() {
+        return report_error(&RunError::Failure(format!(
+            "cannot spawn {}: {error}",
+            target.display()
+        )));
+    }
+    println!("spawned true-tick daemon");
+    let deadline = Instant::now() + Duration::from_millis(DAEMON_TOKEN_TIMEOUT_MS);
+    while Instant::now() < deadline {
+        if token_file.is_file() && tick_ipc::connect(PIPE_NAME, PIPE_BUSY_RETRY_MS).is_ok() {
+            return EXIT_OK;
+        }
+        std::thread::sleep(Duration::from_millis(DAEMON_TOKEN_POLL_MS));
+    }
+    report_error(&RunError::Unreachable(format!(
+        "spawned engine did not publish {} and serve {} within {} ms",
+        token_file.display(),
+        PIPE_NAME,
+        DAEMON_TOKEN_TIMEOUT_MS
+    )))
+}
+
 /// Reads the daily CSV log straight from disk. This path deliberately avoids
 /// the pipe so logs stay reachable while the tray is down.
 fn run_logs(root: &Path, tail: usize, date: Option<&str>) -> u8 {
@@ -466,6 +572,8 @@ fn usage() -> String {
      \x20   schedule <start-in|stop-in|pause> <seconds>\n\
      \x20                              Arm a timed start, stop, or pause action.\n\
      \x20   cancel                     Cancel a pending scheduled action.\n\
+     \x20   daemon                     Launch the headless background engine.\n\
+     \x20                              Exits quietly when an instance is already up.\n\
      \x20   logs [--tail N] [--date YYYY-MM-DD]\n\
      \x20                              Print the last N lines of the daily CSV log.\n\
      \x20                              Defaults to N=20 and the current UTC date.\n\
@@ -594,6 +702,58 @@ mod tests {
         assert!(matches!(
             parse_args(&args(&["schedule", "start-in", "abc"])),
             Err(CliParseError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn daemon_parses_and_rejects_extra_arguments() {
+        assert_eq!(parse_args(&args(&["daemon"])).unwrap(), CliRequest::Daemon);
+        assert!(matches!(
+            parse_args(&args(&["daemon", "--json"])),
+            Err(CliParseError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn daemon_candidates_cover_sibling_slots_and_launcher() {
+        let root = PathBuf::from(r"C:\package\Slots\A");
+        let executable = PathBuf::from(r"C:\package\Slots\A\true-tick-cli.exe");
+        let candidates = daemon_candidates(&root, &executable);
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from(r"C:\package\Slots\A\true-tick.exe"),
+                PathBuf::from(r"C:\package\Slots\A\true-tick.exe"),
+                PathBuf::from(r"C:\package\Slots\A\Slots\A\true-tick.exe"),
+                PathBuf::from(r"C:\package\Slots\A\Slots\B\true-tick.exe"),
+                PathBuf::from(r"C:\package\Slots\A\Launcher.exe"),
+            ]
+        );
+    }
+
+    #[test]
+    fn daemon_target_prefers_sibling_engine() {
+        let root =
+            std::env::temp_dir().join(format!("true-tick-cli-test-daemon-{}", std::process::id()));
+        let slot = root.join("Slots").join("A");
+        std::fs::create_dir_all(&slot).unwrap();
+        let sibling = slot.join("true-tick.exe");
+        std::fs::write(&sibling, b"fixture").unwrap();
+        let executable = slot.join("true-tick-cli.exe");
+        assert_eq!(resolve_daemon_target(&slot, &executable).unwrap(), sibling);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn daemon_target_errors_when_nothing_is_installed() {
+        let root = std::env::temp_dir().join(format!(
+            "true-tick-cli-test-nodaemon-{}",
+            std::process::id()
+        ));
+        let executable = root.join("true-tick-cli.exe");
+        assert!(matches!(
+            resolve_daemon_target(&root, &executable),
+            Err(RunError::Failure(_))
         ));
     }
 
