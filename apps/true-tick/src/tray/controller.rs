@@ -1075,6 +1075,13 @@ pub fn run() {
             app.record("policy.startup_automatic", "enabled=true");
         }
         apply_power_reconciliation(app);
+        // Commit startup diagnostics now so the daily CSV log exists before
+        // the first shutdown flush and CLI tools can read it on boot.
+        crate::logging::flush_diagnostic_events_to_disk_sync(
+            &app.diagnostics,
+            &app.last_persisted_event_sequence,
+            &app.log_directory,
+        );
         app.finish_operation(DiagnosticOutcome::Completed);
         // Kick once so the monitor starts from a fresh timestamp after the
         // startup settle probe, which sleeps on this UI thread. The recurring
@@ -1782,6 +1789,13 @@ fn drain_ipc_command_queue(app: &mut App) {
         if request.responder.send(response).is_err() {
             app.record("ipc.command.reply_dropped", "reason=responder_disconnected");
         }
+        // Mutating handlers record events on this thread, so flush them to
+        // the daily CSV before the next queued command runs.
+        crate::logging::flush_diagnostic_events_to_disk_sync(
+            &app.diagnostics,
+            &app.last_persisted_event_sequence,
+            &app.log_directory,
+        );
     }
 }
 
