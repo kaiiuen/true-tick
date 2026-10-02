@@ -1,0 +1,18 @@
+[package]
+name = "tick-multiclient"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tick-multiclient"
+path = "src/main.rs"
+
+[dependencies]
+tick-core = { path = "../tick-core" }
+tick-platform-windows = { path = "../tick-platform-windows" }
+tick-ownership = { path = "../tick-ownership" }
