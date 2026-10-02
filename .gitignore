@@ -1,0 +1,38 @@
+# Build output
+/target/
+/artifacts/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+test_output.txt
+*.toml.tmp
+
+# Windows reserved name, a stray file here is never project content
+nul
+
+# Crash dumps and local environment files
+*.dmp
+.env
+.env.*
+
+# Local test and scratch directories
+/thread_extracts/
+/local-tests/
+/tmp/
+
+# Python cache directories used by local tooling
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+
+# Editor directories
+.vscode/
+.idea/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
