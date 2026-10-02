@@ -1,0 +1,21 @@
+[package]
+name = "true-tick"
+default-run = "true-tick"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tick-core = { path = "../../crates/tick-core" }
+tick-diagnostics = { path = "../../crates/tick-diagnostics" }
+tick-ipc = { path = "../../crates/tick-ipc" }
+tick-policy = { path = "../../crates/tick-policy" }
+tick-observation-windows = { path = "../../crates/tick-observation-windows" }
+tick-ownership = { path = "../../crates/tick-ownership" }
+tick-platform-windows = { path = "../../crates/tick-platform-windows" }
+tick-startup-windows = { path = "../../crates/tick-startup-windows" }
+tick-watchdog = { path = "../../crates/tick-watchdog" }
+sha2 = "0.10"
+
+[dev-dependencies]
