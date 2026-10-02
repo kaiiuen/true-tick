@@ -1,0 +1,17 @@
+[package]
+name = "true-tick-launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "Launcher"
+path = "src/main.rs"
+
+[dependencies]
+sha2 = "0.10"
+tick-crypto = { path = "../../crates/tick-crypto" }
+
+[dev-dependencies]
+ed25519-dalek = "2"
