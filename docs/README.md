@@ -14,7 +14,7 @@ Each guide covers a focused area of the project and assumes you are reading it a
 
 ## Architecture diagrams
 
-The visual layer holds one Mermaid diagram per source file, so each diagram maps to a single source module and mirrors the repository layout. This convention makes it easy to jump from a concern in code to its visual representation and back. The [diagrams/README.md](diagrams/README.md) index lists all 38 diagrams and points each one at its source file.
+The visual layer holds one Mermaid diagram per source file, so each diagram maps to a single source module and mirrors the repository layout. This convention makes it easy to jump from a concern in code to its visual representation and back. The [diagrams/README.md](diagrams/README.md) index lists all 53 diagrams and points each one at its source file.
 
 ## Conventions
 

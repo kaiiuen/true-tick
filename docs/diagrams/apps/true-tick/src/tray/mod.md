@@ -1,91 +1,47 @@
-# Tray Module Constants, App State, Schedule and Power Debounce
+# Tray Module Root Wiring
 
 Source path: `true-tick/apps/true-tick/src/tray/mod.rs`
 
 ```mermaid
 flowchart TD
-    A["tray/mod.rs top level"] --> B["App struct responsibilities"]
-    A --> C["timer id constants"]
-    A --> D["menu command ids"]
-    A --> E["IpcCommandQueue with bound 64"]
-    A --> F["status publication"]
-    A --> G["schedule coordinator"]
-    A --> H["power debounce"]
-    A --> I["test_app helper"]
+    A["tray/mod.rs, thin module root"] --> B["declare 15 submodules plus cfged test_harness"]
+    A --> C["re-export submodule surface"]
+    A --> D["inline list_view_native Win32 shims"]
+    A --> E["menu thin wrappers"]
+    A --> F["cfged tests module"]
 
-    C --> C1["HANDOFF 0x5449"]
-    C --> C2["DURATION_TIMER_ID_BASE 0x6000"]
-    C --> C3["DURATION_TIMER_ID_MASK 0x07FF"]
-    C --> C4["bounded window 0x6000 to 0x67FF"]
-    C --> C5["SURFACE_RECOVERY 0x6A00"]
-    C --> C6["POPUP_REFRESH 0x7000"]
-    C --> C7["SCHEDULE_DISPLAY 0x7100 interval 1000 ms"]
-    C --> C8["POWER_DEBOUNCE 0x7200 interval 2000 ms"]
-    C --> C9["HEARTBEAT 0x7300"]
-    C3 --> C4
+    B --> B1["commands, controller, diagnostics_map, icon, ipc, ipc_queue"]
+    B --> B2["menu, native, power, quit, reset, schedule, status, surface, tier"]
+    B --> B3["test_harness only under cfg(test)"]
 
-    D --> D1["ID_START 1001"]
-    D --> D2["ID_STOP 1002"]
-    D --> D3["ID_QUIT 1004"]
-    D --> D4["ID_STARTUP_ON 1005 and OFF 1006"]
-    D --> D5["ID_AUTOMATIC_ON 1007 and OFF 1008"]
-    D --> D6["ID_AUTO_RESUME_ON 1009 and OFF 1010"]
-    D --> D7["ID_BATTERY_LOCKOUT from tray_surface"]
-    D --> D8["ID_RESET 1060 and ID_SETTINGS_RESET 1061"]
+    C --> C1["pub use controller::run"]
+    C --> C2["pub(crate) use controller::App"]
+    C --> C3["icon re-exports DeleteObject, GetDpiForWindow, GetLastError, icon star"]
+    C --> C4["glob re-exports commands, diagnostics_map, ipc_queue"]
+    C --> C5["glob re-exports native, power, quit, reset, schedule"]
+    C --> C6["glob re-exports status, surface, tier"]
+    C --> C7["re-export tick_diagnostics DiagnosticOutcome and DiagnosticSource"]
+    C --> C8["re-export tick_policy PowerState"]
 
-    B --> B1["controller TimerController"]
-    B --> B2["observation WindowsObservation"]
-    B --> B3["config Config"]
-    B --> B4["tray_status TrayStatus"]
-    B --> B5["pause DurationCoordinator"]
-    B --> B6["presets_manager PresetsManager"]
-    B --> B7["power_debounce_active and target state"]
-    B --> B8["duration_timer_id and generation"]
-    B --> B9["schedule_display_timer_active"]
-    B --> B10["ipc_schedule_id monotonic"]
-    B --> B11["heartbeat and ownership_flag"]
-    B --> B12["last_publication PublicationKey"]
+    D --> D1["LVS and LVM message and style constants"]
+    D --> D2["LVN notification codes, VK modifiers, WM_NOTIFY"]
+    D --> D3["repr C ListViewColumn, ListViewItem"]
+    D --> D4["repr C NotifyHeader, ListViewNotification, ListViewKeyDownNotification"]
 
-    G --> G1["manual_start and manual_stop"]
-    G --> G2["schedule_duration_action"]
-    G --> G3["schedule_preset_action"]
-    G --> G4["cancel_scheduled_action"]
-    G --> G5["duration_timer_id from generation"]
-    G --> G6["arm_duration_timer"]
-    G --> G7["handle_duration_timer Early or Expired"]
-    G --> G8["execute_scheduled_action"]
-    G --> G9["begin_schedule_display_timer"]
-    G --> G10["handle_schedule_display_timer"]
-    G2 --> G6
-    G7 -- "Early" --> G6
-    G7 -- "Expired" --> G8
+    E --> E1["show_menu delegates to menu::show_menu"]
+    E --> E2["refresh_popup_menu delegates to menu::refresh_popup_menu"]
+    E --> E3["handle_menu_command delegates to menu::handle_menu_command"]
 
-    H --> H1["handle_power_broadcast_event"]
-    H --> H2["handle_power_debounce_timer"]
-    H --> H3["kill_power_debounce_timer"]
-    H1 --> H2
-
-    F --> F1["published_status degrades Running Stopped Paused"]
-    F --> F2["App::publish builds PublicationKey"]
-    F --> F3["refresh_operating_tier and emergency publish"]
-
-    I --> I1["TimerController from platform diagnostics"]
-    I --> I2["DurationCoordinator and PresetsManager new"]
-    I --> I3["timer state None or false"]
-    I --> I4["ipc_schedule_id 0 and ipc_server None"]
+    F --> F1["uses super star glob imports, exercises re-exported API only"]
 ```
 
 ## Notes
 
-- Duration timer ids live in the window `0x6000` through `0x67FF`, derived as `0x6000 + (generation AND 0x07FF)` so they wrap after 2048 generations and stay bounded.
-- `DURATION_TIMER_ID_MASK` is `0x07FF` and the test `duration_timer_id_stays_within_bounded_window` proves the id wraps and never leaves the window.
-- The bounded duration timer window collides with nothing since handoff `0x5449`, surface recovery `0x6A00`, popup refresh `0x7000`, schedule display `0x7100`, power debounce `0x7200`, and heartbeat `0x7300` are disjoint.
-- `duration_timer_id` is a free function that encodes the coordinator generation into the Win32 timer id so stale timers can be rejected by id.
-- `arm_duration_timer` stores both the timer id and generation, and `handle_duration_timer` ignores any fire whose id does not match `duration_timer_id` as stale.
-- The schedule coordinator lives in `app.pause` as a `DurationCoordinator` and drives schedule, cancel, display, and deadline execution.
-- Power debounce rearms its timer on an `Unknown` power state to wait for a stable reading and suppresses the timer when battery saver overrides immediately.
-- `ipc_schedule_id` is a monotonic `u32` on the App struct that is minted only after a schedule arm succeeds, using a saturating add then a floor of 1 so the first id is never 0.
-- Cancel schedule compares the requested 4 byte id against `ipc_schedule_id` and returns `ScheduleIdMismatch` when they differ, while an empty payload cancels without a check.
-- `published_status` only degrades `Running`, `Stopped`, and `Paused` to `Degraded` when responsiveness is degraded, never masking a real block or error.
-- `App::publish` builds a `PublicationKey` and skips redundant tray and log writes when the key is unchanged from `last_publication`.
-- `test_app` builds an App with default config, fresh coordinator, null timer state, and no IPC server so unit tests can exercise logic without a window.
+- `mod.rs` is a thin module root. It declares submodules, re-exports their public surface, and holds only the inline `list_view_native` shims plus three menu thin wrappers. Schedule coordination, power debounce, and publication logic now live in their own submodules (`schedule.rs`, `power.rs`, `status.rs`, `controller.rs`).
+- Declaration order: `commands (crate)`, `controller (public)`, `diagnostics_map (crate)`, `icon (public)`, `ipc (public)`, `ipc_queue (crate)`, `menu (public)`, `native (crate)`, `power (crate)`, `quit (crate)`, `reset (crate)`, `schedule (crate)`, `status (crate)`, `surface (crate)`, `tier (crate)`, then `test_harness` guarded by `#[cfg(test)]` and marked `pub(crate)`.
+- Re-export surface: `pub use controller::run` is the only fully public function path. `App` is re-exported `pub(crate)`. `icon` re-exports `DeleteObject`, `GetDpiForWindow`, `GetLastError`, and a glob `icon::*`. Every other submodule is pulled in with `pub(crate) use <module>::*`.
+- The timer id constants (`HANDOFF_TIMER_ID 0x5449`, `DURATION_TIMER_ID_BASE 0x6000`, `DURATION_TIMER_ID_MASK 0x07FF`, `SURFACE_RECOVERY_TIMER_ID 0x6A00`, `POPUP_REFRESH_TIMER_ID 0x7000`, `SCHEDULE_DISPLAY_TIMER_ID 0x7100`, `POWER_DEBOUNCE_TIMER_ID 0x7200`, `HEARTBEAT_TIMER_ID 0x7300`) are declared in `commands.rs` and become visible at this path through `pub(crate) use commands::*`. The bounded duration window explanation (`0x6000` through `0x67FF` derived as `0x6000 + (generation and 0x07FF)`) belongs to `schedule.rs` and `commands.rs`, not to this wiring root.
+- The menu command ids (`ID_START 1001`, `ID_STOP 1002`, `ID_QUIT 1004`, `ID_STARTUP_ON 1005`, `ID_STARTUP_OFF 1006`, and the remaining startup, automatic, auto resume, battery lockout, and reset ids) also originate in `commands.rs` and are re-exported here.
+- The inline `list_view_native` module mirrors the Win32 listview contract, importing `c_void` and `Point` from `super::native`, so the diagnostic UI can build column and item structs without an external crate.
+- The three menu wrappers are annotated as thin delegating wrappers, forwarding to `menu::show_menu`, `menu::refresh_popup_menu`, and `menu::handle_menu_command`.
+- The `tests` module glob imports `super::*`, so it only touches the re-exported surface. `test_app` and `stub_tray_icon` come from `super::test_harness::harness`.
